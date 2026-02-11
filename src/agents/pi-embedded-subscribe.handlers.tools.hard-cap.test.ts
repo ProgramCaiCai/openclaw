@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { onAgentEvent } from "../infra/agent-events.js";
+import { onAgentEvent, type AgentEventPayload } from "../infra/agent-events.js";
 import {
   handleToolExecutionEnd,
   handleToolExecutionUpdate,
@@ -27,64 +27,101 @@ const makeCtx = () =>
       debug: () => {},
       warn: () => {},
     },
-  }) as any;
+  }) satisfies Record<string, unknown>;
+
+function findToolEvent(events: AgentEventPayload[], phase: string, toolCallId: string) {
+  return events.find((evt) => {
+    if (evt.stream !== "tool") {
+      return false;
+    }
+    const evtPhase = typeof evt.data?.phase === "string" ? evt.data.phase : null;
+    const evtToolCallId = typeof evt.data?.toolCallId === "string" ? evt.data.toolCallId : null;
+    return evtPhase === phase && evtToolCallId === toolCallId;
+  });
+}
+
+function extractFirstTextBlock(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const content = (payload as Record<string, unknown>).content;
+  if (!Array.isArray(content)) {
+    return null;
+  }
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const rec = block as Record<string, unknown>;
+    if (rec.type === "text" && typeof rec.text === "string") {
+      return rec.text;
+    }
+  }
+  return null;
+}
 
 describe("tool output hard caps", () => {
   it("caps partialResult text by line count before emitting agent events", () => {
-    const events: any[] = [];
+    const events: AgentEventPayload[] = [];
     const stop = onAgentEvent((evt) => events.push(evt));
 
     const ctx = makeCtx();
-    handleToolExecutionUpdate(ctx, {
-      toolName: "exec",
-      toolCallId: "call_1",
-      partialResult: {
-        content: [{ type: "text", text: "\n".repeat(3000) }],
-      },
-    } as any);
+    handleToolExecutionUpdate(
+      ctx as unknown as Parameters<typeof handleToolExecutionUpdate>[0],
+      {
+        toolName: "exec",
+        toolCallId: "call_1",
+        partialResult: {
+          content: [{ type: "text", text: "\n".repeat(3000) }],
+        },
+      } as unknown as Parameters<typeof handleToolExecutionUpdate>[1],
+    );
 
     stop();
 
-    const updateEvt = events.find(
-      (e) => e.stream === "tool" && e.data?.phase === "update" && e.data?.toolCallId === "call_1",
-    );
+    const updateEvt = findToolEvent(events, "update", "call_1");
     expect(updateEvt).toBeTruthy();
 
-    const capped = updateEvt.data.partialResult as any;
-    const text = capped?.content?.[0]?.text as string;
+    const partial = updateEvt?.data.partialResult as unknown;
+    const text = extractFirstTextBlock(partial);
     expect(typeof text).toBe("string");
-    expect(text.split(/\r?\n/).length).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_MAX_LINES);
+    expect((text ?? "").split(/\r?\n/).length).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_MAX_LINES);
     expect(text).toContain("truncated");
   });
 
   it("caps oversized tool result objects before emitting agent events", () => {
-    const events: any[] = [];
+    const events: AgentEventPayload[] = [];
     const stop = onAgentEvent((evt) => events.push(evt));
 
     const ctx = makeCtx();
-    ctx.state.toolMetaById.set("call_2", "meta");
+    (ctx.state as { toolMetaById: Map<string, string | undefined> }).toolMetaById.set(
+      "call_2",
+      "meta",
+    );
 
-    handleToolExecutionEnd(ctx, {
-      toolName: "exec",
-      toolCallId: "call_2",
-      isError: true,
-      result: {
-        content: [{ type: "text", text: "ok" }],
-        details: {
-          aggregated: "x".repeat(200_000),
-          stderr: "y".repeat(200_000),
+    handleToolExecutionEnd(
+      ctx as unknown as Parameters<typeof handleToolExecutionEnd>[0],
+      {
+        toolName: "exec",
+        toolCallId: "call_2",
+        isError: true,
+        result: {
+          content: [{ type: "text", text: "ok" }],
+          details: {
+            aggregated: "x".repeat(200_000),
+            stderr: "y".repeat(200_000),
+          },
         },
-      },
-    } as any);
+      } as unknown as Parameters<typeof handleToolExecutionEnd>[1],
+    );
 
     stop();
 
-    const resultEvt = events.find(
-      (e) => e.stream === "tool" && e.data?.phase === "result" && e.data?.toolCallId === "call_2",
-    );
+    const resultEvt = findToolEvent(events, "result", "call_2");
     expect(resultEvt).toBeTruthy();
 
-    const payloadBytes = Buffer.byteLength(JSON.stringify(resultEvt.data.result), "utf8");
+    const result = resultEvt?.data.result;
+    const payloadBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
     expect(payloadBytes).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_MAX_BYTES);
   });
 });
