@@ -501,7 +501,46 @@ export async function runEmbeddedPiAgent(
                 `compactionAttempts=${overflowCompactionAttempts} error=${errorText.slice(0, 200)}`,
             );
             const isCompactionFailure = isCompactionFailureError(errorText);
-            // Attempt auto-compaction on context overflow (not compaction_failure)
+            // Step 1: Try truncating oversized tool results first (cheap, targeted).
+            // This handles the common case where a single bloated tool result
+            // is the root cause of the overflow.
+            if (!toolResultTruncationAttempted) {
+              const contextWindowTokens = ctxInfo.tokens;
+              const hasOversized = attempt.messagesSnapshot
+                ? sessionLikelyHasOversizedToolResults({
+                    messages: attempt.messagesSnapshot,
+                    contextWindowTokens,
+                    contextPruning: params.config?.agents?.defaults?.contextPruning,
+                  })
+                : false;
+
+              if (hasOversized) {
+                toolResultTruncationAttempted = true;
+                log.warn(
+                  `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
+                    `(contextWindow=${contextWindowTokens} tokens)`,
+                );
+                const truncResult = await truncateOversizedToolResultsInSession({
+                  sessionFile: params.sessionFile,
+                  contextWindowTokens,
+                  contextPruning: params.config?.agents?.defaults?.contextPruning,
+                  sessionId: params.sessionId,
+                  sessionKey: params.sessionKey,
+                });
+                if (truncResult.truncated) {
+                  log.info(
+                    `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
+                  );
+                  // Session is now smaller; allow compaction retries again.
+                  overflowCompactionAttempts = 0;
+                  continue;
+                }
+                log.warn(
+                  `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
+                );
+              }
+            }
+            // Step 2: Try auto-compaction (expensive, but handles general overflow).
             if (
               !isCompactionFailure &&
               overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
@@ -539,45 +578,6 @@ export async function runEmbeddedPiAgent(
               log.warn(
                 `auto-compaction failed for ${provider}/${modelId}: ${compactResult.reason ?? "nothing to compact"}`,
               );
-            }
-            // Fallback: try truncating oversized tool results in the session.
-            // This handles the case where a single tool result exceeds the
-            // context window and compaction cannot reduce it further.
-            if (!toolResultTruncationAttempted) {
-              const contextWindowTokens = ctxInfo.tokens;
-              const hasOversized = attempt.messagesSnapshot
-                ? sessionLikelyHasOversizedToolResults({
-                    messages: attempt.messagesSnapshot,
-                    contextWindowTokens,
-                    contextPruning: params.config?.agents?.defaults?.contextPruning,
-                  })
-                : false;
-
-              if (hasOversized) {
-                toolResultTruncationAttempted = true;
-                log.warn(
-                  `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
-                    `(contextWindow=${contextWindowTokens} tokens)`,
-                );
-                const truncResult = await truncateOversizedToolResultsInSession({
-                  sessionFile: params.sessionFile,
-                  contextWindowTokens,
-                  contextPruning: params.config?.agents?.defaults?.contextPruning,
-                  sessionId: params.sessionId,
-                  sessionKey: params.sessionKey,
-                });
-                if (truncResult.truncated) {
-                  log.info(
-                    `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
-                  );
-                  // Session is now smaller; allow compaction retries again.
-                  overflowCompactionAttempts = 0;
-                  continue;
-                }
-                log.warn(
-                  `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
-                );
-              }
             }
             const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
             return {

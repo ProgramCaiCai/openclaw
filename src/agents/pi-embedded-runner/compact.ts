@@ -528,16 +528,18 @@ export async function compactEmbeddedPiSessionDirect(
           session.agent.replaceMessages(limited);
         }
         // Snapshot messages before compact for apples-to-apples comparison
+        const messagesBefore = [...session.messages];
         let heuristicBefore = 0;
-        for (const msg of session.messages) {
+        for (const msg of messagesBefore) {
           heuristicBefore += estimateTokens(msg);
         }
 
         const result = await session.compact(params.customInstructions);
 
         // Pure heuristic for both before/after so reduction % is meaningful
+        const messagesAfter = [...session.messages];
         let heuristicAfter = 0;
-        for (const msg of session.messages) {
+        for (const msg of messagesAfter) {
           heuristicAfter += estimateTokens(msg);
         }
         const tokensAfter = heuristicAfter;

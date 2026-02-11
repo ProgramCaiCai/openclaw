@@ -63,16 +63,18 @@ export async function writeToolOutputArtifact(params: {
   const ext = path.basename(rawExt).replace(/[^a-zA-Z0-9_-]/g, "") || "log";
   const fileName = `${toolDir}-${Date.now()}-${fileId}.${ext}`;
 
+  const errors: string[] = [];
   for (const dir of candidates) {
     try {
       await fs.mkdir(dir, { recursive: true });
       const filePath = path.join(dir, fileName);
       await fs.writeFile(filePath, params.output ?? "", "utf-8");
       return filePath;
-    } catch {
-      // Try next location.
+    } catch (err) {
+      errors.push(`${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
+  console.warn(`[tool-output-artifacts] Failed to write artifact: ${errors.join("; ")}`);
   return null;
 }

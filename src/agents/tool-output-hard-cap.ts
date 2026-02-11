@@ -96,15 +96,17 @@ export function hardTruncateText(
   // When appending `\n` + suffix, the total line count becomes:
   //   lines(text + "\n" + suffix) == lines(text) + lines(suffix)
   // so we reserve lines(suffix) (not lines("\n" + suffix)).
-  const suffixBytes = Buffer.byteLength(`\n${suffix}`, "utf8");
-  const suffixLines = countLines(suffix);
+  const hasSuffix = suffix.length > 0;
+  const suffixWithSep = hasSuffix ? `\n${suffix}` : "";
+  const suffixBytes = Buffer.byteLength(suffixWithSep, "utf8");
+  const suffixLines = hasSuffix ? countLines(suffix) : 0;
   const availableBytes = Math.max(0, maxBytes - suffixBytes);
   const availableLines = Math.max(0, maxLines - suffixLines);
 
   let trimmed = sliceToMaxLines(text, availableLines);
   trimmed = sliceToMaxUtf8Bytes(trimmed, availableBytes);
 
-  const suffixText = trimmed ? `\n${suffix}` : suffix;
+  const suffixText = trimmed && hasSuffix ? `\n${suffix}` : suffix;
   return { text: `${trimmed}${suffixText}`, truncated: true };
 }
 
@@ -138,7 +140,7 @@ export function hardCapToolOutput(value: unknown, opts?: { maxBytes?: number; ma
   const maxBytes = opts?.maxBytes ?? TOOL_OUTPUT_HARD_MAX_BYTES;
   const maxLines = opts?.maxLines ?? TOOL_OUTPUT_HARD_MAX_LINES;
 
-  const seen = new WeakSet<object>();
+  const seen = new WeakMap<object, unknown>();
   const walk = (input: unknown, depth: number): unknown => {
     if (typeof input === "string") {
       return hardTruncateText(input, { maxBytes, maxLines }).text;
@@ -153,25 +155,33 @@ export function hardCapToolOutput(value: unknown, opts?: { maxBytes?: number; ma
     }
 
     if (seen.has(input as object)) {
-      return "[Circular]";
+      return seen.get(input as object);
     }
-    seen.add(input as object);
+    // Use a placeholder to break cycles before recursing
+    seen.set(input as object, "[Circular]");
 
     if (Array.isArray(input)) {
       if (depth <= 0) {
-        return `[Array(${input.length})]`;
+        const result = `[Array(${input.length})]`;
+        seen.set(input as object, result);
+        return result;
       }
-      return input.map((v) => walk(v, depth - 1));
+      const result = input.map((v) => walk(v, depth - 1));
+      seen.set(input as object, result);
+      return result;
     }
 
     const record = input as Record<string, unknown>;
     if (depth <= 0) {
-      return "[Object]";
+      const result = "[Object]";
+      seen.set(input as object, result);
+      return result;
     }
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(record)) {
       out[k] = walk(v, depth - 1);
     }
+    seen.set(input as object, out);
     return out;
   };
 
