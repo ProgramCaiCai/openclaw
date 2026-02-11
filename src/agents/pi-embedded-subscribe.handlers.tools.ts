@@ -11,6 +11,7 @@ import {
   sanitizeToolResult,
 } from "./pi-embedded-subscribe.tools.js";
 import { inferToolMetaFromArgs } from "./pi-embedded-utils.js";
+import { hardCapToolOutput } from "./tool-output-hard-cap.js";
 import { normalizeToolName } from "./tool-policy.js";
 
 function extendExecMeta(toolName: string, args: unknown, meta?: string): string | undefined {
@@ -125,6 +126,7 @@ export function handleToolExecutionUpdate(
   const toolCallId = String(evt.toolCallId);
   const partial = evt.partialResult;
   const sanitized = sanitizeToolResult(partial);
+  const capped = hardCapToolOutput(sanitized);
   emitAgentEvent({
     runId: ctx.params.runId,
     stream: "tool",
@@ -132,7 +134,7 @@ export function handleToolExecutionUpdate(
       phase: "update",
       name: toolName,
       toolCallId,
-      partialResult: sanitized,
+      partialResult: capped,
     },
   });
   void ctx.params.onAgentEvent?.({
@@ -160,6 +162,7 @@ export function handleToolExecutionEnd(
   const result = evt.result;
   const isToolError = isError || isToolResultError(result);
   const sanitizedResult = sanitizeToolResult(result);
+  const cappedResult = hardCapToolOutput(sanitizedResult);
   const meta = ctx.state.toolMetaById.get(toolCallId);
   ctx.state.toolMetas.push({ toolName, meta });
   ctx.state.toolMetaById.delete(toolCallId);
@@ -202,7 +205,7 @@ export function handleToolExecutionEnd(
       toolCallId,
       meta,
       isError: isToolError,
-      result: sanitizedResult,
+      result: cappedResult,
     },
   });
   void ctx.params.onAgentEvent?.({

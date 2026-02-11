@@ -1,6 +1,11 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { TextContent } from "@mariozechner/pi-ai";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
+import {
+  hardTruncateText,
+  TOOL_OUTPUT_HARD_MAX_BYTES,
+  TOOL_OUTPUT_HARD_MAX_LINES,
+} from "../tool-output-hard-cap.js";
 import { log } from "./logger.js";
 
 /**
@@ -29,25 +34,35 @@ const MIN_KEEP_CHARS = 2_000;
  * Suffix appended to truncated tool results.
  */
 const TRUNCATION_SUFFIX =
-  "\n\n⚠️ [Content truncated — original was too large for the model's context window. " +
+  "⚠️ [Content truncated - original was too large for the model's context window. " +
   "The content above is a partial view. If you need more, request specific sections or use " +
   "offset/limit parameters to read smaller chunks.]";
 
 /**
  * Truncate a single text string to fit within maxChars, preserving the beginning.
+ * Always enforces the global hard cap (bytes + lines) as a final safety net.
  */
 export function truncateToolResultText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) {
-    return text;
+  const suffixText = `\n${TRUNCATION_SUFFIX}`;
+  const withinChars = text.length <= maxChars;
+
+  let out = text;
+  if (!withinChars) {
+    const keepChars = Math.max(MIN_KEEP_CHARS, maxChars - suffixText.length);
+    // Try to break at a newline boundary to avoid cutting mid-line
+    let cutPoint = keepChars;
+    const lastNewline = text.lastIndexOf("\n", keepChars);
+    if (lastNewline > keepChars * 0.8) {
+      cutPoint = lastNewline;
+    }
+    out = text.slice(0, cutPoint) + suffixText;
   }
-  const keepChars = Math.max(MIN_KEEP_CHARS, maxChars - TRUNCATION_SUFFIX.length);
-  // Try to break at a newline boundary to avoid cutting mid-line
-  let cutPoint = keepChars;
-  const lastNewline = text.lastIndexOf("\n", keepChars);
-  if (lastNewline > keepChars * 0.8) {
-    cutPoint = lastNewline;
-  }
-  return text.slice(0, cutPoint) + TRUNCATION_SUFFIX;
+
+  return hardTruncateText(out, {
+    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES,
+    maxLines: TOOL_OUTPUT_HARD_MAX_LINES,
+    suffix: TRUNCATION_SUFFIX,
+  }).text;
 }
 
 /**
@@ -87,6 +102,49 @@ function getToolResultTextLength(msg: AgentMessage): number {
   return totalLength;
 }
 
+function countLines(text: string): number {
+  if (!text) {
+    return 0;
+  }
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) {
+      lines += 1;
+    }
+  }
+  return lines;
+}
+
+function getToolResultTextMetrics(msg: AgentMessage): { bytes: number; lines: number } {
+  if (!msg || (msg as { role?: string }).role !== "toolResult") {
+    return { bytes: 0, lines: 0 };
+  }
+  const content = (msg as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return { bytes: 0, lines: 0 };
+  }
+  let bytes = 0;
+  let lines = 0;
+  let blocks = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
+      continue;
+    }
+    const text = (block as TextContent).text;
+    if (typeof text !== "string" || !text) {
+      continue;
+    }
+    blocks += 1;
+    bytes += Buffer.byteLength(text, "utf8");
+    lines += countLines(text);
+  }
+  // Approximate the bytes of joining multiple blocks with newlines.
+  if (blocks > 1) {
+    bytes += blocks - 1;
+  }
+  return { bytes, lines };
+}
+
 /**
  * Truncate a tool result message's text content blocks to fit within maxChars.
  * Returns a new message (does not mutate the original).
@@ -97,31 +155,24 @@ function truncateToolResultMessage(msg: AgentMessage, maxChars: number): AgentMe
     return msg;
   }
 
-  // Calculate total text size
-  const totalTextChars = getToolResultTextLength(msg);
-  if (totalTextChars <= maxChars) {
+  const texts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
+      continue;
+    }
+    const text = (block as TextContent).text;
+    if (typeof text === "string" && text) {
+      texts.push(text);
+    }
+  }
+
+  if (texts.length === 0) {
     return msg;
   }
 
-  // Distribute the budget proportionally among text blocks
-  const newContent = content.map((block: unknown) => {
-    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
-      return block; // Keep non-text blocks (images) as-is
-    }
-    const textBlock = block as TextContent;
-    if (typeof textBlock.text !== "string") {
-      return block;
-    }
-    // Proportional budget for this block
-    const blockShare = textBlock.text.length / totalTextChars;
-    const blockBudget = Math.max(MIN_KEEP_CHARS, Math.floor(maxChars * blockShare));
-    return {
-      ...textBlock,
-      text: truncateToolResultText(textBlock.text, blockBudget),
-    };
-  });
-
-  return { ...msg, content: newContent } as AgentMessage;
+  const combined = texts.join("\n");
+  const truncated = truncateToolResultText(combined, maxChars);
+  return { ...msg, content: [{ type: "text", text: truncated }] } as AgentMessage;
 }
 
 /**
@@ -164,11 +215,15 @@ export async function truncateOversizedToolResultsInSession(params: {
         continue;
       }
       const textLength = getToolResultTextLength(msg);
-      if (textLength > maxChars) {
+      const metrics = getToolResultTextMetrics(msg);
+      const hardOversize =
+        metrics.bytes > TOOL_OUTPUT_HARD_MAX_BYTES || metrics.lines > TOOL_OUTPUT_HARD_MAX_LINES;
+      if (textLength > maxChars || hardOversize) {
         oversizedIndices.push(i);
         log.info(
           `[tool-result-truncation] Found oversized tool result: ` +
-            `entry=${entry.id} chars=${textLength} maxChars=${maxChars} ` +
+            `entry=${entry.id} chars=${textLength} bytes=${metrics.bytes} lines=${metrics.lines} ` +
+            `maxChars=${maxChars} hardMaxBytes=${TOOL_OUTPUT_HARD_MAX_BYTES} hardMaxLines=${TOOL_OUTPUT_HARD_MAX_LINES} ` +
             `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
         );
       }
@@ -280,8 +335,7 @@ export function truncateOversizedToolResultsInMessages(
     if ((msg as { role?: string }).role !== "toolResult") {
       return msg;
     }
-    const textLength = getToolResultTextLength(msg);
-    if (textLength <= maxChars) {
+    if (!isOversizedToolResult(msg, contextWindowTokens)) {
       return msg;
     }
     truncatedCount++;
@@ -299,7 +353,14 @@ export function isOversizedToolResult(msg: AgentMessage, contextWindowTokens: nu
     return false;
   }
   const maxChars = calculateMaxToolResultChars(contextWindowTokens);
-  return getToolResultTextLength(msg) > maxChars;
+  const textLength = getToolResultTextLength(msg);
+  if (textLength > maxChars) {
+    return true;
+  }
+
+  // Global hard cap (fixed) - protects overflow recovery paths regardless of context size.
+  const metrics = getToolResultTextMetrics(msg);
+  return metrics.bytes > TOOL_OUTPUT_HARD_MAX_BYTES || metrics.lines > TOOL_OUTPUT_HARD_MAX_LINES;
 }
 
 /**
@@ -312,14 +373,9 @@ export function sessionLikelyHasOversizedToolResults(params: {
   contextWindowTokens: number;
 }): boolean {
   const { messages, contextWindowTokens } = params;
-  const maxChars = calculateMaxToolResultChars(contextWindowTokens);
 
   for (const msg of messages) {
-    if ((msg as { role?: string }).role !== "toolResult") {
-      continue;
-    }
-    const textLength = getToolResultTextLength(msg);
-    if (textLength > maxChars) {
+    if (isOversizedToolResult(msg, contextWindowTokens)) {
       return true;
     }
   }

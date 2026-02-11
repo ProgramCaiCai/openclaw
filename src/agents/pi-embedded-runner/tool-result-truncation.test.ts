@@ -73,7 +73,7 @@ describe("truncateToolResultText", () => {
     // The truncated content should be shorter than the original
     expect(result.length).toBeLessThan(lines.length);
     // Extract the kept content (before the truncation suffix marker)
-    const suffixIndex = result.indexOf("\n\n⚠️");
+    const suffixIndex = result.indexOf("\n⚠️");
     if (suffixIndex > 0) {
       const keptContent = result.slice(0, suffixIndex);
       // Should end at a newline boundary (i.e., the last char before suffix is a complete line)
