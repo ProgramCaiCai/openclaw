@@ -86,7 +86,12 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
       continue;
     }
     const toolCall = block as ToolCallBlock;
-    if (toolCall.type !== "toolCall") {
+    // Recognize all tool block variants: toolCall, toolUse, functionCall
+    if (
+      toolCall.type !== "toolCall" &&
+      toolCall.type !== "toolUse" &&
+      toolCall.type !== "functionCall"
+    ) {
       continue;
     }
 
@@ -95,7 +100,9 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
       continue;
     }
 
-    const paths = collectPathsFromArgs(toolCall.arguments);
+    // Support both `arguments` (toolCall) and `input` (toolUse) fields
+    const args = toolCall.arguments ?? (toolCall as Record<string, unknown>).input;
+    const paths = collectPathsFromArgs(args);
     if (paths.length === 0) {
       continue;
     }

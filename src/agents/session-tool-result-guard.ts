@@ -48,6 +48,37 @@ function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage
   }
 
   if (!combined) {
+    // Even without text blocks, enforce a total byte cap on the serialized message
+    // to prevent large non-text payloads (e.g. base64 images) from bloating the transcript.
+    if (nonTextBlocks > 0) {
+      try {
+        const bytes = Buffer.byteLength(JSON.stringify(msg), "utf8");
+        if (bytes > TOOL_OUTPUT_HARD_MAX_BYTES) {
+          return {
+            ...msg,
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `⚠️ [Tool result contained ${nonTextBlocks} non-text block(s) totaling ${bytes} bytes — ` +
+                  `exceeded hard limit (${TOOL_OUTPUT_HARD_MAX_BYTES} bytes). Content removed during persistence.]`,
+              },
+            ],
+          } as AgentMessage;
+        }
+      } catch {
+        // Serialization failed — cap it defensively
+        return {
+          ...msg,
+          content: [
+            {
+              type: "text" as const,
+              text: `⚠️ [Tool result contained non-serializable content — removed during persistence.]`,
+            },
+          ],
+        } as AgentMessage;
+      }
+    }
     return msg;
   }
 
