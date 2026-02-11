@@ -291,11 +291,16 @@ export async function truncateOversizedToolResultsInSession(params: {
           entry.details,
         );
       } else if (entry.type === "branch_summary") {
-        // Branch summaries reference specific entry IDs - skip to avoid inconsistency
-        continue;
+        // Preserve branch summaries so context from abandoned paths is not lost.
+        // The fromId reference may be stale after rewrite, but the summary text
+        // is the critical piece for LLM context.
+        sessionManager.branchWithSummary(null, entry.summary, entry.details, entry.fromHook);
       } else if (entry.type === "label") {
-        // Labels reference specific entry IDs - skip to avoid inconsistency
-        continue;
+        // Preserve labels. The targetId may reference an old entry ID after rewrite,
+        // but retaining the label is better than silently discarding it.
+        if (entry.label) {
+          sessionManager.appendLabelChange(entry.targetId, entry.label);
+        }
       } else if (entry.type === "session_info") {
         if (entry.name) {
           sessionManager.appendSessionInfo(entry.name);

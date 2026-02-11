@@ -1,4 +1,6 @@
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
+  calculateContextTokens,
   createAgentSession,
   estimateTokens,
   SessionManager,
@@ -107,6 +109,102 @@ export type CompactEmbeddedPiSessionParams = {
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
 };
+
+const TOKENS_AFTER_SANITY_RATIO = 1.1;
+
+/**
+ * Find the last non-aborted, non-error assistant message with usage.
+ * Equivalent to pi-coding-agent's internal `getLastAssistantUsageInfo`.
+ */
+function getLastAssistantUsageInfo(
+  messages: AgentMessage[],
+): { usage: unknown; index: number } | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg.role !== "assistant") {
+      continue;
+    }
+    const assistant = msg as { stopReason?: string; usage?: unknown };
+    if (assistant.stopReason === "aborted" || assistant.stopReason === "error") {
+      continue;
+    }
+    if (assistant.usage) {
+      return { usage: assistant.usage, index: i };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Usage-aware context token estimator matching pi-coding-agent's `estimateContextTokens`.
+ * Uses real usage from the last valid assistant message + heuristic for trailing messages.
+ */
+function estimateContextTokensInternal(messages: AgentMessage[]): {
+  tokens: number;
+  usageTokens: number;
+  trailingTokens: number;
+  lastUsageIndex: number | null;
+} {
+  const usageInfo = getLastAssistantUsageInfo(messages);
+  if (!usageInfo) {
+    let estimated = 0;
+    for (const message of messages) {
+      estimated += estimateTokens(message);
+    }
+    return { tokens: estimated, usageTokens: 0, trailingTokens: estimated, lastUsageIndex: null };
+  }
+
+  const usageTokens = calculateContextTokens(
+    usageInfo.usage as Parameters<typeof calculateContextTokens>[0],
+  );
+  let trailingTokens = 0;
+  for (let i = usageInfo.index + 1; i < messages.length; i++) {
+    trailingTokens += estimateTokens(messages[i]!);
+  }
+  return {
+    tokens: usageTokens + trailingTokens,
+    usageTokens,
+    trailingTokens,
+    lastUsageIndex: usageInfo.index,
+  };
+}
+
+/** Sum estimateTokens() for all messages — consistent heuristic for before/after comparison. */
+function sumEstimateTokens(messages: AgentMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    total += estimateTokens(message);
+  }
+  return total;
+}
+
+export function estimateTokensAfterCompaction(params: {
+  messages: AgentMessage[];
+  tokensBefore?: number;
+}): number | undefined {
+  try {
+    // After compaction, usage data from surviving assistant messages is stale
+    // (it reflects the pre-compaction context window). Use pure estimation instead.
+    let tokensAfter = 0;
+    for (const message of params.messages) {
+      tokensAfter += estimateTokens(message);
+    }
+    if (!Number.isFinite(tokensAfter) || tokensAfter < 0) {
+      return undefined;
+    }
+
+    const tokensBefore = params.tokensBefore;
+    if (typeof tokensBefore === "number" && Number.isFinite(tokensBefore) && tokensBefore > 0) {
+      if (tokensAfter > tokensBefore * TOKENS_AFTER_SANITY_RATIO) {
+        return undefined;
+      }
+    }
+
+    return tokensAfter;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Core compaction logic without lane queueing.
@@ -436,29 +534,21 @@ export async function compactEmbeddedPiSessionDirect(
         if (limited.length > 0) {
           session.agent.replaceMessages(limited);
         }
+        // Estimate tokens BEFORE compact using the same heuristic we'll use after,
+        // so the before→after comparison is apples-to-apples.
+        const heuristicTokensBefore = sumEstimateTokens(session.messages);
         const result = await session.compact(params.customInstructions);
-        // Estimate tokens after compaction by summing token estimates for remaining messages
-        let tokensAfter: number | undefined;
-        try {
-          tokensAfter = 0;
-          for (const message of session.messages) {
-            tokensAfter += estimateTokens(message);
-          }
-          // Sanity check: tokensAfter should be less than tokensBefore
-          if (tokensAfter > result.tokensBefore) {
-            tokensAfter = undefined; // Don't trust the estimate
-          }
-        } catch {
-          // If estimation fails, leave tokensAfter undefined
-          tokensAfter = undefined;
-        }
+        const tokensAfter = estimateTokensAfterCompaction({
+          messages: session.messages,
+          tokensBefore: heuristicTokensBefore,
+        });
         return {
           ok: true,
           compacted: true,
           result: {
             summary: result.summary,
             firstKeptEntryId: result.firstKeptEntryId,
-            tokensBefore: result.tokensBefore,
+            tokensBefore: heuristicTokensBefore,
             tokensAfter,
             details: result.details,
           },

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   BASE_CHUNK_RATIO,
   MIN_CHUNK_RATIO,
@@ -11,6 +11,13 @@ import {
   resolveContextWindowTokens,
   summarizeInStages,
 } from "../compaction.js";
+import {
+  computeFileLists,
+  createFileOps,
+  extractFileOpsFromMessage,
+  formatFileOperations,
+  mergeFileOps,
+} from "../compaction/file-ops.js";
 import { getCompactionSafeguardRuntime } from "./compaction-safeguard-runtime.js";
 const FALLBACK_SUMMARY =
   "Summary unavailable due to context limits. Older messages were truncated.";
@@ -134,39 +141,30 @@ function formatToolFailuresSection(failures: ToolFailure[]): string {
   return `\n\n## Tool Failures\n${lines.join("\n")}`;
 }
 
-function computeFileLists(fileOps: FileOperations): {
-  readFiles: string[];
-  modifiedFiles: string[];
-} {
-  const modified = new Set([...fileOps.edited, ...fileOps.written]);
-  const readFiles = [...fileOps.read].filter((f) => !modified.has(f)).toSorted();
-  const modifiedFiles = [...modified].toSorted();
-  return { readFiles, modifiedFiles };
-}
-
-function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
-  const sections: string[] = [];
-  if (readFiles.length > 0) {
-    sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
-  }
-  if (modifiedFiles.length > 0) {
-    sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
-  }
-  if (sections.length === 0) {
-    return "";
-  }
-  return `\n\n${sections.join("\n\n")}`;
-}
+// (file ops helpers moved to ../compaction/file-ops)
 
 export default function compactionSafeguardExtension(api: ExtensionAPI): void {
   api.on("session_before_compact", async (event, ctx) => {
     const { preparation, customInstructions, signal } = event;
-    const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
-    const fileOpsSummary = formatFileOperations(readFiles, modifiedFiles);
-    const toolFailures = collectToolFailures([
+
+    const summarizeMessages = [
       ...preparation.messagesToSummarize,
       ...preparation.turnPrefixMessages,
-    ]);
+    ];
+
+    const fileOps = createFileOps();
+    // preparation.fileOps comes from pi-coding-agent, but its extractor only recognizes args.path.
+    // Re-scan the messages with OpenClaw's path normalization so file ops are preserved even when
+    // tools use alternate keys (file_path/filePath/paths/filePaths).
+    mergeFileOps(fileOps, preparation.fileOps);
+    for (const msg of summarizeMessages) {
+      extractFileOpsFromMessage(msg, fileOps);
+    }
+
+    const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+    const fileOpsSummary = formatFileOperations(readFiles, modifiedFiles);
+
+    const toolFailures = collectToolFailures(summarizeMessages);
     const toolFailureSection = formatToolFailuresSection(toolFailures);
     const fallbackSummary = `${FALLBACK_SUMMARY}${toolFailureSection}${fileOpsSummary}`;
 
@@ -222,7 +220,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
             messages: messagesToSummarize,
             maxContextTokens: contextWindowTokens,
             maxHistoryShare,
-            parts: 2,
           });
           if (pruned.droppedChunks > 0) {
             const newContentRatio = (newContentTokens / contextWindowTokens) * 100;

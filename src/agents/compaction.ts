@@ -304,6 +304,82 @@ export async function summarizeInStages(params: {
   });
 }
 
+/**
+ * Check if a message role represents a turn boundary (user-initiated context).
+ * Codex treats bashExecution like a user message for turn boundaries.
+ */
+function isTurnBoundaryRole(role: string): boolean {
+  return role === "user" || role === "bashExecution";
+}
+
+/**
+ * Check if a message is a valid cut point (never cut at toolResult).
+ * Matches Codex's findValidCutPoints invariant.
+ */
+function isValidCutPoint(message: AgentMessage): boolean {
+  const role = (message as { role?: unknown })?.role;
+  return typeof role === "string" && role !== "toolResult";
+}
+
+/**
+ * Find the optimal turn-aware cut index in a message array.
+ * Returns the index where the kept suffix (messages[cutIndex..]) fits within budgetTokens.
+ *
+ * Algorithm:
+ * 1. Precompute suffix token sums.
+ * 2. Collect valid cut points (skip toolResult).
+ * 3. Among feasible cut points (suffix fits budget), prefer turn boundaries (user/bashExecution).
+ * 4. Pick the earliest feasible candidate to maximize kept history.
+ *
+ * Returns 0 if everything fits; returns messages.length if nothing can be kept.
+ */
+function chooseTurnAwareCutIndex(messages: AgentMessage[], budgetTokens: number): number {
+  if (messages.length === 0) {
+    return 0;
+  }
+  if (estimateMessagesTokens(messages) <= budgetTokens) {
+    return 0;
+  }
+
+  // Precompute suffix token sums: suffixTokens[i] = tokens from messages[i..end]
+  const msgTokens = messages.map((m) => estimateTokens(m));
+  const suffixTokens = Array.from<number>({ length: messages.length + 1 });
+  suffixTokens[messages.length] = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    suffixTokens[i] = suffixTokens[i + 1] + msgTokens[i];
+  }
+
+  // Collect valid cut points (indices where we could start the kept suffix)
+  const validCutPoints: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (isValidCutPoint(messages[i])) {
+      validCutPoints.push(i);
+    }
+  }
+
+  if (validCutPoints.length === 0) {
+    // All messages are toolResult — drop everything
+    return messages.length;
+  }
+
+  // Find feasible cut points where suffix fits within budget
+  const feasible = validCutPoints.filter((i) => suffixTokens[i] <= budgetTokens);
+  if (feasible.length === 0) {
+    // Even the smallest valid suffix exceeds budget; keep from the last valid cut point
+    return validCutPoints[validCutPoints.length - 1];
+  }
+
+  // Prefer turn boundaries (user/bashExecution) over mid-turn cuts (assistant)
+  const feasibleTurnBoundaries = feasible.filter((i) => {
+    const role = (messages[i] as { role?: unknown })?.role;
+    return typeof role === "string" && isTurnBoundaryRole(role);
+  });
+
+  const candidates = feasibleTurnBoundaries.length > 0 ? feasibleTurnBoundaries : feasible;
+  // Pick earliest to maximize kept history
+  return candidates[0];
+}
+
 export function pruneHistoryForContextShare(params: {
   messages: AgentMessage[];
   maxContextTokens: number;
@@ -320,50 +396,36 @@ export function pruneHistoryForContextShare(params: {
 } {
   const maxHistoryShare = params.maxHistoryShare ?? 0.5;
   const budgetTokens = Math.max(1, Math.floor(params.maxContextTokens * maxHistoryShare));
-  let keptMessages = params.messages;
-  const allDroppedMessages: AgentMessage[] = [];
-  let droppedChunks = 0;
-  let droppedMessages = 0;
-  let droppedTokens = 0;
 
-  const parts = normalizeParts(params.parts ?? DEFAULT_PARTS, keptMessages.length);
-
-  while (keptMessages.length > 0 && estimateMessagesTokens(keptMessages) > budgetTokens) {
-    const chunks = splitMessagesByTokenShare(keptMessages, parts);
-    if (chunks.length <= 1) {
-      break;
-    }
-    const [dropped, ...rest] = chunks;
-    const flatRest = rest.flat();
-
-    // After dropping a chunk, repair tool_use/tool_result pairing to handle
-    // orphaned tool_results (whose tool_use was in the dropped chunk).
-    // repairToolUseResultPairing drops orphaned tool_results, preventing
-    // "unexpected tool_use_id" errors from Anthropic's API.
-    const repairReport = repairToolUseResultPairing(flatRest);
-    const repairedKept = repairReport.messages;
-
-    // Track orphaned tool_results as dropped (they were in kept but their tool_use was dropped)
-    const orphanedCount = repairReport.droppedOrphanCount;
-
-    droppedChunks += 1;
-    droppedMessages += dropped.length + orphanedCount;
-    droppedTokens += estimateMessagesTokens(dropped);
-    // Note: We don't have the actual orphaned messages to add to droppedMessagesList
-    // since repairToolUseResultPairing doesn't return them. This is acceptable since
-    // the dropped messages are used for summarization, and orphaned tool_results
-    // without their tool_use context aren't useful for summarization anyway.
-    allDroppedMessages.push(...dropped);
-    keptMessages = repairedKept;
+  const cutIndex = chooseTurnAwareCutIndex(params.messages, budgetTokens);
+  if (cutIndex <= 0) {
+    return {
+      messages: params.messages,
+      droppedMessagesList: [],
+      droppedChunks: 0,
+      droppedMessages: 0,
+      droppedTokens: 0,
+      keptTokens: estimateMessagesTokens(params.messages),
+      budgetTokens,
+    };
   }
 
+  const dropped = params.messages.slice(0, cutIndex);
+  const keptCandidate = params.messages.slice(cutIndex);
+
+  // Repair tool_use/tool_result pairing in the kept suffix to handle any
+  // orphaned tool_results whose tool_use was in the dropped prefix.
+  const repairReport = repairToolUseResultPairing(keptCandidate);
+  const repairedKept = repairReport.messages;
+  const orphanedCount = repairReport.droppedOrphanCount;
+
   return {
-    messages: keptMessages,
-    droppedMessagesList: allDroppedMessages,
-    droppedChunks,
-    droppedMessages,
-    droppedTokens,
-    keptTokens: estimateMessagesTokens(keptMessages),
+    messages: repairedKept,
+    droppedMessagesList: dropped,
+    droppedChunks: 1,
+    droppedMessages: dropped.length + orphanedCount,
+    droppedTokens: estimateMessagesTokens(dropped),
+    keptTokens: estimateMessagesTokens(repairedKept),
     budgetTokens,
   };
 }

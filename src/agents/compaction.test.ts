@@ -192,10 +192,11 @@ describe("pruneHistoryForContextShare", () => {
     const keptRoles = pruned.messages.map((m) => m.role);
     expect(keptRoles).not.toContain("toolResult");
 
-    // The orphan count should be reflected in droppedMessages
-    // (orphaned tool_results are dropped but not added to droppedMessagesList
-    // since they lack context for summarization)
-    expect(pruned.droppedMessages).toBeGreaterThan(pruned.droppedMessagesList.length);
+    // Turn-aware pruner drops toolResult together with its tool_use,
+    // so the droppedMessagesList includes the toolResult directly.
+    const droppedRoles = pruned.droppedMessagesList.map((m) => m.role);
+    expect(droppedRoles).toContain("toolResult");
+    expect(pruned.droppedMessages).toBe(pruned.droppedMessagesList.length);
   });
 
   it("keeps tool_result when its tool_use is also kept", () => {
@@ -285,9 +286,9 @@ describe("pruneHistoryForContextShare", () => {
     const keptToolResults = pruned.messages.filter((m) => m.role === "toolResult");
     expect(keptToolResults).toHaveLength(0);
 
-    // The orphan count should reflect both dropped tool_results
-    // droppedMessages = 1 (assistant) + 2 (orphaned tool_results) = 3
-    // droppedMessagesList only has the assistant message
-    expect(pruned.droppedMessages).toBe(pruned.droppedMessagesList.length + 2);
+    // Turn-aware pruner drops toolResults together with their tool_use
+    const droppedToolResults = pruned.droppedMessagesList.filter((m) => m.role === "toolResult");
+    expect(droppedToolResults).toHaveLength(2);
+    expect(pruned.droppedMessages).toBe(pruned.droppedMessagesList.length);
   });
 });
