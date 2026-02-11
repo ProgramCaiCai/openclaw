@@ -9,20 +9,22 @@ import {
   TOOL_OUTPUT_HARD_MAX_LINES,
 } from "./tool-output-hard-cap.js";
 
+type ToolCall = { id: string; name?: string };
+
 const GUARD_TRUNCATION_SUFFIX =
   "⚠️ [Content truncated during persistence - exceeded hard limit (50KB / 2000 lines). " +
   "Use offset/limit parameters or request specific sections for large content.]";
 
 /**
- * Truncate oversized text content blocks in a tool result message.
- * Returns the original message if under the limit, or a new message with
- * truncated text blocks otherwise.
+ * Apply the system toolResult hard-cap policy before persisting to a session transcript.
+ * Returns the original message reference when no changes are needed.
  */
-function capToolResultSize(msg: AgentMessage): AgentMessage {
+function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage {
   const role = (msg as { role?: string }).role;
   if (role !== "toolResult") {
     return msg;
   }
+
   const content = (msg as { content?: unknown }).content;
   if (!Array.isArray(content)) {
     return msg;
@@ -78,8 +80,6 @@ function capToolResultSize(msg: AgentMessage): AgentMessage {
     content: [{ type: "text", text: capped.text }],
   } as AgentMessage;
 }
-
-type ToolCall = { id: string; name?: string };
 
 function extractAssistantToolCalls(msg: Extract<AgentMessage, { role: "assistant" }>): ToolCall[] {
   const content = msg.content;
@@ -159,13 +159,14 @@ export function installSessionToolResultGuard(
     if (allowSyntheticToolResults) {
       for (const [id, name] of pending.entries()) {
         const synthetic = makeMissingToolResult({ toolCallId: id, toolName: name });
-        originalAppend(
-          persistToolResult(synthetic, {
-            toolCallId: id,
-            toolName: name,
-            isSynthetic: true,
-          }) as never,
-        );
+        const transformed = persistToolResult(synthetic, {
+          toolCallId: id,
+          toolName: name,
+          isSynthetic: true,
+        });
+        // Apply the hard cap *after* any hook transforms so plugins can't re-inflate tool results.
+        const capped = hardCapToolResultMessageForPersistence(transformed);
+        originalAppend(capped as never);
       }
     }
     pending.clear();
@@ -192,16 +193,16 @@ export function installSessionToolResultGuard(
       if (id) {
         pending.delete(id);
       }
-      // Apply hard size cap before persistence to prevent oversized tool results
-      // from consuming the entire context window on subsequent LLM calls.
-      const capped = capToolResultSize(nextMessage);
-      return originalAppend(
-        persistToolResult(capped, {
-          toolCallId: id ?? undefined,
-          toolName,
-          isSynthetic: false,
-        }) as never,
-      );
+      // Apply the hard cap before + after hook transforms so persisted tool results
+      // always conform to the system limits.
+      const preCapped = hardCapToolResultMessageForPersistence(nextMessage);
+      const transformed = persistToolResult(preCapped, {
+        toolCallId: id ?? undefined,
+        toolName,
+        isSynthetic: false,
+      });
+      const postCapped = hardCapToolResultMessageForPersistence(transformed);
+      return originalAppend(postCapped as never);
     }
 
     const toolCalls =

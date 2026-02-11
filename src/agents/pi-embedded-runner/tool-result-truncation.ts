@@ -1,199 +1,235 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { TextContent } from "@mariozechner/pi-ai";
+import type { ImageContent, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
-import {
-  hardTruncateText,
-  TOOL_OUTPUT_HARD_MAX_BYTES,
-  TOOL_OUTPUT_HARD_MAX_LINES,
-} from "../tool-output-hard-cap.js";
+import type { AgentContextPruningConfig } from "../../config/types.agent-defaults.js";
 import { log } from "./logger.js";
 
-/**
- * Maximum share of the context window a single tool result should occupy.
- * This is intentionally conservative – a single tool result should not
- * consume more than 30% of the context window even without other messages.
- */
-const MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3;
+type ResolvedToolResultPruningSettings = {
+  minPrunableToolChars: number;
+  softTrim: { maxChars: number; headChars: number; tailChars: number };
+};
 
-/**
- * Hard character limit for a single tool result text block.
- * Even for the largest context windows (~2M tokens), a single tool result
- * should not exceed ~400K characters (~100K tokens).
- * This acts as a safety net when we don't know the context window size.
- */
-export const HARD_MAX_TOOL_RESULT_CHARS = 400_000;
+const DEFAULT_SETTINGS: ResolvedToolResultPruningSettings = {
+  minPrunableToolChars: 4000,
+  softTrim: { maxChars: 2000, headChars: 800, tailChars: 800 },
+};
 
-/**
- * Minimum characters to keep when truncating.
- * We always keep at least the first portion so the model understands
- * what was in the content.
- */
-const MIN_KEEP_CHARS = 2_000;
+function resolveToolResultPruningSettings(
+  raw?: AgentContextPruningConfig,
+): ResolvedToolResultPruningSettings {
+  const rawMin = raw?.minPrunableToolChars;
+  const minPrunableToolChars =
+    typeof rawMin === "number" && Number.isFinite(rawMin)
+      ? Math.max(0, Math.floor(rawMin))
+      : DEFAULT_SETTINGS.minPrunableToolChars;
 
-/**
- * Suffix appended to truncated tool results.
- */
-const TRUNCATION_SUFFIX =
-  "⚠️ [Content truncated - original was too large for the model's context window. " +
-  "The content above is a partial view. If you need more, request specific sections or use " +
-  "offset/limit parameters to read smaller chunks.]";
+  const rawMaxChars = raw?.softTrim?.maxChars;
+  const rawHeadChars = raw?.softTrim?.headChars;
+  const rawTailChars = raw?.softTrim?.tailChars;
+  const softTrim = {
+    maxChars:
+      typeof rawMaxChars === "number" && Number.isFinite(rawMaxChars)
+        ? Math.max(0, Math.floor(rawMaxChars))
+        : DEFAULT_SETTINGS.softTrim.maxChars,
+    headChars:
+      typeof rawHeadChars === "number" && Number.isFinite(rawHeadChars)
+        ? Math.max(0, Math.floor(rawHeadChars))
+        : DEFAULT_SETTINGS.softTrim.headChars,
+    tailChars:
+      typeof rawTailChars === "number" && Number.isFinite(rawTailChars)
+        ? Math.max(0, Math.floor(rawTailChars))
+        : DEFAULT_SETTINGS.softTrim.tailChars,
+  };
 
-/**
- * Truncate a single text string to fit within maxChars, preserving the beginning.
- * Always enforces the global hard cap (bytes + lines) as a final safety net.
- */
-export function truncateToolResultText(text: string, maxChars: number): string {
-  const suffixText = `\n${TRUNCATION_SUFFIX}`;
-  const withinChars = text.length <= maxChars;
-
-  let out = text;
-  if (!withinChars) {
-    const keepChars = Math.max(MIN_KEEP_CHARS, maxChars - suffixText.length);
-    // Try to break at a newline boundary to avoid cutting mid-line
-    let cutPoint = keepChars;
-    const lastNewline = text.lastIndexOf("\n", keepChars);
-    if (lastNewline > keepChars * 0.8) {
-      cutPoint = lastNewline;
-    }
-    out = text.slice(0, cutPoint) + suffixText;
-  }
-
-  return hardTruncateText(out, {
-    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES,
-    maxLines: TOOL_OUTPUT_HARD_MAX_LINES,
-    suffix: TRUNCATION_SUFFIX,
-  }).text;
+  return { minPrunableToolChars, softTrim };
 }
 
-/**
- * Calculate the maximum allowed characters for a single tool result
- * based on the model's context window tokens.
- *
- * Uses a rough 4 chars ≈ 1 token heuristic (conservative for English text;
- * actual ratio varies by tokenizer).
- */
-export function calculateMaxToolResultChars(contextWindowTokens: number): number {
-  const maxTokens = Math.floor(contextWindowTokens * MAX_TOOL_RESULT_CONTEXT_SHARE);
-  // Rough conversion: ~4 chars per token on average
-  const maxChars = maxTokens * 4;
-  return Math.min(maxChars, HARD_MAX_TOOL_RESULT_CHARS);
+function asText(text: string): TextContent {
+  return { type: "text", text };
 }
 
-/**
- * Get the total character count of text content blocks in a tool result message.
- */
-function getToolResultTextLength(msg: AgentMessage): number {
-  if (!msg || (msg as { role?: string }).role !== "toolResult") {
-    return 0;
-  }
-  const content = (msg as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return 0;
-  }
-  let totalLength = 0;
+function collectTextSegments(content: ReadonlyArray<TextContent | ImageContent>): string[] {
+  const parts: string[] = [];
   for (const block of content) {
-    if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
-      const text = (block as TextContent).text;
-      if (typeof text === "string") {
-        totalLength += text.length;
+    if (block.type === "text") {
+      parts.push(block.text);
+    }
+  }
+  return parts;
+}
+
+function estimateJoinedTextLength(parts: string[]): number {
+  if (parts.length === 0) {
+    return 0;
+  }
+  let len = 0;
+  for (const p of parts) {
+    len += p.length;
+  }
+  len += Math.max(0, parts.length - 1);
+  return len;
+}
+
+function takeHeadFromJoinedText(parts: string[], maxChars: number): string {
+  if (maxChars <= 0 || parts.length === 0) {
+    return "";
+  }
+  let remaining = maxChars;
+  let out = "";
+  for (let i = 0; i < parts.length && remaining > 0; i++) {
+    if (i > 0) {
+      out += "\n";
+      remaining -= 1;
+      if (remaining <= 0) {
+        break;
       }
     }
+    const p = parts[i];
+    if (p.length <= remaining) {
+      out += p;
+      remaining -= p.length;
+    } else {
+      out += p.slice(0, remaining);
+      remaining = 0;
+    }
   }
-  return totalLength;
+  return out;
 }
 
-function countLines(text: string): number {
-  if (!text) {
+function takeTailFromJoinedText(parts: string[], maxChars: number): string {
+  if (maxChars <= 0 || parts.length === 0) {
+    return "";
+  }
+  let remaining = maxChars;
+  const out: string[] = [];
+  for (let i = parts.length - 1; i >= 0 && remaining > 0; i--) {
+    const p = parts[i];
+    if (p.length <= remaining) {
+      out.push(p);
+      remaining -= p.length;
+    } else {
+      out.push(p.slice(p.length - remaining));
+      remaining = 0;
+      break;
+    }
+    if (remaining > 0 && i > 0) {
+      out.push("\n");
+      remaining -= 1;
+    }
+  }
+  out.reverse();
+  return out.join("");
+}
+
+function hasImageBlocks(content: ReadonlyArray<TextContent | ImageContent>): boolean {
+  for (const block of content) {
+    if (block.type === "image") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getToolResultJoinedTextLength(msg: AgentMessage): number {
+  if (!msg || (msg as { role?: string }).role !== "toolResult") {
     return 0;
   }
-  let lines = 1;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10 /* \n */) {
-      lines += 1;
-    }
+  const content = (msg as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) {
+    return 0;
   }
-  return lines;
+  const typed = content as Array<TextContent | ImageContent>;
+  if (hasImageBlocks(typed)) {
+    return 0;
+  }
+  const parts = collectTextSegments(typed);
+  return estimateJoinedTextLength(parts);
 }
 
-function getToolResultTextMetrics(msg: AgentMessage): { bytes: number; lines: number } {
-  if (!msg || (msg as { role?: string }).role !== "toolResult") {
-    return { bytes: 0, lines: 0 };
+function pruneToolResultMessage(params: {
+  msg: AgentMessage;
+  settings: ResolvedToolResultPruningSettings;
+}): { next: AgentMessage; changed: boolean; rawLen: number } {
+  const { msg, settings } = params;
+  if ((msg as { role?: string }).role !== "toolResult") {
+    return { next: msg, changed: false, rawLen: 0 };
   }
+
   const content = (msg as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return { bytes: 0, lines: 0 };
+  if (!Array.isArray(content) || content.length === 0) {
+    return { next: msg, changed: false, rawLen: 0 };
   }
-  let bytes = 0;
-  let lines = 0;
-  let blocks = 0;
-  for (const block of content) {
-    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
-      continue;
-    }
-    const text = (block as TextContent).text;
-    if (typeof text !== "string" || !text) {
-      continue;
-    }
-    blocks += 1;
-    bytes += Buffer.byteLength(text, "utf8");
-    lines += countLines(text);
+
+  const typed = content as Array<TextContent | ImageContent>;
+  if (hasImageBlocks(typed)) {
+    return { next: msg, changed: false, rawLen: 0 };
   }
-  // Approximate the bytes of joining multiple blocks with newlines.
-  if (blocks > 1) {
-    bytes += blocks - 1;
+
+  const parts = collectTextSegments(typed);
+  const rawLen = estimateJoinedTextLength(parts);
+  if (rawLen <= settings.minPrunableToolChars) {
+    return { next: msg, changed: false, rawLen };
   }
-  return { bytes, lines };
+
+  const maxChars = Math.max(0, settings.softTrim.maxChars);
+  if (maxChars === 0) {
+    return { next: msg, changed: false, rawLen };
+  }
+
+  const sep = "\n...\n";
+  let headBudget = Math.max(0, settings.softTrim.headChars);
+  let tailBudget = Math.max(0, settings.softTrim.tailChars);
+
+  const sepLen = headBudget > 0 && tailBudget > 0 ? sep.length : 0;
+  if (headBudget + tailBudget + sepLen > maxChars) {
+    const available = Math.max(0, maxChars - sepLen);
+    const half = Math.floor(available / 2);
+    headBudget = Math.min(headBudget, half);
+    tailBudget = Math.min(tailBudget, available - headBudget);
+  }
+
+  if (headBudget === 0 || tailBudget === 0) {
+    const available = maxChars;
+    headBudget = Math.min(Math.max(0, settings.softTrim.headChars), available);
+    tailBudget = Math.min(Math.max(0, settings.softTrim.tailChars), available - headBudget);
+  }
+
+  const head = headBudget > 0 ? takeHeadFromJoinedText(parts, headBudget) : "";
+  const tail = tailBudget > 0 ? takeTailFromJoinedText(parts, tailBudget) : "";
+
+  let trimmed = "";
+  if (head && tail) {
+    trimmed = `${head}${sep}${tail}`;
+  } else {
+    trimmed = head || tail;
+  }
+
+  if (trimmed.length > maxChars) {
+    trimmed = trimmed.slice(0, maxChars);
+  }
+
+  const next: ToolResultMessage = {
+    ...(msg as unknown as ToolResultMessage),
+    content: [asText(trimmed)],
+  };
+  return { next: next as unknown as AgentMessage, changed: true, rawLen };
 }
+
+// --- EXPORTED FUNCTIONS ---
 
 /**
- * Truncate a tool result message's text content blocks to fit within maxChars.
- * Returns a new message (does not mutate the original).
- */
-function truncateToolResultMessage(msg: AgentMessage, maxChars: number): AgentMessage {
-  const content = (msg as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return msg;
-  }
-
-  const texts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
-      continue;
-    }
-    const text = (block as TextContent).text;
-    if (typeof text === "string" && text) {
-      texts.push(text);
-    }
-  }
-
-  if (texts.length === 0) {
-    return msg;
-  }
-
-  const combined = texts.join("\n");
-  const truncated = truncateToolResultText(combined, maxChars);
-  return { ...msg, content: [{ type: "text", text: truncated }] } as AgentMessage;
-}
-
-/**
- * Find oversized tool result entries in a session and truncate them.
- *
- * This operates on the session file by:
- * 1. Opening the session manager
- * 2. Walking the current branch to find oversized tool results
- * 3. Branching from before the first oversized tool result
- * 4. Re-appending all entries from that point with truncated tool results
- *
- * @returns Object indicating whether any truncation was performed
+ * Pre-compaction rewrite: prune oversized tool results in a session transcript.
+ * Uses the contextPruning config (softTrim head+tail), not the execution-time hard cap.
  */
 export async function truncateOversizedToolResultsInSession(params: {
   sessionFile: string;
   contextWindowTokens: number;
+  contextPruning?: AgentContextPruningConfig;
   sessionId?: string;
   sessionKey?: string;
 }): Promise<{ truncated: boolean; truncatedCount: number; reason?: string }> {
-  const { sessionFile, contextWindowTokens } = params;
-  const maxChars = calculateMaxToolResultChars(contextWindowTokens);
+  const { sessionFile } = params;
+  const settings = resolveToolResultPruningSettings(params.contextPruning);
 
   try {
     const sessionManager = SessionManager.open(sessionFile);
@@ -203,73 +239,70 @@ export async function truncateOversizedToolResultsInSession(params: {
       return { truncated: false, truncatedCount: 0, reason: "empty session" };
     }
 
-    // Find oversized tool result entries and their indices in the branch
     const oversizedIndices: number[] = [];
+
     for (let i = 0; i < branch.length; i++) {
       const entry = branch[i];
       if (entry.type !== "message") {
         continue;
       }
-      const msg = entry.message;
+      const msg = entry.message as AgentMessage;
       if ((msg as { role?: string }).role !== "toolResult") {
         continue;
       }
-      const textLength = getToolResultTextLength(msg);
-      const metrics = getToolResultTextMetrics(msg);
-      const hardOversize =
-        metrics.bytes > TOOL_OUTPUT_HARD_MAX_BYTES || metrics.lines > TOOL_OUTPUT_HARD_MAX_LINES;
-      if (textLength > maxChars || hardOversize) {
-        oversizedIndices.push(i);
-        log.info(
-          `[tool-result-truncation] Found oversized tool result: ` +
-            `entry=${entry.id} chars=${textLength} bytes=${metrics.bytes} lines=${metrics.lines} ` +
-            `maxChars=${maxChars} hardMaxBytes=${TOOL_OUTPUT_HARD_MAX_BYTES} hardMaxLines=${TOOL_OUTPUT_HARD_MAX_LINES} ` +
-            `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
-        );
+      const rawLen = getToolResultJoinedTextLength(msg);
+      if (rawLen <= settings.minPrunableToolChars) {
+        continue;
       }
+      oversizedIndices.push(i);
+      log.info(
+        `[tool-result-truncation] Found toolResult requiring pre-compaction pruning: ` +
+          `entry=${entry.id} chars=${rawLen} ` +
+          `minPrunableToolChars=${settings.minPrunableToolChars} ` +
+          `softTrimMaxChars=${settings.softTrim.maxChars} ` +
+          `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
+      );
     }
 
     if (oversizedIndices.length === 0) {
-      return { truncated: false, truncatedCount: 0, reason: "no oversized tool results" };
+      return { truncated: false, truncatedCount: 0, reason: "no prunable tool results" };
     }
 
-    // Branch from the parent of the first oversized entry
     const firstOversizedIdx = oversizedIndices[0];
     const firstOversizedEntry = branch[firstOversizedIdx];
     const branchFromId = firstOversizedEntry.parentId;
 
     if (!branchFromId) {
-      // The oversized entry is the root - very unusual but handle it
       sessionManager.resetLeaf();
     } else {
       sessionManager.branch(branchFromId);
     }
 
-    // Re-append all entries from the first oversized one onwards,
-    // with truncated tool results
-    const oversizedSet = new Set(oversizedIndices);
     let truncatedCount = 0;
 
     for (let i = firstOversizedIdx; i < branch.length; i++) {
       const entry = branch[i];
 
       if (entry.type === "message") {
-        let message = entry.message;
-
-        if (oversizedSet.has(i)) {
-          message = truncateToolResultMessage(message, maxChars);
-          truncatedCount++;
-          const newLength = getToolResultTextLength(message);
-          log.info(
-            `[tool-result-truncation] Truncated tool result: ` +
-              `originalEntry=${entry.id} newChars=${newLength} ` +
-              `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
-          );
+        let message = entry.message as AgentMessage;
+        if ((message as { role?: string }).role === "toolResult") {
+          const pruned = pruneToolResultMessage({ msg: message, settings });
+          if (pruned.changed) {
+            truncatedCount += 1;
+            message = pruned.next;
+            const newLen = getToolResultJoinedTextLength(message);
+            log.info(
+              `[tool-result-truncation] Rewrote toolResult (softTrim): ` +
+                `originalEntry=${entry.id} originalChars=${pruned.rawLen} newChars=${newLen} ` +
+                `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
+            );
+          }
         }
-
-        // appendMessage expects Message | CustomMessage | BashExecutionMessage
         sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
-      } else if (entry.type === "compaction") {
+        continue;
+      }
+
+      if (entry.type === "compaction") {
         sessionManager.appendCompaction(
           entry.summary,
           entry.firstKeptEntryId,
@@ -277,43 +310,52 @@ export async function truncateOversizedToolResultsInSession(params: {
           entry.details,
           entry.fromHook,
         );
-      } else if (entry.type === "thinking_level_change") {
+        continue;
+      }
+      if (entry.type === "thinking_level_change") {
         sessionManager.appendThinkingLevelChange(entry.thinkingLevel);
-      } else if (entry.type === "model_change") {
+        continue;
+      }
+      if (entry.type === "model_change") {
         sessionManager.appendModelChange(entry.provider, entry.modelId);
-      } else if (entry.type === "custom") {
+        continue;
+      }
+      if (entry.type === "custom") {
         sessionManager.appendCustomEntry(entry.customType, entry.data);
-      } else if (entry.type === "custom_message") {
+        continue;
+      }
+      if (entry.type === "custom_message") {
         sessionManager.appendCustomMessageEntry(
           entry.customType,
           entry.content,
           entry.display,
           entry.details,
         );
-      } else if (entry.type === "branch_summary") {
-        // Preserve branch summaries so context from abandoned paths is not lost.
-        // The fromId reference may be stale after rewrite, but the summary text
-        // is the critical piece for LLM context.
+        continue;
+      }
+      if (entry.type === "branch_summary") {
         sessionManager.branchWithSummary(null, entry.summary, entry.details, entry.fromHook);
-      } else if (entry.type === "label") {
-        // Preserve labels. The targetId may reference an old entry ID after rewrite,
-        // but retaining the label is better than silently discarding it.
+        continue;
+      }
+      if (entry.type === "label") {
         if (entry.label) {
           sessionManager.appendLabelChange(entry.targetId, entry.label);
         }
-      } else if (entry.type === "session_info") {
+        continue;
+      }
+      if (entry.type === "session_info") {
         if (entry.name) {
           sessionManager.appendSessionInfo(entry.name);
         }
+        continue;
       }
     }
 
     log.info(
-      `[tool-result-truncation] Truncated ${truncatedCount} tool result(s) in session ` +
-        `(contextWindow=${contextWindowTokens} maxChars=${maxChars}) ` +
+      `[tool-result-truncation] Rewrote ${truncatedCount} tool result(s) with pre-compaction pruning ` +
+        `(contextWindow=${params.contextWindowTokens} tokens) ` +
         `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
     );
-
     return { truncated: true, truncatedCount };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -325,62 +367,58 @@ export async function truncateOversizedToolResultsInSession(params: {
 /**
  * Truncate oversized tool results in an array of messages (in-memory).
  * Returns a new array with truncated messages.
- *
- * This is used as a pre-emptive guard before sending messages to the LLM,
- * without modifying the session file.
  */
 export function truncateOversizedToolResultsInMessages(
   messages: AgentMessage[],
-  contextWindowTokens: number,
+  _contextWindowTokens: number,
+  contextPruning?: AgentContextPruningConfig,
 ): { messages: AgentMessage[]; truncatedCount: number } {
-  const maxChars = calculateMaxToolResultChars(contextWindowTokens);
+  const settings = resolveToolResultPruningSettings(contextPruning);
   let truncatedCount = 0;
 
   const result = messages.map((msg) => {
     if ((msg as { role?: string }).role !== "toolResult") {
       return msg;
     }
-    if (!isOversizedToolResult(msg, contextWindowTokens)) {
+    const pruned = pruneToolResultMessage({ msg, settings });
+    if (!pruned.changed) {
       return msg;
     }
-    truncatedCount++;
-    return truncateToolResultMessage(msg, maxChars);
+    truncatedCount += 1;
+    return pruned.next;
   });
 
   return { messages: result, truncatedCount };
 }
 
 /**
- * Check if a tool result message exceeds the size limit for a given context window.
+ * Check if a tool result message is eligible for pruning using contextPruning settings.
  */
-export function isOversizedToolResult(msg: AgentMessage, contextWindowTokens: number): boolean {
+export function isOversizedToolResult(
+  msg: AgentMessage,
+  _contextWindowTokens: number,
+  contextPruning?: AgentContextPruningConfig,
+): boolean {
   if ((msg as { role?: string }).role !== "toolResult") {
     return false;
   }
-  const maxChars = calculateMaxToolResultChars(contextWindowTokens);
-  const textLength = getToolResultTextLength(msg);
-  if (textLength > maxChars) {
-    return true;
-  }
-
-  // Global hard cap (fixed) - protects overflow recovery paths regardless of context size.
-  const metrics = getToolResultTextMetrics(msg);
-  return metrics.bytes > TOOL_OUTPUT_HARD_MAX_BYTES || metrics.lines > TOOL_OUTPUT_HARD_MAX_LINES;
+  const settings = resolveToolResultPruningSettings(contextPruning);
+  const rawLen = getToolResultJoinedTextLength(msg);
+  return rawLen > settings.minPrunableToolChars;
 }
 
 /**
- * Estimate whether the session likely has oversized tool results that caused
- * a context overflow. Used as a heuristic to decide whether to attempt
- * tool result truncation before giving up.
+ * Heuristic used by context-overflow recovery to decide whether to attempt a toolResult rewrite.
  */
 export function sessionLikelyHasOversizedToolResults(params: {
   messages: AgentMessage[];
   contextWindowTokens: number;
+  contextPruning?: AgentContextPruningConfig;
 }): boolean {
-  const { messages, contextWindowTokens } = params;
+  const { messages, contextWindowTokens, contextPruning } = params;
 
   for (const msg of messages) {
-    if (isOversizedToolResult(msg, contextWindowTokens)) {
+    if (isOversizedToolResult(msg, contextWindowTokens, contextPruning)) {
       return true;
     }
   }
