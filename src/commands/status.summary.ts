@@ -156,23 +156,36 @@ export async function getStatusSummary(): Promise<StatusSummary> {
       })
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 
+  const sortWithPinnedMain = (a: SessionStatus, b: SessionStatus) => {
+    const aIsMain = a.key === mainSessionKey ? 1 : 0;
+    const bIsMain = b.key === mainSessionKey ? 1 : 0;
+    if (aIsMain !== bIsMain) {
+      return bIsMain - aIsMain;
+    }
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  };
+
   const paths = new Set<string>();
   const byAgent = agentList.agents.map((agent) => {
     const storePath = resolveStorePath(cfg.session?.store, { agentId: agent.id });
     paths.add(storePath);
     const store = loadStore(storePath);
     const sessions = buildSessionRows(store, { agentIdOverride: agent.id });
+    const recentSessions =
+      agent.id === agentList.defaultId
+        ? sessions.toSorted(sortWithPinnedMain).slice(0, 10)
+        : sessions.slice(0, 10);
     return {
       agentId: agent.id,
       path: storePath,
       count: sessions.length,
-      recent: sessions.slice(0, 10),
+      recent: recentSessions,
     };
   });
 
   const allSessions = Array.from(paths)
     .flatMap((storePath) => buildSessionRows(loadStore(storePath)))
-    .toSorted((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    .toSorted(sortWithPinnedMain);
   const recent = allSessions.slice(0, 10);
   const totalSessions = allSessions.length;
 

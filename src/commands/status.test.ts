@@ -477,4 +477,68 @@ describe("statusCommand", () => {
       mocks.loadSessionStore.mockImplementation(originalLoadSessionStore);
     }
   });
+
+  it("pins the default main session first in recent sessions", async () => {
+    const originalAgents = mocks.listAgentsForGateway.getMockImplementation();
+    const originalResolveStorePath = mocks.resolveStorePath.getMockImplementation();
+    const originalLoadSessionStore = mocks.loadSessionStore.getMockImplementation();
+
+    try {
+      mocks.listAgentsForGateway.mockReturnValue({
+        defaultId: "main",
+        mainKey: "agent:main:main",
+        scope: "per-sender",
+        agents: [
+          { id: "main", name: "Main" },
+          { id: "ops", name: "Ops" },
+        ],
+      });
+      mocks.resolveStorePath.mockImplementation((_store, opts) =>
+        opts?.agentId === "ops" ? "/tmp/ops.json" : "/tmp/main.json",
+      );
+      mocks.loadSessionStore.mockImplementation((storePath) => {
+        if (storePath === "/tmp/ops.json") {
+          return {
+            "agent:ops:main": {
+              updatedAt: Date.now() - 1_000,
+              inputTokens: 10,
+              outputTokens: 10,
+              contextTokens: 10_000,
+              model: "pi:opus",
+            },
+          };
+        }
+        return {
+          "agent:main:main": {
+            updatedAt: Date.now() - 300_000,
+            inputTokens: 100,
+            outputTokens: 100,
+            contextTokens: 10_000,
+            model: "pi:opus",
+          },
+          "+1000": {
+            updatedAt: Date.now() - 2_000,
+            inputTokens: 2_000,
+            outputTokens: 3_000,
+            contextTokens: 10_000,
+            model: "pi:opus",
+          },
+        };
+      });
+
+      await statusCommand({ json: true }, runtime as never);
+      const payload = JSON.parse((runtime.log as vi.Mock).mock.calls.at(-1)?.[0]);
+      expect(payload.sessions.recent[0]?.key).toBe("agent:main:main");
+    } finally {
+      if (originalAgents) {
+        mocks.listAgentsForGateway.mockImplementation(originalAgents);
+      }
+      if (originalResolveStorePath) {
+        mocks.resolveStorePath.mockImplementation(originalResolveStorePath);
+      }
+      if (originalLoadSessionStore) {
+        mocks.loadSessionStore.mockImplementation(originalLoadSessionStore);
+      }
+    }
+  });
 });
