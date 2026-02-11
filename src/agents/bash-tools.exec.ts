@@ -2,8 +2,6 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import {
@@ -55,6 +53,12 @@ import {
 } from "./bash-tools.shared.js";
 import { buildCursorPositionResponse, stripDsrRequests } from "./pty-dsr.js";
 import { getShellConfig, sanitizeBinaryOutput } from "./shell-utils.js";
+import {
+  EXCLUDED_CONTEXT_PREVIEW_CHARS,
+  formatExcludedFromContextHeader,
+  tailText,
+  writeToolOutputArtifact,
+} from "./tool-output-artifacts.js";
 import { callGatewayTool } from "./tools/gateway.js";
 import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
 
@@ -126,42 +130,6 @@ const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 const DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS = 130_000;
 const DEFAULT_APPROVAL_RUNNING_NOTICE_MS = 10_000;
 const APPROVAL_SLUG_LENGTH = 8;
-
-const EXCLUDED_CONTEXT_PREVIEW_CHARS = 4000;
-
-function safeArtifactId(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return crypto.randomBytes(4).toString("hex");
-  }
-  return crypto.createHash("sha256").update(trimmed).digest("hex").slice(0, 12);
-}
-
-async function writeExecOutputArtifact(params: {
-  preferredCwd?: string;
-  toolCallId: string;
-  output: string;
-}): Promise<string | null> {
-  const baseCwd = params.preferredCwd?.trim() || process.cwd();
-  const candidates = [
-    path.join(baseCwd, ".openclaw", "artifacts", "exec"),
-    path.join(os.tmpdir(), "openclaw", "artifacts", "exec"),
-  ];
-  const fileId = safeArtifactId(params.toolCallId);
-  const fileName = `exec-${Date.now()}-${fileId}.log`;
-
-  for (const dir of candidates) {
-    try {
-      await fs.mkdir(dir, { recursive: true });
-      const filePath = path.join(dir, fileName);
-      await fs.writeFile(filePath, params.output ?? "", "utf-8");
-      return filePath;
-    } catch {
-      // Try next location.
-    }
-  }
-  return null;
-}
 
 type PtyExitEvent = { exitCode: number; signal?: number };
 type PtyListener<T> = (event: T) => void;
@@ -1654,15 +1622,15 @@ export function createExecTool(
 
             if (params.excludeFromContext) {
               const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
-              const outputFile = await writeExecOutputArtifact({
+              const outputFile = await writeToolOutputArtifact({
                 preferredCwd: defaults?.cwd ?? run.session.cwd,
+                toolName: "exec",
                 toolCallId: artifactId,
                 output: outcome.aggregated ?? "",
+                extension: "log",
               });
-              const preview = tail(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
-              const header = outputFile
-                ? `⚠️ [exec output excluded from context; saved to ${outputFile}]`
-                : "⚠️ [exec output excluded from context; failed to save artifact]";
+              const preview = tailText(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
+              const header = formatExcludedFromContextHeader({ toolName: "exec", outputFile });
               const body = preview || "(no output)";
 
               resolve({
