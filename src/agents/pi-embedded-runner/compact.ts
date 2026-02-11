@@ -169,34 +169,27 @@ function estimateContextTokensInternal(messages: AgentMessage[]): {
   };
 }
 
-/** Sum estimateTokens() for all messages — consistent heuristic for before/after comparison. */
-function sumEstimateTokens(messages: AgentMessage[]): number {
-  let total = 0;
-  for (const message of messages) {
-    total += estimateTokens(message);
-  }
-  return total;
-}
-
 export function estimateTokensAfterCompaction(params: {
   messages: AgentMessage[];
   tokensBefore?: number;
 }): number | undefined {
   try {
-    // After compaction, usage data from surviving assistant messages is stale
-    // (it reflects the pre-compaction context window). Use pure estimation instead.
-    let tokensAfter = 0;
-    for (const message of params.messages) {
-      tokensAfter += estimateTokens(message);
-    }
+    const estimate = estimateContextTokensInternal(params.messages);
+    const tokensAfter = estimate.tokens;
+
     if (!Number.isFinite(tokensAfter) || tokensAfter < 0) {
       return undefined;
     }
 
     const tokensBefore = params.tokensBefore;
     if (typeof tokensBefore === "number" && Number.isFinite(tokensBefore) && tokensBefore > 0) {
+      // Keep the estimate (Codex/pi-coding-agent returns a value). Only treat large
+      // mismatches as a signal that something is off.
       if (tokensAfter > tokensBefore * TOKENS_AFTER_SANITY_RATIO) {
-        return undefined;
+        console.warn(
+          `compact: tokensAfter (${tokensAfter}) exceeds tokensBefore (${tokensBefore}) beyond ` +
+            `${TOKENS_AFTER_SANITY_RATIO}x; returning estimate anyway`,
+        );
       }
     }
 
@@ -534,21 +527,33 @@ export async function compactEmbeddedPiSessionDirect(
         if (limited.length > 0) {
           session.agent.replaceMessages(limited);
         }
-        // Estimate tokens BEFORE compact using the same heuristic we'll use after,
-        // so the before→after comparison is apples-to-apples.
-        const heuristicTokensBefore = sumEstimateTokens(session.messages);
+        // Snapshot messages before compact for apples-to-apples comparison
+        let heuristicBefore = 0;
+        for (const msg of session.messages) {
+          heuristicBefore += estimateTokens(msg);
+        }
+
         const result = await session.compact(params.customInstructions);
-        const tokensAfter = estimateTokensAfterCompaction({
-          messages: session.messages,
-          tokensBefore: heuristicTokensBefore,
-        });
+
+        // Pure heuristic for both before/after so reduction % is meaningful
+        let heuristicAfter = 0;
+        for (const msg of session.messages) {
+          heuristicAfter += estimateTokens(msg);
+        }
+        const tokensAfter = heuristicAfter;
+
+        log.info(
+          `[compact] tokensBefore=${heuristicBefore} tokensAfter=${tokensAfter} ` +
+            `reduction=${heuristicBefore && tokensAfter ? Math.round((1 - tokensAfter / heuristicBefore) * 100) : "?"}% ` +
+            `messages=${session.messages.length} sessionKey=${params.sessionKey ?? "unknown"}`,
+        );
         return {
           ok: true,
           compacted: true,
           result: {
             summary: result.summary,
             firstKeptEntryId: result.firstKeptEntryId,
-            tokensBefore: heuristicTokensBefore,
+            tokensBefore: result.tokensBefore,
             tokensAfter,
             details: result.details,
           },
