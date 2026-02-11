@@ -2,6 +2,8 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import {
@@ -125,6 +127,42 @@ const DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS = 130_000;
 const DEFAULT_APPROVAL_RUNNING_NOTICE_MS = 10_000;
 const APPROVAL_SLUG_LENGTH = 8;
 
+const EXCLUDED_CONTEXT_PREVIEW_CHARS = 4000;
+
+function safeArtifactId(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return crypto.randomBytes(4).toString("hex");
+  }
+  return crypto.createHash("sha256").update(trimmed).digest("hex").slice(0, 12);
+}
+
+async function writeExecOutputArtifact(params: {
+  preferredCwd?: string;
+  toolCallId: string;
+  output: string;
+}): Promise<string | null> {
+  const baseCwd = params.preferredCwd?.trim() || process.cwd();
+  const candidates = [
+    path.join(baseCwd, ".openclaw", "artifacts", "exec"),
+    path.join(os.tmpdir(), "openclaw", "artifacts", "exec"),
+  ];
+  const fileId = safeArtifactId(params.toolCallId);
+  const fileName = `exec-${Date.now()}-${fileId}.log`;
+
+  for (const dir of candidates) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      const filePath = path.join(dir, fileName);
+      await fs.writeFile(filePath, params.output ?? "", "utf-8");
+      return filePath;
+    } catch {
+      // Try next location.
+    }
+  }
+  return null;
+}
+
 type PtyExitEvent = { exitCode: number; signal?: number };
 type PtyListener<T> = (event: T) => void;
 type PtyHandle = {
@@ -213,6 +251,12 @@ const execSchema = Type.Object({
         "Run in a pseudo-terminal (PTY) when available (TTY-required CLIs, coding agents)",
     }),
   ),
+  excludeFromContext: Type.Optional(
+    Type.Boolean({
+      description:
+        "When true, save full output to an artifact file and return only a short preview to keep the session context small.",
+    }),
+  ),
   elevated: Type.Optional(
     Type.Boolean({
       description: "Run on the host with elevated permissions (if allowed)",
@@ -255,6 +299,9 @@ export type ExecToolDetails =
       durationMs: number;
       aggregated: string;
       cwd?: string;
+      /** When present, full output was saved outside the toolResult content/details. */
+      outputFile?: string;
+      excludedFromContext?: boolean;
     }
   | {
       status: "approval-pending";
@@ -829,7 +876,7 @@ export function createExecTool(
     description:
       "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents).",
     parameters: execSchema,
-    execute: async (_toolCallId, args, signal, onUpdate) => {
+    execute: async (toolCallId, args, signal, onUpdate) => {
       const params = args as {
         command: string;
         workdir?: string;
@@ -838,6 +885,7 @@ export function createExecTool(
         background?: boolean;
         timeout?: number;
         pty?: boolean;
+        excludeFromContext?: boolean;
         elevated?: boolean;
         host?: string;
         security?: string;
@@ -1591,7 +1639,7 @@ export function createExecTool(
         }
 
         run.promise
-          .then((outcome) => {
+          .then(async (outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
@@ -1602,11 +1650,46 @@ export function createExecTool(
               reject(new Error(outcome.reason ?? "Command failed."));
               return;
             }
+            const warningText = getWarningText();
+
+            if (params.excludeFromContext) {
+              const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
+              const outputFile = await writeExecOutputArtifact({
+                preferredCwd: defaults?.cwd ?? run.session.cwd,
+                toolCallId: artifactId,
+                output: outcome.aggregated ?? "",
+              });
+              const preview = tail(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
+              const header = outputFile
+                ? `⚠️ [exec output excluded from context; saved to ${outputFile}]`
+                : "⚠️ [exec output excluded from context; failed to save artifact]";
+              const body = preview || "(no output)";
+
+              resolve({
+                content: [
+                  {
+                    type: "text",
+                    text: `${warningText}${header}\n\n${body}`,
+                  },
+                ],
+                details: {
+                  status: "completed",
+                  exitCode: outcome.exitCode ?? 0,
+                  durationMs: outcome.durationMs,
+                  aggregated: body,
+                  cwd: run.session.cwd,
+                  outputFile: outputFile ?? undefined,
+                  excludedFromContext: true,
+                },
+              });
+              return;
+            }
+
             resolve({
               content: [
                 {
                   type: "text",
-                  text: `${getWarningText()}${outcome.aggregated || "(no output)"}`,
+                  text: `${warningText}${outcome.aggregated || "(no output)"}`,
                 },
               ],
               details: {

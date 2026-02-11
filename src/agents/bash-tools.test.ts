@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { peekSystemEvents, resetSystemEventsForTest } from "../infra/system-events.js";
@@ -199,6 +200,31 @@ describe("exec tool backgrounding", () => {
     });
     const text = result.content.find((c) => c.type === "text")?.text ?? "";
     expect(text).toContain("hi");
+  });
+
+  it("supports excludeFromContext output artifacts", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-exclude-"));
+    const customBash = createExecTool({
+      cwd: tmp,
+      backgroundMs: 60_000,
+      timeoutSec: 5,
+    });
+
+    const result = await customBash.execute("call_exclude", {
+      command: "node -e \"process.stdout.write('x'.repeat(12000))\"",
+      excludeFromContext: true,
+    });
+
+    const text = result.content.find((c) => c.type === "text")?.text ?? "";
+    expect(text).toContain("excluded from context");
+
+    const details = result.details as { outputFile?: string; excludedFromContext?: boolean };
+    expect(details.excludedFromContext).toBe(true);
+    expect(details.outputFile).toBeTruthy();
+
+    const fileContent = fs.readFileSync(details.outputFile!, "utf-8");
+    expect(fileContent.length).toBeGreaterThanOrEqual(12_000);
+    expect(text.length).toBeLessThan(6_000);
   });
 
   it("logs line-based slices and defaults to last lines", async () => {
