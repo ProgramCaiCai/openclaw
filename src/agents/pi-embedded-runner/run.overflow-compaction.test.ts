@@ -269,7 +269,7 @@ describe("overflow compaction in run loop", () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("auto-compaction failed"));
   });
 
-  it("falls back to tool-result truncation and retries when oversized results are detected", async () => {
+  it("pre-truncates tool results and retries before attempting compaction", async () => {
     const overflowError = new Error("request_too_large: Request size exceeds model context window");
 
     mockedRunEmbeddedAttempt
@@ -281,11 +281,6 @@ describe("overflow compaction in run loop", () => {
       )
       .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
 
-    mockedCompactDirect.mockResolvedValueOnce({
-      ok: false,
-      compacted: false,
-      reason: "nothing to compact",
-    });
     mockedSessionLikelyHasOversizedToolResults.mockReturnValue(true);
     mockedTruncateOversizedToolResultsInSession.mockResolvedValueOnce({
       truncated: true,
@@ -294,7 +289,8 @@ describe("overflow compaction in run loop", () => {
 
     const result = await runEmbeddedPiAgent(baseParams);
 
-    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    // Tool-result truncation now runs before any auto-compaction attempt.
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(0);
     expect(mockedSessionLikelyHasOversizedToolResults).toHaveBeenCalledWith(
       expect.objectContaining({ contextWindowTokens: 200000 }),
     );
@@ -432,5 +428,52 @@ describe("overflow compaction in run loop", () => {
 
     expect(mockedCompactDirect).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalledWith(expect.stringContaining("source=assistantError"));
+  });
+
+  it("triggers proactive compaction near the context limit", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        attemptUsage: {
+          input: 190000,
+          output: 10,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 190010,
+        },
+      }),
+    );
+
+    mockedCompactDirect.mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      result: {
+        summary: "Compacted session",
+        firstKeptEntryId: "entry-1",
+        tokensBefore: 190000,
+      },
+    });
+
+    await runEmbeddedPiAgent(baseParams);
+
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("[near-limit-compaction]"));
+  });
+
+  it("does not compact when prompt tokens are far from the context limit", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        attemptUsage: {
+          input: 10_000,
+          output: 10,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 10_010,
+        },
+      }),
+    );
+
+    await runEmbeddedPiAgent(baseParams);
+
+    expect(mockedCompactDirect).not.toHaveBeenCalled();
   });
 });

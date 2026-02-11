@@ -549,6 +549,7 @@ export async function runEmbeddedPiAgent(
                 ? sessionLikelyHasOversizedToolResults({
                     messages: attempt.messagesSnapshot,
                     contextWindowTokens,
+                    contextPruning: params.config?.agents?.defaults?.contextPruning,
                   })
                 : false;
 
@@ -561,6 +562,7 @@ export async function runEmbeddedPiAgent(
                 const truncResult = await truncateOversizedToolResultsInSession({
                   sessionFile: params.sessionFile,
                   contextWindowTokens,
+                  contextPruning: params.config?.agents?.defaults?.contextPruning,
                   sessionId: params.sessionId,
                   sessionKey: params.sessionKey,
                 });
@@ -796,6 +798,48 @@ export async function runEmbeddedPiAgent(
                 profileId: lastProfileId,
                 status,
               });
+            }
+          }
+
+          // Best-effort: if this run consumed most of the context window, compact now so the
+          // next user turn is less likely to overflow.
+          const promptUsage =
+            attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
+          const promptTokens = promptUsage?.input ?? 0;
+          const contextWindowTokens = ctxInfo.tokens;
+          if (!aborted && promptTokens >= contextWindowTokens * 0.85) {
+            log.info(
+              `[near-limit-compaction] promptTokens=${promptTokens} ctx=${contextWindowTokens}; attempting best-effort compaction`,
+            );
+            try {
+              const compactResult = await compactEmbeddedPiSessionDirect({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                messageChannel: params.messageChannel,
+                messageProvider: params.messageProvider,
+                agentAccountId: params.agentAccountId,
+                authProfileId: lastProfileId,
+                sessionFile: params.sessionFile,
+                workspaceDir: resolvedWorkspace,
+                agentDir,
+                config: params.config,
+                skillsSnapshot: params.skillsSnapshot,
+                senderIsOwner: params.senderIsOwner,
+                provider,
+                model: modelId,
+                thinkLevel,
+                reasoningLevel: params.reasoningLevel,
+                bashElevated: params.bashElevated,
+                extraSystemPrompt: params.extraSystemPrompt,
+                ownerNumbers: params.ownerNumbers,
+              });
+              if (compactResult.compacted) {
+                autoCompactionCount += 1;
+              }
+            } catch (err) {
+              log.warn(
+                `[near-limit-compaction] compaction attempt failed: ${describeUnknownError(err).slice(0, 200)}`,
+              );
             }
           }
 

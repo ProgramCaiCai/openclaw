@@ -9,7 +9,24 @@ function makeAssistant(text: string) {
     provider: "anthropic",
     model: "test-model",
     content: [{ type: "text" as const, text }],
+    stopReason: "end_turn" as const,
     timestamp: 0,
+  };
+}
+
+function makeAssistantWithUsage(
+  text: string,
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens?: number;
+  },
+) {
+  return {
+    ...makeAssistant(text),
+    usage,
   };
 }
 
@@ -22,37 +39,68 @@ function makeUser(text: string) {
 }
 
 describe("estimateTokensAfterCompaction", () => {
-  it("sums estimateTokens for all messages (ignores stale usage)", () => {
+  it("uses last assistant usage + trailing estimate when usage exists", () => {
+    const usage = { input: 100, output: 20, cacheRead: 0, cacheWrite: 0 };
+    const usageTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+
+    const messages = [
+      makeUser("hello"),
+      makeAssistantWithUsage("assistant", usage),
+      // Trailing messages (after last usage) are estimated.
+      {
+        role: "toolResult" as const,
+        toolCallId: "call_1",
+        toolName: "read",
+        content: [{ type: "text" as const, text: "ok" }],
+        timestamp: 0,
+      } as unknown,
+    ];
+
+    const trailingEstimate = estimateTokens(messages[2] as unknown);
+    const actual = estimateTokensAfterCompaction({
+      messages: messages as unknown,
+      tokensBefore: 10_000,
+    });
+
+    expect(actual).toBe(usageTokens + trailingEstimate);
+  });
+
+  it("falls back to summing estimateTokens when no usage exists", () => {
     const messages = [makeUser("hello world"), makeAssistant("response text")];
     const expected =
       estimateTokens(messages[0] as unknown) + estimateTokens(messages[1] as unknown);
     const actual = estimateTokensAfterCompaction({
       messages: messages as unknown,
-      tokensBefore: 10000,
+      tokensBefore: 10_000,
     });
     expect(actual).toBe(expected);
   });
 
-  it("returns undefined when estimate exceeds tokensBefore * sanity ratio", () => {
-    const messages = [makeAssistant("x".repeat(5000))];
-    const estimate = estimateTokens(messages[0] as unknown);
-    // tokensBefore much smaller than estimate → sanity check fails
-    const actual = estimateTokensAfterCompaction({
-      messages: messages as unknown,
-      tokensBefore: Math.floor(estimate / 2),
-    });
-    expect(actual).toBeUndefined();
-  });
+  it("skips aborted/error assistant usage and uses the previous usage", () => {
+    const oldUsage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 };
+    const messages = [
+      makeAssistantWithUsage("old", oldUsage),
+      {
+        ...makeAssistantWithUsage("aborted", {
+          input: 999,
+          output: 999,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 1998,
+        }),
+        stopReason: "aborted" as const,
+      },
+      makeUser("tail"),
+    ];
 
-  it("allows slight overshoot within sanity ratio (1.1x)", () => {
-    const messages = [makeAssistant("test")];
-    const estimate = estimateTokens(messages[0] as unknown);
-    // tokensBefore just below estimate → within 1.1x tolerance
+    const trailingEstimate =
+      estimateTokens(messages[1] as unknown) + estimateTokens(messages[2] as unknown);
     const actual = estimateTokensAfterCompaction({
       messages: messages as unknown,
-      tokensBefore: estimate,
+      tokensBefore: 10_000,
     });
-    expect(actual).toBe(estimate);
+
+    expect(actual).toBe(oldUsage.totalTokens! + trailingEstimate);
   });
 
   it("handles empty messages", () => {
