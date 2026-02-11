@@ -237,14 +237,16 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     if (!hasNonzeroUsage(usage)) {
       return;
     }
-    usageTotals.input += usage.input ?? 0;
+    // Prompt tokens: MAX (each API call reports full prompt size, not incremental)
+    usageTotals.input = Math.max(usageTotals.input, usage.input ?? 0);
+    usageTotals.cacheRead = Math.max(usageTotals.cacheRead, usage.cacheRead ?? 0);
+    usageTotals.cacheWrite = Math.max(usageTotals.cacheWrite, usage.cacheWrite ?? 0);
+    // Output tokens: SUM (each call generates new output)
     usageTotals.output += usage.output ?? 0;
-    usageTotals.cacheRead += usage.cacheRead ?? 0;
-    usageTotals.cacheWrite += usage.cacheWrite ?? 0;
     const usageTotal =
       usage.total ??
       (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-    usageTotals.total += usageTotal;
+    usageTotals.total = Math.max(usageTotals.total, usageTotal);
   };
   const getUsageTotals = () => {
     const hasUsage =

@@ -105,13 +105,16 @@ const mergeUsageIntoAccumulator = (
   if (!hasUsageValues(usage)) {
     return;
   }
-  target.input += usage.input ?? 0;
+  // Prompt tokens: MAX (each API call reports full prompt size, not incremental)
+  target.input = Math.max(target.input, usage.input ?? 0);
+  target.cacheRead = Math.max(target.cacheRead, usage.cacheRead ?? 0);
+  target.cacheWrite = Math.max(target.cacheWrite, usage.cacheWrite ?? 0);
+  // Output tokens: SUM (each call generates new output)
   target.output += usage.output ?? 0;
-  target.cacheRead += usage.cacheRead ?? 0;
-  target.cacheWrite += usage.cacheWrite ?? 0;
-  target.total +=
+  const usageTotal =
     usage.total ??
     (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+  target.total = Math.max(target.total, usageTotal);
 };
 
 const toNormalizedUsage = (usage: UsageAccumulator) => {
