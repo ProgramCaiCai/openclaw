@@ -1,16 +1,24 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   BASE_CHUNK_RATIO,
   MIN_CHUNK_RATIO,
   SAFETY_MARGIN,
   computeAdaptiveChunkRatio,
   estimateMessagesTokens,
+  isAbortError,
   isOversizedForSummary,
   pruneHistoryForContextShare,
   resolveContextWindowTokens,
   summarizeInStages,
 } from "../compaction.js";
+import {
+  computeFileLists,
+  createFileOps,
+  extractFileOpsFromMessage,
+  formatFileOperations,
+  mergeFileOps,
+} from "../compaction/file-ops.js";
 import { getCompactionSafeguardRuntime } from "./compaction-safeguard-runtime.js";
 const FALLBACK_SUMMARY =
   "Summary unavailable due to context limits. Older messages were truncated.";
@@ -134,64 +142,49 @@ function formatToolFailuresSection(failures: ToolFailure[]): string {
   return `\n\n## Tool Failures\n${lines.join("\n")}`;
 }
 
-function computeFileLists(fileOps: FileOperations): {
-  readFiles: string[];
-  modifiedFiles: string[];
-} {
-  const modified = new Set([...fileOps.edited, ...fileOps.written]);
-  const readFiles = [...fileOps.read].filter((f) => !modified.has(f)).toSorted();
-  const modifiedFiles = [...modified].toSorted();
-  return { readFiles, modifiedFiles };
-}
-
-function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
-  const sections: string[] = [];
-  if (readFiles.length > 0) {
-    sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
-  }
-  if (modifiedFiles.length > 0) {
-    sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
-  }
-  if (sections.length === 0) {
-    return "";
-  }
-  return `\n\n${sections.join("\n\n")}`;
-}
+// (file ops helpers moved to ../compaction/file-ops)
 
 export default function compactionSafeguardExtension(api: ExtensionAPI): void {
   api.on("session_before_compact", async (event, ctx) => {
     const { preparation, customInstructions, signal } = event;
-    const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
-    const fileOpsSummary = formatFileOperations(readFiles, modifiedFiles);
-    const toolFailures = collectToolFailures([
+
+    const summarizeMessages = [
       ...preparation.messagesToSummarize,
       ...preparation.turnPrefixMessages,
-    ]);
+    ];
+
+    const fileOps = createFileOps();
+    // preparation.fileOps comes from pi-coding-agent, but its extractor only recognizes args.path.
+    // Re-scan the messages with OpenClaw's path normalization so file ops are preserved even when
+    // tools use alternate keys (file_path/filePath/paths/filePaths).
+    mergeFileOps(fileOps, preparation.fileOps);
+    for (const msg of summarizeMessages) {
+      extractFileOpsFromMessage(msg, fileOps);
+    }
+
+    const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+    const fileOpsSummary = formatFileOperations(readFiles, modifiedFiles);
+
+    const toolFailures = collectToolFailures(summarizeMessages);
     const toolFailureSection = formatToolFailuresSection(toolFailures);
     const fallbackSummary = `${FALLBACK_SUMMARY}${toolFailureSection}${fileOpsSummary}`;
 
     const model = ctx.model;
     if (!model) {
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      // P0-1: No model available — cancel compaction to avoid low-quality fallback truncating history
+      console.warn(
+        "Compaction safeguard: no model available, skipping compaction to preserve history.",
+      );
+      return { cancel: true };
     }
 
     const apiKey = await ctx.modelRegistry.getApiKey(model);
     if (!apiKey) {
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      // P0-1: No API key — cancel compaction to avoid low-quality fallback truncating history
+      console.warn(
+        "Compaction safeguard: no API key available, skipping compaction to preserve history.",
+      );
+      return { cancel: true };
     }
 
     try {
@@ -208,21 +201,27 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           ? preparation.tokensBefore
           : undefined;
 
+      // P1-1: When tokensBefore is missing, estimate from available messages instead of skipping pruning
+      const estimatedTokensBefore =
+        tokensBefore ?? estimateMessagesTokens([...messagesToSummarize, ...turnPrefixMessages]);
+
       let droppedSummary: string | undefined;
 
-      if (tokensBefore !== undefined) {
+      {
         const summarizableTokens =
           estimateMessagesTokens(messagesToSummarize) + estimateMessagesTokens(turnPrefixMessages);
-        const newContentTokens = Math.max(0, Math.floor(tokensBefore - summarizableTokens));
-        // Apply SAFETY_MARGIN so token underestimates don't trigger unnecessary pruning
-        const maxHistoryTokens = Math.floor(contextWindowTokens * maxHistoryShare * SAFETY_MARGIN);
+        const newContentTokens = Math.max(
+          0,
+          Math.floor(estimatedTokensBefore - summarizableTokens),
+        );
+        // P1-1: Don't amplify threshold with SAFETY_MARGIN — cap at contextWindowTokens * maxHistoryShare
+        const maxHistoryTokens = Math.floor(contextWindowTokens * maxHistoryShare);
 
         if (newContentTokens > maxHistoryTokens) {
           const pruned = pruneHistoryForContextShare({
             messages: messagesToSummarize,
             maxContextTokens: contextWindowTokens,
             maxHistoryShare,
-            parts: 2,
           });
           if (pruned.droppedChunks > 0) {
             const newContentRatio = (newContentTokens / contextWindowTokens) * 100;
@@ -257,6 +256,10 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                   previousSummary: preparation.previousSummary,
                 });
               } catch (droppedError) {
+                // P0-2: Abort/cancel must not be swallowed into fallback path
+                if (isAbortError(droppedError, signal)) {
+                  throw droppedError;
+                }
                 console.warn(
                   `Compaction safeguard: failed to summarize dropped messages, continuing without: ${
                     droppedError instanceof Error ? droppedError.message : String(droppedError)
@@ -318,19 +321,17 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
         },
       };
     } catch (error) {
+      // P0-2: Abort/cancel must propagate — never fall into degraded compaction path
+      if (isAbortError(error, signal)) {
+        throw error;
+      }
+      // P0-1: Cancel compaction instead of using low-quality fallback that would truncate history
       console.warn(
-        `Compaction summarization failed; truncating history: ${
+        `Compaction summarization failed; cancelling compaction to preserve history: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      return { cancel: true };
     }
   });
 }

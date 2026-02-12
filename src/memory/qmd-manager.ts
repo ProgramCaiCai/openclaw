@@ -57,6 +57,9 @@ export class QmdMemoryManager implements MemorySearchManager {
     return manager;
   }
 
+  /** Cached flag: assume --no-expand is supported until proven otherwise. */
+  private static noExpandSupported = true;
+
   private readonly cfg: OpenClawConfig;
   private readonly agentId: string;
   private readonly qmd: ResolvedQmdConfig;
@@ -260,37 +263,38 @@ export class QmdMemoryManager implements MemorySearchManager {
       log.warn("qmd query skipped: no managed collections configured");
       return [];
     }
-    const qmdSearchCommand = this.qmd.searchMode;
-    const args = this.buildSearchArgs(qmdSearchCommand, trimmed, limit);
-    if (qmdSearchCommand === "query") {
-      args.push(...collectionFilterArgs);
-    }
+    const baseArgs = ["query", trimmed, "--json", "-n", String(limit), ...collectionFilterArgs];
     let stdout: string;
     let stderr: string;
     try {
+      // Try with --no-expand first (skips slow 1.7B hyde expansion).
+      // Falls back to plain query if qmd doesn't support the flag.
+      const args = QmdMemoryManager.noExpandSupported
+        ? ["query", trimmed, "--json", "--no-expand", "-n", String(limit), ...collectionFilterArgs]
+        : baseArgs;
       const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
       stdout = result.stdout;
       stderr = result.stderr;
     } catch (err) {
-      if (qmdSearchCommand !== "query" && this.isUnsupportedQmdOptionError(err)) {
-        log.warn(
-          `qmd ${qmdSearchCommand} does not support configured flags; retrying search with qmd query`,
-        );
+      const msg = String(err);
+      // If --no-expand was rejected (unknown flag), retry without it and remember.
+      if (
+        QmdMemoryManager.noExpandSupported &&
+        /unknown.*no-expand|unrecognized.*no-expand|invalid.*no-expand/i.test(msg)
+      ) {
+        log.info("qmd does not support --no-expand, falling back to plain query");
+        QmdMemoryManager.noExpandSupported = false;
         try {
-          const fallbackArgs = this.buildSearchArgs("query", trimmed, limit);
-          fallbackArgs.push(...collectionFilterArgs);
-          const fallback = await this.runQmd(fallbackArgs, {
-            timeoutMs: this.qmd.limits.timeoutMs,
-          });
-          stdout = fallback.stdout;
-          stderr = fallback.stderr;
-        } catch (fallbackErr) {
-          log.warn(`qmd query fallback failed: ${String(fallbackErr)}`);
-          throw fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr));
+          const result = await this.runQmd(baseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
+          stdout = result.stdout;
+          stderr = result.stderr;
+        } catch (retryErr) {
+          log.warn(`qmd query failed (retry): ${String(retryErr)}`);
+          throw retryErr instanceof Error ? retryErr : new Error(String(retryErr));
         }
       } else {
-        log.warn(`qmd ${qmdSearchCommand} failed: ${String(err)}`);
-        throw err instanceof Error ? err : new Error(String(err));
+        log.warn(`qmd query failed: ${msg}`);
+        throw err instanceof Error ? err : new Error(msg);
       }
     }
     const parsed = parseQmdQueryJson(stdout, stderr);

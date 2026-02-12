@@ -38,9 +38,16 @@ export function readTelegramButtons(
   if (!Array.isArray(raw)) {
     throw new Error("buttons must be an array of button rows");
   }
+  if (raw.length > 50) {
+    throw new Error(`buttons has too many rows (max 50)`);
+  }
+  const encoder = new TextEncoder();
   const rows = raw.map((row, rowIndex) => {
     if (!Array.isArray(row)) {
       throw new Error(`buttons[${rowIndex}] must be an array`);
+    }
+    if (row.length > 8) {
+      throw new Error(`buttons[${rowIndex}] has too many buttons (max 8)`);
     }
     return row.map((button, buttonIndex) => {
       if (!button || typeof button !== "object") {
@@ -57,9 +64,9 @@ export function readTelegramButtons(
       if (!text || !callbackData) {
         throw new Error(`buttons[${rowIndex}][${buttonIndex}] requires text and callback_data`);
       }
-      if (callbackData.length > 64) {
+      if (encoder.encode(callbackData).length > 64) {
         throw new Error(
-          `buttons[${rowIndex}][${buttonIndex}] callback_data too long (max 64 chars)`,
+          `buttons[${rowIndex}][${buttonIndex}] callback_data too long (max 64 bytes)`,
         );
       }
       return { text, callback_data: callbackData };
@@ -109,7 +116,13 @@ export async function handleTelegramAction(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
     }
-    const reactionResult = await reactMessageTelegram(chatId ?? "", messageId ?? 0, emoji ?? "", {
+    if (chatId == null) {
+      throw new Error("chatId is required");
+    }
+    if (messageId == null) {
+      throw new Error("messageId is required");
+    }
+    const reactionResult = await reactMessageTelegram(chatId, messageId, emoji ?? "", {
       token,
       remove,
       accountId: accountId ?? undefined,
@@ -216,7 +229,13 @@ export async function handleTelegramAction(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
     }
-    await deleteMessageTelegram(chatId ?? "", messageId ?? 0, {
+    if (chatId == null) {
+      throw new Error("chatId is required");
+    }
+    if (messageId == null) {
+      throw new Error("messageId is required");
+    }
+    await deleteMessageTelegram(chatId, messageId, {
       token,
       accountId: accountId ?? undefined,
     });
@@ -256,7 +275,13 @@ export async function handleTelegramAction(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
     }
-    const result = await editMessageTelegram(chatId ?? "", messageId ?? 0, content, {
+    if (chatId == null) {
+      throw new Error("chatId is required");
+    }
+    if (messageId == null) {
+      throw new Error("messageId is required");
+    }
+    const result = await editMessageTelegram(chatId, messageId, content, {
       token,
       accountId: accountId ?? undefined,
       buttons,

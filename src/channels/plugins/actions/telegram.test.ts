@@ -6,6 +6,7 @@ const handleTelegramAction = vi.fn(async () => ({ ok: true }));
 
 vi.mock("../../../agents/tools/telegram-actions.js", () => ({
   handleTelegramAction: (...args: unknown[]) => handleTelegramAction(...args),
+  readTelegramButtons: (params: Record<string, unknown>) => params.buttons,
 }));
 
 describe("telegramMessageActions", () => {

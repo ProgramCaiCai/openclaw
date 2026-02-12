@@ -1,4 +1,6 @@
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
+  calculateContextTokens,
   createAgentSession,
   estimateTokens,
   SessionManager,
@@ -109,6 +111,95 @@ export type CompactEmbeddedPiSessionParams = {
   ownerNumbers?: string[];
 };
 
+const TOKENS_AFTER_SANITY_RATIO = 1.1;
+
+/**
+ * Find the last non-aborted, non-error assistant message with usage.
+ * Equivalent to pi-coding-agent's internal `getLastAssistantUsageInfo`.
+ */
+function getLastAssistantUsageInfo(
+  messages: AgentMessage[],
+): { usage: unknown; index: number } | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg.role !== "assistant") {
+      continue;
+    }
+    const assistant = msg as { stopReason?: string; usage?: unknown };
+    if (assistant.stopReason === "aborted" || assistant.stopReason === "error") {
+      continue;
+    }
+    if (assistant.usage) {
+      return { usage: assistant.usage, index: i };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Usage-aware context token estimator matching pi-coding-agent's `estimateContextTokens`.
+ * Uses real usage from the last valid assistant message + heuristic for trailing messages.
+ */
+function estimateContextTokensInternal(messages: AgentMessage[]): {
+  tokens: number;
+  usageTokens: number;
+  trailingTokens: number;
+  lastUsageIndex: number | null;
+} {
+  const usageInfo = getLastAssistantUsageInfo(messages);
+  if (!usageInfo) {
+    let estimated = 0;
+    for (const message of messages) {
+      estimated += estimateTokens(message);
+    }
+    return { tokens: estimated, usageTokens: 0, trailingTokens: estimated, lastUsageIndex: null };
+  }
+
+  const usageTokens = calculateContextTokens(
+    usageInfo.usage as Parameters<typeof calculateContextTokens>[0],
+  );
+  let trailingTokens = 0;
+  for (let i = usageInfo.index + 1; i < messages.length; i++) {
+    trailingTokens += estimateTokens(messages[i]);
+  }
+  return {
+    tokens: usageTokens + trailingTokens,
+    usageTokens,
+    trailingTokens,
+    lastUsageIndex: usageInfo.index,
+  };
+}
+
+export function estimateTokensAfterCompaction(params: {
+  messages: AgentMessage[];
+  tokensBefore?: number;
+}): number | undefined {
+  try {
+    const estimate = estimateContextTokensInternal(params.messages);
+    const tokensAfter = estimate.tokens;
+
+    if (!Number.isFinite(tokensAfter) || tokensAfter < 0) {
+      return undefined;
+    }
+
+    const tokensBefore = params.tokensBefore;
+    if (typeof tokensBefore === "number" && Number.isFinite(tokensBefore) && tokensBefore > 0) {
+      // Keep the estimate (Codex/pi-coding-agent returns a value). Only treat large
+      // mismatches as a signal that something is off.
+      if (tokensAfter > tokensBefore * TOKENS_AFTER_SANITY_RATIO) {
+        console.warn(
+          `compact: tokensAfter (${tokensAfter}) exceeds tokensBefore (${tokensBefore}) beyond ` +
+            `${TOKENS_AFTER_SANITY_RATIO}x; returning estimate anyway`,
+        );
+      }
+    }
+
+    return tokensAfter;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Core compaction logic without lane queueing.
  * Use this when already inside a session/global lane to avoid deadlocks.
@@ -187,7 +278,6 @@ export async function compactEmbeddedPiSessionDirect(
   });
 
   let restoreSkillEnv: (() => void) | undefined;
-  process.chdir(effectiveWorkspace);
   try {
     const shouldLoadSkillEntries = !params.skillsSnapshot || !params.skillsSnapshot.resolvedSkills;
     const skillEntries = shouldLoadSkillEntries
@@ -329,7 +419,7 @@ export async function compactEmbeddedPiSessionDirect(
     const docsPath = await resolveOpenClawDocsPath({
       workspaceDir: effectiveWorkspace,
       argv1: process.argv[1],
-      cwd: process.cwd(),
+      cwd: prevCwd,
       moduleUrl: import.meta.url,
     });
     const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
@@ -443,22 +533,28 @@ export async function compactEmbeddedPiSessionDirect(
         if (limited.length > 0) {
           session.agent.replaceMessages(limited);
         }
-        const result = await session.compact(params.customInstructions);
-        // Estimate tokens after compaction by summing token estimates for remaining messages
-        let tokensAfter: number | undefined;
-        try {
-          tokensAfter = 0;
-          for (const message of session.messages) {
-            tokensAfter += estimateTokens(message);
-          }
-          // Sanity check: tokensAfter should be less than tokensBefore
-          if (tokensAfter > result.tokensBefore) {
-            tokensAfter = undefined; // Don't trust the estimate
-          }
-        } catch {
-          // If estimation fails, leave tokensAfter undefined
-          tokensAfter = undefined;
+        // Snapshot messages before compact for apples-to-apples comparison
+        const messagesBefore = [...session.messages];
+        let heuristicBefore = 0;
+        for (const msg of messagesBefore) {
+          heuristicBefore += estimateTokens(msg);
         }
+
+        const result = await session.compact(params.customInstructions);
+
+        // Pure heuristic for both before/after so reduction % is meaningful
+        const messagesAfter = [...session.messages];
+        let heuristicAfter = 0;
+        for (const msg of messagesAfter) {
+          heuristicAfter += estimateTokens(msg);
+        }
+        const tokensAfter = heuristicAfter;
+
+        log.info(
+          `[compact] tokensBefore=${heuristicBefore} tokensAfter=${tokensAfter} ` +
+            `reduction=${heuristicBefore && tokensAfter ? Math.round((1 - tokensAfter / heuristicBefore) * 100) : "?"}% ` +
+            `messages=${session.messages.length} sessionKey=${params.sessionKey ?? "unknown"}`,
+        );
         return {
           ok: true,
           compacted: true,
@@ -485,7 +581,6 @@ export async function compactEmbeddedPiSessionDirect(
     };
   } finally {
     restoreSkillEnv?.();
-    process.chdir(prevCwd);
   }
 }
 

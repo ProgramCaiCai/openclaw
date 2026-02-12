@@ -2,6 +2,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { installSessionToolResultGuard } from "./session-tool-result-guard.js";
+import { TOOL_OUTPUT_HARD_MAX_BYTES, TOOL_OUTPUT_HARD_MAX_LINES } from "./tool-output-hard-cap.js";
 
 type AppendMessage = Parameters<SessionManager["appendMessage"]>[0];
 
@@ -235,7 +236,42 @@ describe("installSessionToolResultGuard", () => {
     const textBlock = toolResult.content.find((b: { type: string }) => b.type === "text") as {
       text: string;
     };
-    expect(textBlock.text.length).toBeLessThan(500_000);
+    expect(Buffer.byteLength(textBlock.text, "utf8")).toBeLessThanOrEqual(
+      TOOL_OUTPUT_HARD_MAX_BYTES,
+    );
+    expect(textBlock.text.split(/\r?\n/).length).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_MAX_LINES);
+    expect(textBlock.text).toContain("truncated");
+  });
+
+  it("caps tool results by line count during persistence", () => {
+    const sm = SessionManager.inMemory();
+    installSessionToolResultGuard(sm);
+
+    const noisy = "\n".repeat(3000);
+    sm.appendMessage(toolCallMessage);
+    sm.appendMessage(
+      asAppendMessage({
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "read",
+        content: [{ type: "text", text: noisy }],
+        isError: false,
+        timestamp: Date.now(),
+      }),
+    );
+
+    const entries = sm
+      .getEntries()
+      .filter((e) => e.type === "message")
+      .map((e) => (e as { message: AgentMessage }).message);
+
+    const toolResult = entries.find((m) => m.role === "toolResult") as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const textBlock = toolResult.content.find((b: { type: string }) => b.type === "text") as {
+      text: string;
+    };
+    expect(textBlock.text.split(/\r?\n/).length).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_MAX_LINES);
     expect(textBlock.text).toContain("truncated");
   });
 

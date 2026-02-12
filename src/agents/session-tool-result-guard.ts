@@ -2,76 +2,115 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { TextContent } from "@mariozechner/pi-ai";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
-import { HARD_MAX_TOOL_RESULT_CHARS } from "./pi-embedded-runner/tool-result-truncation.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
+import {
+  hardTruncateText,
+  TOOL_OUTPUT_HARD_MAX_BYTES,
+  TOOL_OUTPUT_HARD_MAX_LINES,
+} from "./tool-output-hard-cap.js";
+
+type ToolCall = { id: string; name?: string };
 
 const GUARD_TRUNCATION_SUFFIX =
-  "\n\n⚠️ [Content truncated during persistence — original exceeded size limit. " +
+  "⚠️ [Content truncated during persistence - exceeded hard limit (50KB / 2000 lines). " +
   "Use offset/limit parameters or request specific sections for large content.]";
 
 /**
- * Truncate oversized text content blocks in a tool result message.
- * Returns the original message if under the limit, or a new message with
- * truncated text blocks otherwise.
+ * Apply the system toolResult hard-cap policy before persisting to a session transcript.
+ * Returns the original message reference when no changes are needed.
  */
-function capToolResultSize(msg: AgentMessage): AgentMessage {
+function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage {
   const role = (msg as { role?: string }).role;
   if (role !== "toolResult") {
     return msg;
   }
+
   const content = (msg as { content?: unknown }).content;
   if (!Array.isArray(content)) {
     return msg;
   }
 
-  // Calculate total text size
-  let totalTextChars = 0;
+  // Flatten text blocks so we can enforce a strict global cap (bytes + lines).
+  // If we need to cap, we also drop non-text blocks to avoid persisting large
+  // binary payloads (e.g. base64 images) into the session context.
+  let combined = "";
+  let nonTextBlocks = 0;
   for (const block of content) {
-    if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
-      const text = (block as TextContent).text;
-      if (typeof text === "string") {
-        totalTextChars += text.length;
-      }
+    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
+      nonTextBlocks += 1;
+      continue;
     }
+    const text = (block as TextContent).text;
+    if (typeof text !== "string" || !text) {
+      continue;
+    }
+    combined = combined ? `${combined}\n${text}` : text;
   }
 
-  if (totalTextChars <= HARD_MAX_TOOL_RESULT_CHARS) {
+  if (!combined) {
+    // Even without text blocks, enforce a total byte cap on the serialized message
+    // to prevent large non-text payloads (e.g. base64 images) from bloating the transcript.
+    if (nonTextBlocks > 0) {
+      try {
+        const bytes = Buffer.byteLength(JSON.stringify(msg), "utf8");
+        if (bytes > TOOL_OUTPUT_HARD_MAX_BYTES) {
+          return {
+            ...msg,
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `⚠️ [Tool result contained ${nonTextBlocks} non-text block(s) totaling ${bytes} bytes — ` +
+                  `exceeded hard limit (${TOOL_OUTPUT_HARD_MAX_BYTES} bytes). Content removed during persistence.]`,
+              },
+            ],
+          } as AgentMessage;
+        }
+      } catch {
+        // Serialization failed — cap it defensively
+        return {
+          ...msg,
+          content: [
+            {
+              type: "text" as const,
+              text: `⚠️ [Tool result contained non-serializable content — removed during persistence.]`,
+            },
+          ],
+        } as AgentMessage;
+      }
+    }
     return msg;
   }
 
-  // Truncate proportionally
-  const newContent = content.map((block: unknown) => {
-    if (!block || typeof block !== "object" || (block as { type?: string }).type !== "text") {
-      return block;
+  let forceTextOnly = nonTextBlocks > 0;
+  if (!forceTextOnly) {
+    try {
+      const bytes = Buffer.byteLength(JSON.stringify(msg), "utf8");
+      forceTextOnly = bytes > TOOL_OUTPUT_HARD_MAX_BYTES;
+    } catch {
+      forceTextOnly = true;
     }
-    const textBlock = block as TextContent;
-    if (typeof textBlock.text !== "string") {
-      return block;
-    }
-    const blockShare = textBlock.text.length / totalTextChars;
-    const blockBudget = Math.max(
-      2_000,
-      Math.floor(HARD_MAX_TOOL_RESULT_CHARS * blockShare) - GUARD_TRUNCATION_SUFFIX.length,
-    );
-    if (textBlock.text.length <= blockBudget) {
-      return block;
-    }
-    // Try to cut at a newline boundary
-    let cutPoint = blockBudget;
-    const lastNewline = textBlock.text.lastIndexOf("\n", blockBudget);
-    if (lastNewline > blockBudget * 0.8) {
-      cutPoint = lastNewline;
-    }
-    return {
-      ...textBlock,
-      text: textBlock.text.slice(0, cutPoint) + GUARD_TRUNCATION_SUFFIX,
-    };
+  }
+
+  const prefix = forceTextOnly
+    ? `${combined}\n⚠️ [Tool result normalized during persistence to enforce output caps.]`
+    : combined;
+
+  const capped = hardTruncateText(prefix, {
+    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES,
+    maxLines: TOOL_OUTPUT_HARD_MAX_LINES,
+    suffix: GUARD_TRUNCATION_SUFFIX,
   });
 
-  return { ...msg, content: newContent } as AgentMessage;
-}
+  if (!forceTextOnly && !capped.truncated) {
+    return msg;
+  }
 
-type ToolCall = { id: string; name?: string };
+  return {
+    ...msg,
+    content: [{ type: "text", text: capped.text }],
+  } as AgentMessage;
+}
 
 function extractAssistantToolCalls(msg: Extract<AgentMessage, { role: "assistant" }>): ToolCall[] {
   const content = msg.content;
@@ -151,13 +190,14 @@ export function installSessionToolResultGuard(
     if (allowSyntheticToolResults) {
       for (const [id, name] of pending.entries()) {
         const synthetic = makeMissingToolResult({ toolCallId: id, toolName: name });
-        originalAppend(
-          persistToolResult(synthetic, {
-            toolCallId: id,
-            toolName: name,
-            isSynthetic: true,
-          }) as never,
-        );
+        const transformed = persistToolResult(synthetic, {
+          toolCallId: id,
+          toolName: name,
+          isSynthetic: true,
+        });
+        // Apply the hard cap *after* any hook transforms so plugins can't re-inflate tool results.
+        const capped = hardCapToolResultMessageForPersistence(transformed);
+        originalAppend(capped as never);
       }
     }
     pending.clear();
@@ -184,16 +224,16 @@ export function installSessionToolResultGuard(
       if (id) {
         pending.delete(id);
       }
-      // Apply hard size cap before persistence to prevent oversized tool results
-      // from consuming the entire context window on subsequent LLM calls.
-      const capped = capToolResultSize(nextMessage);
-      return originalAppend(
-        persistToolResult(capped, {
-          toolCallId: id ?? undefined,
-          toolName,
-          isSynthetic: false,
-        }) as never,
-      );
+      // Apply the hard cap before + after hook transforms so persisted tool results
+      // always conform to the system limits.
+      const preCapped = hardCapToolResultMessageForPersistence(nextMessage);
+      const transformed = persistToolResult(preCapped, {
+        toolCallId: id ?? undefined,
+        toolName,
+        isSynthetic: false,
+      });
+      const postCapped = hardCapToolResultMessageForPersistence(transformed);
+      return originalAppend(postCapped as never);
     }
 
     const toolCalls =

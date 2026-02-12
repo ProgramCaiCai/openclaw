@@ -2,15 +2,17 @@ import { getChannelPlugin, normalizeChannelId } from "../channels/plugins/index.
 import { normalizeTargetForProvider } from "../infra/outbound/target-normalization.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { type MessagingToolSend } from "./pi-embedded-messaging.js";
+import { hardTruncateText } from "./tool-output-hard-cap.js";
 
 const TOOL_RESULT_MAX_CHARS = 8000;
 const TOOL_ERROR_MAX_CHARS = 400;
 
 function truncateToolText(text: string): string {
-  if (text.length <= TOOL_RESULT_MAX_CHARS) {
-    return text;
+  const hard = hardTruncateText(text).text;
+  if (hard.length <= TOOL_RESULT_MAX_CHARS) {
+    return hard;
   }
-  return `${truncateUtf16Safe(text, TOOL_RESULT_MAX_CHARS)}\n…(truncated)…`;
+  return `${truncateUtf16Safe(hard, TOOL_RESULT_MAX_CHARS)}\n…(truncated)…`;
 }
 
 function normalizeToolErrorText(text: string): string | undefined {

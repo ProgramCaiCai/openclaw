@@ -1,13 +1,16 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { describe, expect, it } from "vitest";
+import type { AgentContextPruningConfig } from "../../config/types.agent-defaults.js";
 import {
-  truncateToolResultText,
-  calculateMaxToolResultChars,
   truncateOversizedToolResultsInMessages,
   isOversizedToolResult,
   sessionLikelyHasOversizedToolResults,
-  HARD_MAX_TOOL_RESULT_CHARS,
 } from "./tool-result-truncation.js";
+
+const PRUNING: AgentContextPruningConfig = {
+  minPrunableToolChars: 4000,
+  softTrim: { maxChars: 2000, headChars: 800, tailChars: 800 },
+};
 
 function makeToolResult(text: string, toolCallId = "call_1"): AgentMessage {
   return {
@@ -21,11 +24,7 @@ function makeToolResult(text: string, toolCallId = "call_1"): AgentMessage {
 }
 
 function makeUserMessage(text: string): AgentMessage {
-  return {
-    role: "user",
-    content: text,
-    timestamp: Date.now(),
-  } as AgentMessage;
+  return { role: "user", content: text, timestamp: Date.now() } as AgentMessage;
 }
 
 function makeAssistantMessage(text: string): AgentMessage {
@@ -46,160 +45,116 @@ function makeAssistantMessage(text: string): AgentMessage {
   } as AgentMessage;
 }
 
-describe("truncateToolResultText", () => {
-  it("returns text unchanged when under limit", () => {
-    const text = "hello world";
-    expect(truncateToolResultText(text, 1000)).toBe(text);
-  });
-
-  it("truncates text that exceeds limit", () => {
-    const text = "a".repeat(10_000);
-    const result = truncateToolResultText(text, 5_000);
-    expect(result.length).toBeLessThan(text.length);
-    expect(result).toContain("truncated");
-  });
-
-  it("preserves at least MIN_KEEP_CHARS (2000)", () => {
-    const text = "x".repeat(50_000);
-    const result = truncateToolResultText(text, 100); // Even with small limit
-    expect(result.length).toBeGreaterThan(2000);
-  });
-
-  it("tries to break at newline boundary", () => {
-    const lines = Array.from({ length: 100 }, (_, i) => `line ${i}: ${"x".repeat(50)}`).join("\n");
-    const result = truncateToolResultText(lines, 3000);
-    // Should contain truncation notice
-    expect(result).toContain("truncated");
-    // The truncated content should be shorter than the original
-    expect(result.length).toBeLessThan(lines.length);
-    // Extract the kept content (before the truncation suffix marker)
-    const suffixIndex = result.indexOf("\n\n⚠️");
-    if (suffixIndex > 0) {
-      const keptContent = result.slice(0, suffixIndex);
-      // Should end at a newline boundary (i.e., the last char before suffix is a complete line)
-      const lastNewline = keptContent.lastIndexOf("\n");
-      // The last newline should be near the end (within the last line)
-      expect(lastNewline).toBeGreaterThan(keptContent.length - 100);
-    }
-  });
-});
-
-describe("calculateMaxToolResultChars", () => {
-  it("scales with context window size", () => {
-    const small = calculateMaxToolResultChars(32_000);
-    const large = calculateMaxToolResultChars(200_000);
-    expect(large).toBeGreaterThan(small);
-  });
-
-  it("caps at HARD_MAX_TOOL_RESULT_CHARS for very large windows", () => {
-    const result = calculateMaxToolResultChars(2_000_000); // 2M token window
-    expect(result).toBeLessThanOrEqual(HARD_MAX_TOOL_RESULT_CHARS);
-  });
-
-  it("returns reasonable size for 128K context", () => {
-    const result = calculateMaxToolResultChars(128_000);
-    // 30% of 128K = 38.4K tokens * 4 chars = 153.6K chars
-    expect(result).toBeGreaterThan(100_000);
-    expect(result).toBeLessThan(200_000);
-  });
-});
-
-describe("isOversizedToolResult", () => {
+describe("isOversizedToolResult (contextPruning)", () => {
   it("returns false for small tool results", () => {
-    const msg = makeToolResult("small content");
-    expect(isOversizedToolResult(msg, 200_000)).toBe(false);
+    expect(isOversizedToolResult(makeToolResult("small"), 200_000, PRUNING)).toBe(false);
   });
 
-  it("returns true for oversized tool results", () => {
-    const msg = makeToolResult("x".repeat(500_000));
-    expect(isOversizedToolResult(msg, 128_000)).toBe(true);
+  it("returns true when content exceeds minPrunableToolChars", () => {
+    expect(isOversizedToolResult(makeToolResult("x".repeat(5000)), 200_000, PRUNING)).toBe(true);
   });
 
   it("returns false for non-toolResult messages", () => {
-    const msg = makeUserMessage("x".repeat(500_000));
-    expect(isOversizedToolResult(msg, 128_000)).toBe(false);
+    expect(isOversizedToolResult(makeUserMessage("x".repeat(50_000)), 200_000, PRUNING)).toBe(
+      false,
+    );
+  });
+
+  it("uses default minPrunableToolChars=4000 when no config provided", () => {
+    expect(isOversizedToolResult(makeToolResult("x".repeat(3999)), 200_000)).toBe(false);
+    expect(isOversizedToolResult(makeToolResult("x".repeat(4001)), 200_000)).toBe(true);
   });
 });
 
-describe("truncateOversizedToolResultsInMessages", () => {
+describe("truncateOversizedToolResultsInMessages (contextPruning)", () => {
   it("returns unchanged messages when nothing is oversized", () => {
     const messages = [
       makeUserMessage("hello"),
-      makeAssistantMessage("using tool"),
-      makeToolResult("small result"),
+      makeAssistantMessage("ok"),
+      makeToolResult("small"),
     ];
     const { messages: result, truncatedCount } = truncateOversizedToolResultsInMessages(
       messages,
       200_000,
+      PRUNING,
     );
     expect(truncatedCount).toBe(0);
     expect(result).toEqual(messages);
   });
 
-  it("truncates oversized tool results", () => {
-    const bigContent = "x".repeat(500_000);
+  it("trims tool results keeping head + marker + tail within maxChars", () => {
+    const head = "A".repeat(800);
+    const mid = "B".repeat(9000);
+    const tail = "C".repeat(800);
+    const bigContent = head + mid + tail;
     const messages = [
       makeUserMessage("hello"),
-      makeAssistantMessage("reading file"),
+      makeAssistantMessage("reading"),
       makeToolResult(bigContent),
     ];
+
     const { messages: result, truncatedCount } = truncateOversizedToolResultsInMessages(
       messages,
-      128_000,
+      200_000,
+      PRUNING,
     );
     expect(truncatedCount).toBe(1);
-    const toolResult = result[2] as { content: Array<{ text: string }> };
-    expect(toolResult.content[0].text.length).toBeLessThan(bigContent.length);
-    expect(toolResult.content[0].text).toContain("truncated");
+
+    const outText = (result[2] as { content: Array<{ text: string }> }).content[0].text;
+    expect(outText.length).toBeLessThanOrEqual(2000);
+    expect(outText).toContain("\n...\n");
+    expect(outText.startsWith(head)).toBe(true);
+    expect(outText.endsWith(tail)).toBe(true);
+    expect(outText).not.toContain("B".repeat(100));
   });
 
-  it("preserves non-toolResult messages", () => {
+  it("preserves non-toolResult messages by reference", () => {
     const messages = [
       makeUserMessage("hello"),
-      makeAssistantMessage("reading file"),
-      makeToolResult("x".repeat(500_000)),
+      makeAssistantMessage("reading"),
+      makeToolResult("x".repeat(10_000)),
     ];
-    const { messages: result } = truncateOversizedToolResultsInMessages(messages, 128_000);
-    expect(result[0]).toBe(messages[0]); // Same reference
-    expect(result[1]).toBe(messages[1]); // Same reference
+    const { messages: result } = truncateOversizedToolResultsInMessages(messages, 200_000, PRUNING);
+    expect(result[0]).toBe(messages[0]);
+    expect(result[1]).toBe(messages[1]);
   });
 
   it("handles multiple oversized tool results", () => {
     const messages = [
       makeUserMessage("hello"),
-      makeAssistantMessage("reading files"),
-      makeToolResult("x".repeat(500_000), "call_1"),
-      makeToolResult("y".repeat(500_000), "call_2"),
+      makeToolResult("x".repeat(10_000), "call_1"),
+      makeToolResult("y".repeat(10_000), "call_2"),
     ];
     const { messages: result, truncatedCount } = truncateOversizedToolResultsInMessages(
       messages,
-      128_000,
+      200_000,
+      PRUNING,
     );
     expect(truncatedCount).toBe(2);
-    for (const msg of result.slice(2)) {
+    for (const msg of result.slice(1)) {
       const tr = msg as { content: Array<{ text: string }> };
-      expect(tr.content[0].text.length).toBeLessThan(500_000);
+      expect(tr.content[0].text.length).toBeLessThanOrEqual(2000);
     }
   });
 });
 
 describe("sessionLikelyHasOversizedToolResults", () => {
   it("returns false when no tool results are oversized", () => {
-    const messages = [makeUserMessage("hello"), makeToolResult("small result")];
     expect(
       sessionLikelyHasOversizedToolResults({
-        messages,
+        messages: [makeUserMessage("hello"), makeToolResult("small")],
         contextWindowTokens: 200_000,
+        contextPruning: PRUNING,
       }),
     ).toBe(false);
   });
 
   it("returns true when a tool result is oversized", () => {
-    const messages = [makeUserMessage("hello"), makeToolResult("x".repeat(500_000))];
     expect(
       sessionLikelyHasOversizedToolResults({
-        messages,
-        contextWindowTokens: 128_000,
+        messages: [makeUserMessage("hello"), makeToolResult("x".repeat(10_000))],
+        contextWindowTokens: 200_000,
+        contextPruning: PRUNING,
       }),
     ).toBe(true);
   });
@@ -209,6 +164,7 @@ describe("sessionLikelyHasOversizedToolResults", () => {
       sessionLikelyHasOversizedToolResults({
         messages: [],
         contextWindowTokens: 200_000,
+        contextPruning: PRUNING,
       }),
     ).toBe(false);
   });

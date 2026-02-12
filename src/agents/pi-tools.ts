@@ -43,6 +43,7 @@ import {
   wrapToolParamNormalization,
 } from "./pi-tools.read.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
+import { wrapToolWithHardOutputTruncate } from "./tool-output-hard-truncate.js";
 import {
   applyOwnerOnlyToolPolicy,
   buildPluginToolGroups,
@@ -449,8 +450,10 @@ export function createOpenClawCodingTools(options?: {
     ? withHooks.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
     : withHooks;
 
+  const withHardTruncate = withAbort.map((tool) => wrapToolWithHardOutputTruncate(tool));
+
   // NOTE: Keep canonical (lowercase) tool names here.
   // pi-ai's Anthropic OAuth transport remaps tool names to Claude Code-style names
   // on the wire and maps them back for tool dispatch.
-  return withAbort;
+  return withHardTruncate;
 }

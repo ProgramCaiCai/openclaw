@@ -6,6 +6,12 @@ import { SsrFBlockedError } from "../../infra/net/ssrf.js";
 import { wrapExternalContent, wrapWebContent } from "../../security/external-content.js";
 import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import { stringEnum } from "../schema/typebox.js";
+import {
+  EXCLUDED_CONTEXT_PREVIEW_CHARS,
+  formatExcludedFromContextHeader,
+  tailText,
+  writeToolOutputArtifact,
+} from "../tool-output-artifacts.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
 import {
   extractReadableContent,
@@ -53,6 +59,12 @@ const WebFetchSchema = Type.Object({
     Type.Number({
       description: "Maximum characters to return (truncates when exceeded).",
       minimum: 100,
+    }),
+  ),
+  excludeFromContext: Type.Optional(
+    Type.Boolean({
+      description:
+        "When true, save full output to an artifact file and return only a short preview to keep the session context small.",
     }),
   ),
 });
@@ -655,11 +667,12 @@ export function createWebFetchTool(options?: {
     description:
       "Fetch and extract readable content from a URL (HTML → markdown/text). Use for lightweight page access without browser automation.",
     parameters: WebFetchSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const url = readStringParam(params, "url", { required: true });
       const extractMode = readStringParam(params, "extractMode") === "text" ? "text" : "markdown";
       const maxChars = readNumberParam(params, "maxChars", { integer: true });
+      const excludeFromContext = params.excludeFromContext === true;
       const maxCharsCap = resolveFetchMaxCharsCap(fetch);
       const result = await runWebFetch({
         url,
@@ -683,7 +696,45 @@ export function createWebFetchTool(options?: {
         firecrawlStoreInCache: true,
         firecrawlTimeoutSeconds,
       });
-      return jsonResult(result);
+      if (!excludeFromContext) {
+        return jsonResult(result);
+      }
+
+      // Write full result to artifact, return preview
+      const fullText = JSON.stringify(result, null, 2);
+      const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "web_fetch";
+      const outputFile = await writeToolOutputArtifact({
+        toolName: "web_fetch",
+        toolCallId: artifactId,
+        output: fullText,
+        extension: "json",
+      });
+      const preview = tailText(fullText, EXCLUDED_CONTEXT_PREVIEW_CHARS);
+      const header = formatExcludedFromContextHeader({ toolName: "web_fetch", outputFile });
+      const body = preview || "(no output)";
+
+      return {
+        content: [{ type: "text" as const, text: `${header}\n\n${body}` }],
+        details: (() => {
+          const base: Record<string, unknown> =
+            typeof result === "object" && result !== null ? { ...result } : {};
+          // Cap large text fields so details doesn't defeat excludeFromContext
+          if (typeof base.text === "string" && base.text.length > EXCLUDED_CONTEXT_PREVIEW_CHARS) {
+            base.text = tailText(base.text, EXCLUDED_CONTEXT_PREVIEW_CHARS);
+          }
+          if (
+            typeof base.markdown === "string" &&
+            base.markdown.length > EXCLUDED_CONTEXT_PREVIEW_CHARS
+          ) {
+            base.markdown = tailText(base.markdown, EXCLUDED_CONTEXT_PREVIEW_CHARS);
+          }
+          return {
+            ...base,
+            outputFile: outputFile ?? undefined,
+            excludedFromContext: true,
+          };
+        })(),
+      };
     },
   };
 }

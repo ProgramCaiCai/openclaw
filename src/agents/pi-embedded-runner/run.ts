@@ -44,6 +44,7 @@ import {
   pickFallbackThinkingLevel,
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
+import { resolveCompactionReserveTokensFloor } from "../pi-settings.js";
 import { normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
@@ -52,6 +53,7 @@ import { log } from "./logger.js";
 import { resolveModel } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
+import { consumeSessionCompactionRequest } from "./runs.js";
 import {
   truncateOversizedToolResultsInSession,
   sessionLikelyHasOversizedToolResults,
@@ -501,7 +503,46 @@ export async function runEmbeddedPiAgent(
                 `compactionAttempts=${overflowCompactionAttempts} error=${errorText.slice(0, 200)}`,
             );
             const isCompactionFailure = isCompactionFailureError(errorText);
-            // Attempt auto-compaction on context overflow (not compaction_failure)
+            // Step 1: Try truncating oversized tool results first (cheap, targeted).
+            // This handles the common case where a single bloated tool result
+            // is the root cause of the overflow.
+            if (!toolResultTruncationAttempted) {
+              const contextWindowTokens = ctxInfo.tokens;
+              const hasOversized = attempt.messagesSnapshot
+                ? sessionLikelyHasOversizedToolResults({
+                    messages: attempt.messagesSnapshot,
+                    contextWindowTokens,
+                    contextPruning: params.config?.agents?.defaults?.contextPruning,
+                  })
+                : false;
+
+              if (hasOversized) {
+                toolResultTruncationAttempted = true;
+                log.warn(
+                  `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
+                    `(contextWindow=${contextWindowTokens} tokens)`,
+                );
+                const truncResult = await truncateOversizedToolResultsInSession({
+                  sessionFile: params.sessionFile,
+                  contextWindowTokens,
+                  contextPruning: params.config?.agents?.defaults?.contextPruning,
+                  sessionId: params.sessionId,
+                  sessionKey: params.sessionKey,
+                });
+                if (truncResult.truncated) {
+                  log.info(
+                    `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
+                  );
+                  // Session is now smaller; allow compaction retries again.
+                  overflowCompactionAttempts = 0;
+                  continue;
+                }
+                log.warn(
+                  `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
+                );
+              }
+            }
+            // Step 2: Try auto-compaction (expensive, but handles general overflow).
             if (
               !isCompactionFailure &&
               overflowCompactionAttempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
@@ -539,43 +580,6 @@ export async function runEmbeddedPiAgent(
               log.warn(
                 `auto-compaction failed for ${provider}/${modelId}: ${compactResult.reason ?? "nothing to compact"}`,
               );
-            }
-            // Fallback: try truncating oversized tool results in the session.
-            // This handles the case where a single tool result exceeds the
-            // context window and compaction cannot reduce it further.
-            if (!toolResultTruncationAttempted) {
-              const contextWindowTokens = ctxInfo.tokens;
-              const hasOversized = attempt.messagesSnapshot
-                ? sessionLikelyHasOversizedToolResults({
-                    messages: attempt.messagesSnapshot,
-                    contextWindowTokens,
-                  })
-                : false;
-
-              if (hasOversized) {
-                toolResultTruncationAttempted = true;
-                log.warn(
-                  `[context-overflow-recovery] Attempting tool result truncation for ${provider}/${modelId} ` +
-                    `(contextWindow=${contextWindowTokens} tokens)`,
-                );
-                const truncResult = await truncateOversizedToolResultsInSession({
-                  sessionFile: params.sessionFile,
-                  contextWindowTokens,
-                  sessionId: params.sessionId,
-                  sessionKey: params.sessionKey,
-                });
-                if (truncResult.truncated) {
-                  log.info(
-                    `[context-overflow-recovery] Truncated ${truncResult.truncatedCount} tool result(s); retrying prompt`,
-                  );
-                  // Session is now smaller; allow compaction retries again.
-                  overflowCompactionAttempts = 0;
-                  continue;
-                }
-                log.warn(
-                  `[context-overflow-recovery] Tool result truncation did not help: ${truncResult.reason ?? "unknown"}`,
-                );
-              }
             }
             const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
             return {
@@ -796,6 +800,100 @@ export async function runEmbeddedPiAgent(
                 profileId: lastProfileId,
                 status,
               });
+            }
+          }
+
+          // Best-effort: if this run consumed most of the context window, compact now so the
+          // next user turn is less likely to overflow.
+          // Threshold is 85% of the SDK compaction point (contextWindow - reserveTokens),
+          // NOT 85% of the raw context window, to ensure this fires before the SDK's
+          // built-in compaction kicks in.
+          const promptUsage =
+            attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
+          const promptTokens = promptUsage?.input ?? 0;
+          const contextWindowTokens = ctxInfo.tokens;
+          const reserveTokens = resolveCompactionReserveTokensFloor(params.config);
+          const sdkCompactionPoint = Math.max(0, contextWindowTokens - reserveTokens);
+          const proactiveThreshold = Math.floor(sdkCompactionPoint * 0.85);
+          if (!aborted && promptTokens >= proactiveThreshold) {
+            log.info(
+              `[near-limit-compaction] promptTokens=${promptTokens} threshold=${proactiveThreshold} ctx=${contextWindowTokens} reserve=${reserveTokens}; attempting best-effort compaction`,
+            );
+            try {
+              const compactResult = await compactEmbeddedPiSessionDirect({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                messageChannel: params.messageChannel,
+                messageProvider: params.messageProvider,
+                agentAccountId: params.agentAccountId,
+                authProfileId: lastProfileId,
+                sessionFile: params.sessionFile,
+                workspaceDir: resolvedWorkspace,
+                agentDir,
+                config: params.config,
+                skillsSnapshot: params.skillsSnapshot,
+                senderIsOwner: params.senderIsOwner,
+                provider,
+                model: modelId,
+                thinkLevel,
+                reasoningLevel: params.reasoningLevel,
+                bashElevated: params.bashElevated,
+                extraSystemPrompt: params.extraSystemPrompt,
+                ownerNumbers: params.ownerNumbers,
+              });
+              if (compactResult.compacted) {
+                autoCompactionCount += 1;
+              }
+            } catch (err) {
+              log.warn(
+                `[near-limit-compaction] compaction attempt failed: ${describeUnknownError(err).slice(0, 200)}`,
+              );
+            }
+          }
+
+          // Tool-requested compaction (session_compact tool).
+          // Runs after the attempt so the session file is no longer locked.
+          const sessionKeyForCompact = params.sessionKey ?? params.sessionId;
+          if (!aborted && consumeSessionCompactionRequest(sessionKeyForCompact)) {
+            log.info(
+              `[tool-requested-compaction] session_compact tool requested compaction for ${sessionKeyForCompact}`,
+            );
+            try {
+              const compactResult = await compactEmbeddedPiSessionDirect({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                messageChannel: params.messageChannel,
+                messageProvider: params.messageProvider,
+                agentAccountId: params.agentAccountId,
+                authProfileId: lastProfileId,
+                sessionFile: params.sessionFile,
+                workspaceDir: resolvedWorkspace,
+                agentDir,
+                config: params.config,
+                skillsSnapshot: params.skillsSnapshot,
+                senderIsOwner: params.senderIsOwner,
+                provider,
+                model: modelId,
+                thinkLevel,
+                reasoningLevel: params.reasoningLevel,
+                bashElevated: params.bashElevated,
+                extraSystemPrompt: params.extraSystemPrompt,
+                ownerNumbers: params.ownerNumbers,
+              });
+              if (compactResult.compacted) {
+                autoCompactionCount += 1;
+                log.info(
+                  `[tool-requested-compaction] compaction succeeded for ${sessionKeyForCompact}`,
+                );
+              } else {
+                log.info(
+                  `[tool-requested-compaction] nothing to compact: ${compactResult.reason ?? "unknown"}`,
+                );
+              }
+            } catch (err) {
+              log.warn(
+                `[tool-requested-compaction] compaction failed: ${describeUnknownError(err).slice(0, 200)}`,
+              );
             }
           }
 
