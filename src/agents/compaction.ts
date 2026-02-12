@@ -13,6 +13,35 @@ const MERGE_SUMMARIES_INSTRUCTIONS =
   "Merge these partial summaries into a single cohesive summary. Preserve decisions," +
   " TODOs, open questions, and any constraints.";
 
+const TOKENS_AFTER_SANITY_RATIO = 1.1;
+
+export class CompactionSummaryUnavailableError extends Error {
+  override name = "CompactionSummaryUnavailableError";
+}
+
+export function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+  if (!err || typeof err !== "object") {
+    return false;
+  }
+  return (err as { name?: unknown }).name === "AbortError";
+}
+
+function sanitizeTokensAfterEstimate(tokensAfter: number, tokensBefore: number): number {
+  if (!Number.isFinite(tokensAfter) || tokensAfter < 0) {
+    return tokensBefore;
+  }
+  if (!Number.isFinite(tokensBefore) || tokensBefore <= 0) {
+    return tokensAfter;
+  }
+  if (tokensAfter > tokensBefore * TOKENS_AFTER_SANITY_RATIO) {
+    return tokensBefore;
+  }
+  return tokensAfter;
+}
+
 export function estimateMessagesTokens(messages: AgentMessage[]): number {
   return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
@@ -194,6 +223,9 @@ export async function summarizeWithFallback(params: {
   try {
     return await summarizeChunks(params);
   } catch (fullError) {
+    if (isAbortError(fullError, params.signal)) {
+      throw fullError;
+    }
     console.warn(
       `Full summarization failed, trying partial: ${
         fullError instanceof Error ? fullError.message : String(fullError)
@@ -226,6 +258,9 @@ export async function summarizeWithFallback(params: {
       const notes = oversizedNotes.length > 0 ? `\n\n${oversizedNotes.join("\n")}` : "";
       return partialSummary + notes;
     } catch (partialError) {
+      if (isAbortError(partialError, params.signal)) {
+        throw partialError;
+      }
       console.warn(
         `Partial summarization also failed: ${
           partialError instanceof Error ? partialError.message : String(partialError)
@@ -234,10 +269,9 @@ export async function summarizeWithFallback(params: {
     }
   }
 
-  // Final fallback: Just note what was there
-  return (
-    `Context contained ${messages.length} messages (${oversizedNotes.length} oversized). ` +
-    `Summary unavailable due to size limits.`
+  // Refuse to produce a low-information summary that would truncate history.
+  throw new CompactionSummaryUnavailableError(
+    `Summary unavailable; refusing to compact to avoid data loss (messages=${messages.length} oversized=${oversizedNotes.length}).`,
   );
 }
 
@@ -396,6 +430,7 @@ export function pruneHistoryForContextShare(params: {
 } {
   const maxHistoryShare = params.maxHistoryShare ?? 0.5;
   const budgetTokens = Math.max(1, Math.floor(params.maxContextTokens * maxHistoryShare));
+  const tokensBefore = estimateMessagesTokens(params.messages);
 
   const cutIndex = chooseTurnAwareCutIndex(params.messages, budgetTokens);
   if (cutIndex <= 0) {
@@ -405,7 +440,7 @@ export function pruneHistoryForContextShare(params: {
       droppedChunks: 0,
       droppedMessages: 0,
       droppedTokens: 0,
-      keptTokens: estimateMessagesTokens(params.messages),
+      keptTokens: tokensBefore,
       budgetTokens,
     };
   }
@@ -419,13 +454,15 @@ export function pruneHistoryForContextShare(params: {
   const repairedKept = repairReport.messages;
   const orphanedCount = repairReport.droppedOrphanCount;
 
+  const keptTokens = sanitizeTokensAfterEstimate(estimateMessagesTokens(repairedKept), tokensBefore);
+
   return {
     messages: repairedKept,
     droppedMessagesList: dropped,
     droppedChunks: 1,
     droppedMessages: dropped.length + orphanedCount,
     droppedTokens: estimateMessagesTokens(dropped),
-    keptTokens: estimateMessagesTokens(repairedKept),
+    keptTokens,
     budgetTokens,
   };
 }

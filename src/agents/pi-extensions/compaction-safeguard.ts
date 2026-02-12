@@ -6,6 +6,7 @@ import {
   SAFETY_MARGIN,
   computeAdaptiveChunkRatio,
   estimateMessagesTokens,
+  isAbortError,
   isOversizedForSummary,
   pruneHistoryForContextShare,
   resolveContextWindowTokens,
@@ -170,26 +171,16 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
 
     const model = ctx.model;
     if (!model) {
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      // P0-1: No model available — cancel compaction to avoid low-quality fallback truncating history
+      console.warn("Compaction safeguard: no model available, skipping compaction to preserve history.");
+      return { cancel: true };
     }
 
     const apiKey = await ctx.modelRegistry.getApiKey(model);
     if (!apiKey) {
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      // P0-1: No API key — cancel compaction to avoid low-quality fallback truncating history
+      console.warn("Compaction safeguard: no API key available, skipping compaction to preserve history.");
+      return { cancel: true };
     }
 
     try {
@@ -206,14 +197,18 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           ? preparation.tokensBefore
           : undefined;
 
+      // P1-1: When tokensBefore is missing, estimate from available messages instead of skipping pruning
+      const estimatedTokensBefore = tokensBefore ??
+        estimateMessagesTokens([...messagesToSummarize, ...turnPrefixMessages]);
+
       let droppedSummary: string | undefined;
 
-      if (tokensBefore !== undefined) {
+      {
         const summarizableTokens =
           estimateMessagesTokens(messagesToSummarize) + estimateMessagesTokens(turnPrefixMessages);
-        const newContentTokens = Math.max(0, Math.floor(tokensBefore - summarizableTokens));
-        // Apply SAFETY_MARGIN so token underestimates don't trigger unnecessary pruning
-        const maxHistoryTokens = Math.floor(contextWindowTokens * maxHistoryShare * SAFETY_MARGIN);
+        const newContentTokens = Math.max(0, Math.floor(estimatedTokensBefore - summarizableTokens));
+        // P1-1: Don't amplify threshold with SAFETY_MARGIN — cap at contextWindowTokens * maxHistoryShare
+        const maxHistoryTokens = Math.floor(contextWindowTokens * maxHistoryShare);
 
         if (newContentTokens > maxHistoryTokens) {
           const pruned = pruneHistoryForContextShare({
@@ -254,6 +249,10 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                   previousSummary: preparation.previousSummary,
                 });
               } catch (droppedError) {
+                // P0-2: Abort/cancel must not be swallowed into fallback path
+                if (isAbortError(droppedError, signal)) {
+                  throw droppedError;
+                }
                 console.warn(
                   `Compaction safeguard: failed to summarize dropped messages, continuing without: ${
                     droppedError instanceof Error ? droppedError.message : String(droppedError)
@@ -315,19 +314,17 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
         },
       };
     } catch (error) {
+      // P0-2: Abort/cancel must propagate — never fall into degraded compaction path
+      if (isAbortError(error, signal)) {
+        throw error;
+      }
+      // P0-1: Cancel compaction instead of using low-quality fallback that would truncate history
       console.warn(
-        `Compaction summarization failed; truncating history: ${
+        `Compaction summarization failed; cancelling compaction to preserve history: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return {
-        compaction: {
-          summary: fallbackSummary,
-          firstKeptEntryId: preparation.firstKeptEntryId,
-          tokensBefore: preparation.tokensBefore,
-          details: { readFiles, modifiedFiles },
-        },
-      };
+      return { cancel: true };
     }
   });
 }
