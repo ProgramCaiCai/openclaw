@@ -64,6 +64,9 @@ export class QmdMemoryManager implements MemorySearchManager {
     return manager;
   }
 
+  /** Cached flag: assume --no-expand is supported until proven otherwise. */
+  private static noExpandSupported = true;
+
   private readonly cfg: OpenClawConfig;
   private readonly agentId: string;
   private readonly qmd: ResolvedQmdConfig;
@@ -267,14 +270,36 @@ export class QmdMemoryManager implements MemorySearchManager {
       log.warn("qmd query skipped: no managed collections configured");
       return [];
     }
-    const args = ["query", trimmed, "--json", "-n", String(limit), ...collectionFilterArgs];
+    const baseArgs = ["query", trimmed, "--json", "-n", String(limit), ...collectionFilterArgs];
     let stdout: string;
     try {
+      // Try with --no-expand first (skips slow 1.7B hyde expansion).
+      // Falls back to plain query if qmd doesn't support the flag.
+      const args = QmdMemoryManager.noExpandSupported
+        ? ["query", trimmed, "--json", "--no-expand", "-n", String(limit), ...collectionFilterArgs]
+        : baseArgs;
       const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
       stdout = result.stdout;
     } catch (err) {
-      log.warn(`qmd query failed: ${String(err)}`);
-      throw err instanceof Error ? err : new Error(String(err));
+      const msg = String(err);
+      // If --no-expand was rejected (unknown flag), retry without it and remember.
+      if (
+        QmdMemoryManager.noExpandSupported &&
+        /unknown.*no-expand|unrecognized.*no-expand|invalid.*no-expand/i.test(msg)
+      ) {
+        log.info("qmd does not support --no-expand, falling back to plain query");
+        QmdMemoryManager.noExpandSupported = false;
+        try {
+          const result = await this.runQmd(baseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
+          stdout = result.stdout;
+        } catch (retryErr) {
+          log.warn(`qmd query failed (retry): ${String(retryErr)}`);
+          throw retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+        }
+      } else {
+        log.warn(`qmd query failed: ${msg}`);
+        throw err instanceof Error ? err : new Error(msg);
+      }
     }
     let parsed: QmdQueryResult[] = [];
     try {

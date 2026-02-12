@@ -454,6 +454,7 @@ describe("QmdMemoryManager", () => {
       "query",
       "test",
       "--json",
+      "--no-expand",
       "-n",
       String(maxResults),
       "-c",
@@ -461,6 +462,84 @@ describe("QmdMemoryManager", () => {
       "-c",
       "notes",
     ]);
+    await manager.close();
+  });
+
+  it("falls back to plain query when --no-expand is not supported", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 60_000, onBoot: false },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    // Reset the static flag so fallback can be tested
+    (QmdMemoryManager as any).noExpandSupported = true;
+
+    let callCount = 0;
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "query") {
+        callCount++;
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          if (callCount === 1 && args.includes("--no-expand")) {
+            // First call with --no-expand: simulate unknown flag error
+            child.stderr.emit("data", "error: unknown option --no-expand");
+            child.closeWith(1);
+          } else {
+            // Retry without --no-expand: succeed
+            child.stdout.emit("data", "[]");
+            child.closeWith(0);
+          }
+        }, 0);
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId });
+    const manager = await QmdMemoryManager.create({ cfg, agentId, resolved });
+    expect(manager).toBeTruthy();
+    if (!manager) {
+      throw new Error("manager missing");
+    }
+
+    const results = await manager.search("test", { sessionKey: "agent:main:slack:dm:u123" });
+    expect(results).toEqual([]);
+
+    // Should have been called twice: once with --no-expand (failed), once without
+    const queryCalls = spawnMock.mock.calls.filter((call: any) => call[1]?.[0] === "query");
+    expect(queryCalls.length).toBe(2);
+    expect(queryCalls[0][1]).toContain("--no-expand");
+    expect(queryCalls[1][1]).not.toContain("--no-expand");
+
+    // Subsequent calls should skip --no-expand entirely
+    callCount = 0;
+    spawnMock.mockClear();
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "query") {
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          child.stdout.emit("data", "[]");
+          child.closeWith(0);
+        }, 0);
+        return child;
+      }
+      return createMockChild();
+    });
+
+    await manager.search("test2", { sessionKey: "agent:main:slack:dm:u123" });
+    const secondQueryCalls = spawnMock.mock.calls.filter((call: any) => call[1]?.[0] === "query");
+    expect(secondQueryCalls.length).toBe(1);
+    expect(secondQueryCalls[0][1]).not.toContain("--no-expand");
+
+    // Restore for other tests
+    (QmdMemoryManager as any).noExpandSupported = true;
     await manager.close();
   });
 
