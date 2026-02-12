@@ -1,11 +1,55 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { FileOperations } from "@mariozechner/pi-coding-agent";
 
-type ToolCallBlock = {
-  type?: unknown;
-  name?: unknown;
-  arguments?: unknown;
-};
+const PATH_KEYS = ["path", "file_path", "filePath", "filepath"] as const;
+const PATHS_KEYS = ["paths", "filePaths", "file_paths"] as const;
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function addPath(set: Set<string>, value: unknown): void {
+  if (typeof value !== "string") {
+    return;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return;
+  }
+  set.add(trimmed);
+}
+
+function addPaths(set: Set<string>, value: unknown): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  for (const item of value) {
+    addPath(set, item);
+  }
+}
+
+function normalizeToolName(name: unknown): string {
+  if (typeof name !== "string") {
+    return "";
+  }
+  // Some providers may namespace tool names (e.g. "functions.read").
+  const base = name.split(".").pop() ?? name;
+  return base.trim().toLowerCase();
+}
+
+function extractPathsFromArgs(args: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+
+  for (const key of PATH_KEYS) {
+    addPath(out, args[key]);
+  }
+
+  for (const key of PATHS_KEYS) {
+    addPaths(out, args[key]);
+  }
+
+  return [...out];
+}
 
 export function createFileOps(): FileOperations {
   return {
@@ -15,111 +59,84 @@ export function createFileOps(): FileOperations {
   };
 }
 
-export function mergeFileOps(target: FileOperations, source: FileOperations | undefined): void {
-  if (!source) {
-    return;
+export function mergeFileOps(target: FileOperations, source: FileOperations): void {
+  for (const p of source.read) {
+    target.read.add(p);
   }
-  for (const f of source.read) {
-    target.read.add(f);
+  for (const p of source.written) {
+    target.written.add(p);
   }
-  for (const f of source.written) {
-    target.written.add(f);
+  for (const p of source.edited) {
+    target.edited.add(p);
   }
-  for (const f of source.edited) {
-    target.edited.add(f);
-  }
-}
-
-function asNonEmptyPath(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-function collectPathsFromArgs(args: unknown): string[] {
-  if (!args || typeof args !== "object") {
-    return [];
-  }
-  const rec = args as Record<string, unknown>;
-
-  const directKeys = ["path", "file_path", "filePath", "filepath"] as const;
-  for (const key of directKeys) {
-    const single = asNonEmptyPath(rec[key]);
-    if (single) {
-      return [single];
-    }
-  }
-
-  const arrayKeys = ["paths", "filePaths"] as const;
-  for (const key of arrayKeys) {
-    const arr = rec[key];
-    if (!Array.isArray(arr)) {
-      continue;
-    }
-    const out: string[] = [];
-    for (const entry of arr) {
-      const p = asNonEmptyPath(entry);
-      if (p) {
-        out.push(p);
-      }
-    }
-    if (out.length > 0) {
-      return out;
-    }
-  }
-
-  return [];
 }
 
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+  if (!message || typeof message !== "object") {
+    return;
+  }
   if (message.role !== "assistant") {
     return;
   }
-  if (!("content" in message) || !Array.isArray(message.content)) {
+
+  const assistant = message as { content?: unknown };
+  if (!Array.isArray(assistant.content)) {
     return;
   }
 
-  for (const block of message.content as unknown[]) {
-    if (!block || typeof block !== "object") {
-      continue;
-    }
-    const toolCall = block as ToolCallBlock;
-    // Recognize all tool block variants: toolCall, toolUse, functionCall
-    if (
-      toolCall.type !== "toolCall" &&
-      toolCall.type !== "toolUse" &&
-      toolCall.type !== "functionCall"
-    ) {
+  for (const block of assistant.content) {
+    const rec = asRecord(block);
+    if (!rec) {
       continue;
     }
 
-    const toolName = typeof toolCall.name === "string" ? toolCall.name : undefined;
+    const toolType = typeof rec.type === "string" ? rec.type : "";
+    if (toolType !== "toolCall" && toolType !== "toolUse") {
+      continue;
+    }
+
+    const toolName = normalizeToolName(rec.name);
     if (!toolName) {
       continue;
     }
 
-    // Support both `arguments` (toolCall) and `input` (toolUse) fields
-    const args = toolCall.arguments ?? (toolCall as Record<string, unknown>).input;
-    const paths = collectPathsFromArgs(args);
+    // toolCall uses "arguments" (OpenAI/Gemini style), toolUse uses "input" (Anthropic style).
+    const args = asRecord(rec.arguments ?? rec.input);
+    if (!args) {
+      continue;
+    }
+
+    const paths = extractPathsFromArgs(args);
     if (paths.length === 0) {
       continue;
     }
 
-    for (const p of paths) {
-      switch (toolName) {
-        case "read":
+    switch (toolName) {
+      case "read":
+        for (const p of paths) {
           fileOps.read.add(p);
-          break;
-        case "write":
+        }
+        break;
+      case "write":
+        for (const p of paths) {
           fileOps.written.add(p);
-          break;
-        case "edit":
+        }
+        break;
+      case "edit":
+        for (const p of paths) {
           fileOps.edited.add(p);
-          break;
-      }
+        }
+        break;
     }
+  }
+}
+
+export function extractFileOpsFromMessages(
+  messages: AgentMessage[],
+  fileOps: FileOperations,
+): void {
+  for (const message of messages) {
+    extractFileOpsFromMessage(message, fileOps);
   }
 }
 

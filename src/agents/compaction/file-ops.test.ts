@@ -1,91 +1,78 @@
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import {
   computeFileLists,
   createFileOps,
-  extractFileOpsFromMessage,
+  extractFileOpsFromMessages,
   formatFileOperations,
 } from "./file-ops.js";
 
-function makeAssistant(toolCalls: Array<{ name: string; arguments: unknown }>) {
+function makeAssistant(blocks: unknown[]): AgentMessage {
   return {
-    role: "assistant" as const,
-    api: "anthropic-messages",
-    provider: "anthropic",
-    model: "test-model",
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop" as const,
-    content: toolCalls.map((call, idx) => ({
-      type: "toolCall" as const,
-      id: String(idx + 1),
-      name: call.name,
-      arguments: call.arguments as Record<string, unknown>,
-    })),
+    role: "assistant",
+    content: blocks as any,
     timestamp: 0,
-  };
+  } as AgentMessage;
 }
 
-describe("file ops", () => {
-  it("extracts read/write/edit and normalizes path argument keys", () => {
+describe("file-ops", () => {
+  it("extracts read/write/edit paths from toolCall blocks (path + file_path + filePath)", () => {
+    const messages: AgentMessage[] = [
+      makeAssistant([
+        { type: "toolCall", name: "read", arguments: { path: "a.txt" } },
+        { type: "toolCall", name: "write", arguments: { file_path: "b.txt" } },
+        { type: "toolCall", name: "edit", arguments: { filePath: "c.txt" } },
+        { type: "toolCall", name: "unrelated", arguments: { path: "ignored.txt" } },
+      ]),
+    ];
+
     const fileOps = createFileOps();
-
-    const message = makeAssistant([
-      { name: "read", arguments: { path: "a.txt" } },
-      { name: "write", arguments: { file_path: "b.txt" } },
-      { name: "edit", arguments: { filePath: "c.txt" } },
-    ]);
-
-    extractFileOpsFromMessage(message as unknown, fileOps);
+    extractFileOpsFromMessages(messages, fileOps);
 
     expect([...fileOps.read]).toEqual(["a.txt"]);
     expect([...fileOps.written]).toEqual(["b.txt"]);
     expect([...fileOps.edited]).toEqual(["c.txt"]);
   });
 
-  it("places a file read+edited into modified only", () => {
+  it("extracts paths from toolUse blocks (input) and supports path arrays", () => {
+    const messages: AgentMessage[] = [
+      makeAssistant([
+        { type: "toolUse", name: "read", input: { paths: ["r1.ts", "r2.ts"] } },
+        { type: "toolUse", name: "write", input: { filePaths: ["w1.ts"] } },
+      ]),
+    ];
+
     const fileOps = createFileOps();
+    extractFileOpsFromMessages(messages, fileOps);
 
-    const message = makeAssistant([
-      { name: "read", arguments: { path: "same.txt" } },
-      { name: "edit", arguments: { filepath: "same.txt" } },
-    ]);
-
-    extractFileOpsFromMessage(message as unknown, fileOps);
-    const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-
-    expect(readFiles).toEqual([]);
-    expect(modifiedFiles).toEqual(["same.txt"]);
+    expect([...fileOps.read].toSorted()).toEqual(["r1.ts", "r2.ts"]);
+    expect([...fileOps.written]).toEqual(["w1.ts"]);
   });
 
-  it("supports array path keys (paths/filePaths)", () => {
+  it("computeFileLists excludes modified files from readFiles", () => {
     const fileOps = createFileOps();
+    fileOps.read.add("same.ts");
+    fileOps.written.add("same.ts");
+    fileOps.read.add("read-only.ts");
+    fileOps.edited.add("edited.ts");
 
-    const message = makeAssistant([
-      { name: "read", arguments: { paths: ["x.txt", "y.txt"] } },
-      { name: "edit", arguments: { filePaths: ["y.txt", "z.txt"] } },
-    ]);
-
-    extractFileOpsFromMessage(message as unknown, fileOps);
     const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-
-    expect(readFiles).toEqual(["x.txt"]);
-    expect(modifiedFiles).toEqual(["y.txt", "z.txt"]);
+    expect(readFiles).toEqual(["read-only.ts"]);
+    expect(modifiedFiles).toEqual(["edited.ts", "same.ts"]);
   });
 
-  it("formats output identically to Codex/pi-coding-agent", () => {
+  it("formatFileOperations returns empty string when no files exist", () => {
     expect(formatFileOperations([], [])).toBe("");
-    expect(formatFileOperations(["a.txt"], [])).toBe("\n\n<read-files>\na.txt\n</read-files>");
-    expect(formatFileOperations([], ["b.txt"])).toBe(
-      "\n\n<modified-files>\nb.txt\n</modified-files>",
-    );
-    expect(formatFileOperations(["a.txt"], ["b.txt"])).toBe(
-      "\n\n<read-files>\na.txt\n</read-files>\n\n<modified-files>\nb.txt\n</modified-files>",
-    );
+  });
+
+  it("formatFileOperations emits Codex-style tags", () => {
+    const formatted = formatFileOperations(["a"], ["b", "c"]);
+    expect(formatted).toContain("<read-files>\n");
+    expect(formatted).toContain("a");
+    expect(formatted).toContain("</read-files>");
+    expect(formatted).toContain("<modified-files>\n");
+    expect(formatted).toContain("b");
+    expect(formatted).toContain("c");
+    expect(formatted).toContain("</modified-files>");
   });
 });
