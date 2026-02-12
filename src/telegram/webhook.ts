@@ -66,9 +66,29 @@ export async function startTelegramWebhook(opts: {
     if (diagnosticsEnabled) {
       logWebhookReceived({ channel: "telegram", updateType: "telegram-post" });
     }
-    const handled = handler(req, res);
-    if (handled && typeof handled.catch === "function") {
-      void handled
+    let handled: unknown;
+    try {
+      handled = handler(req, res);
+    } catch (err) {
+      const errMsg = formatErrorMessage(err);
+      if (diagnosticsEnabled) {
+        logWebhookError({
+          channel: "telegram",
+          updateType: "telegram-post",
+          error: errMsg,
+        });
+      }
+      runtime.log?.(`webhook handler threw: ${errMsg}`);
+      // Always ACK the webhook to avoid Telegram retry storms; processing failures are logged.
+      if (!res.headersSent) {
+        res.writeHead(200);
+      }
+      res.end();
+      return;
+    }
+
+    if (handled && typeof (handled as Promise<unknown>).catch === "function") {
+      void (handled as Promise<unknown>)
         .then(() => {
           if (diagnosticsEnabled) {
             logWebhookProcessed({
@@ -88,28 +108,40 @@ export async function startTelegramWebhook(opts: {
             });
           }
           runtime.log?.(`webhook handler failed: ${errMsg}`);
+          // Always ACK the webhook to avoid Telegram retry storms; processing failures are logged.
           if (!res.headersSent) {
-            res.writeHead(500);
+            res.writeHead(200);
           }
           res.end();
         });
     }
   });
 
+  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+
   const publicUrl =
     opts.publicUrl ?? `http://${host === "0.0.0.0" ? "localhost" : host}:${port}${path}`;
 
-  await withTelegramApiErrorLogging({
-    operation: "setWebhook",
-    runtime,
-    fn: () =>
-      bot.api.setWebhook(publicUrl, {
-        secret_token: opts.secret,
-        allowed_updates: resolveTelegramAllowedUpdates(),
-      }),
-  });
+  try {
+    await withTelegramApiErrorLogging({
+      operation: "setWebhook",
+      runtime,
+      fn: () =>
+        bot.api.setWebhook(publicUrl, {
+          secret_token: opts.secret,
+          allowed_updates: resolveTelegramAllowedUpdates(),
+        }),
+    });
+  } catch (err) {
+    // If webhook registration fails, don't leave a dangling server running.
+    server.close();
+    void bot.stop();
+    if (diagnosticsEnabled) {
+      stopDiagnosticHeartbeat();
+    }
+    throw err;
+  }
 
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
   runtime.log?.(`webhook listening on ${publicUrl}`);
 
   const shutdown = () => {
