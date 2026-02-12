@@ -2,6 +2,18 @@ import type { AgentEvent } from "@mariozechner/pi-agent-core";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
+import { drainCompactionBuffer } from "./pi-embedded-runner/runs.js";
+
+function safeOnAgentEvent(
+  ctx: EmbeddedPiSubscribeContext,
+  evt: { stream: string; data: Record<string, unknown> },
+): void {
+  try {
+    void ctx.params.onAgentEvent?.(evt);
+  } catch (err) {
+    ctx.log.debug(`onAgentEvent handler failed: ${String(err)}`);
+  }
+}
 
 export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
   ctx.log.debug(`embedded run agent start: runId=${ctx.params.runId}`);
@@ -13,10 +25,7 @@ export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
       startedAt: Date.now(),
     },
   });
-  void ctx.params.onAgentEvent?.({
-    stream: "lifecycle",
-    data: { phase: "start" },
-  });
+  safeOnAgentEvent(ctx, { stream: "lifecycle", data: { phase: "start" } });
 }
 
 export function handleAutoCompactionStart(ctx: EmbeddedPiSubscribeContext) {
@@ -29,10 +38,7 @@ export function handleAutoCompactionStart(ctx: EmbeddedPiSubscribeContext) {
     stream: "compaction",
     data: { phase: "start" },
   });
-  void ctx.params.onAgentEvent?.({
-    stream: "compaction",
-    data: { phase: "start" },
-  });
+  safeOnAgentEvent(ctx, { stream: "compaction", data: { phase: "start" } });
 }
 
 export function handleAutoCompactionEnd(
@@ -46,6 +52,9 @@ export function handleAutoCompactionEnd(
     ctx.resetForCompactionRetry();
     ctx.log.debug(`embedded run compaction retry: runId=${ctx.params.runId}`);
   } else {
+    // Drain messages that were buffered while compaction was in-flight.
+    // Must happen after compactionInFlight=false so subsequent steers go through normally.
+    drainCompactionBuffer(ctx.params.session.sessionId);
     ctx.maybeResolveCompactionWait();
   }
   emitAgentEvent({
@@ -53,10 +62,7 @@ export function handleAutoCompactionEnd(
     stream: "compaction",
     data: { phase: "end", willRetry },
   });
-  void ctx.params.onAgentEvent?.({
-    stream: "compaction",
-    data: { phase: "end", willRetry },
-  });
+  safeOnAgentEvent(ctx, { stream: "compaction", data: { phase: "end", willRetry } });
 }
 
 export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
@@ -69,10 +75,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       endedAt: Date.now(),
     },
   });
-  void ctx.params.onAgentEvent?.({
-    stream: "lifecycle",
-    data: { phase: "end" },
-  });
+  safeOnAgentEvent(ctx, { stream: "lifecycle", data: { phase: "end" } });
 
   if (ctx.params.onBlockReply) {
     if (ctx.blockChunker?.hasBuffered()) {
@@ -93,4 +96,9 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
   } else {
     ctx.maybeResolveCompactionWait();
   }
+
+  // Best-effort safety net: if the SDK failed to emit auto_compaction_end (or the run ends mid-cycle),
+  // try to flush any buffered steering messages instead of silently discarding them on run cleanup.
+  ctx.state.compactionInFlight = false;
+  drainCompactionBuffer(ctx.params.session.sessionId);
 }

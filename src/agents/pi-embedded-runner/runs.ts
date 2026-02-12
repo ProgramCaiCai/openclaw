@@ -29,8 +29,16 @@ export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean
     return false;
   }
   if (handle.isCompacting()) {
-    diag.debug(`queue message failed: sessionId=${sessionId} reason=compacting`);
-    return false;
+    // Buffer messages during compaction instead of dropping them.
+    // They will be drained once compaction completes (see drainCompactionBuffer).
+    const buf = COMPACTION_BUFFERS.get(sessionId) ?? [];
+    buf.push(text);
+    COMPACTION_BUFFERS.set(sessionId, buf);
+    diag.debug(
+      `queue message buffered during compaction: sessionId=${sessionId} bufferSize=${buf.length}`,
+    );
+    logMessageQueued({ sessionId, source: "pi-embedded-runner-compaction-buffer" });
+    return true;
   }
   logMessageQueued({ sessionId, source: "pi-embedded-runner" });
   void handle.queueMessage(text);
@@ -127,6 +135,8 @@ export function setActiveEmbeddedRun(sessionId: string, handle: EmbeddedPiQueueH
 export function clearActiveEmbeddedRun(sessionId: string, handle: EmbeddedPiQueueHandle) {
   if (ACTIVE_EMBEDDED_RUNS.get(sessionId) === handle) {
     ACTIVE_EMBEDDED_RUNS.delete(sessionId);
+    // Clean up any leftover compaction buffer to prevent memory leaks.
+    clearCompactionBuffer(sessionId);
     logSessionStateChange({ sessionId, state: "idle", reason: "run_completed" });
     if (!sessionId.startsWith("probe-")) {
       diag.debug(`run cleared: sessionId=${sessionId} totalActive=${ACTIVE_EMBEDDED_RUNS.size}`);
@@ -135,6 +145,52 @@ export function clearActiveEmbeddedRun(sessionId: string, handle: EmbeddedPiQueu
   } else {
     diag.debug(`run clear skipped: sessionId=${sessionId} reason=handle_mismatch`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Compaction message buffer — messages received while compaction is in-flight
+// are held here and drained once compaction completes.
+// ---------------------------------------------------------------------------
+const COMPACTION_BUFFERS = new Map<string, string[]>();
+
+/**
+ * Drain buffered messages that arrived during compaction.
+ * Called from lifecycle handler after compactionInFlight is cleared.
+ */
+export function drainCompactionBuffer(sessionId: string): void {
+  const buf = COMPACTION_BUFFERS.get(sessionId);
+  if (!buf || buf.length === 0) {
+    COMPACTION_BUFFERS.delete(sessionId);
+    return;
+  }
+  COMPACTION_BUFFERS.delete(sessionId);
+  const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
+  if (!handle) {
+    diag.warn(
+      `compaction buffer drain: no active run for sessionId=${sessionId}, ${buf.length} message(s) lost`,
+    );
+    return;
+  }
+  diag.debug(`compaction buffer drain: sessionId=${sessionId} messages=${buf.length}`);
+  for (const text of buf) {
+    void handle.queueMessage(text);
+  }
+}
+
+/** Clear compaction buffer without draining (e.g. when run ends). */
+export function clearCompactionBuffer(sessionId: string): number {
+  const buf = COMPACTION_BUFFERS.get(sessionId);
+  const count = buf?.length ?? 0;
+  COMPACTION_BUFFERS.delete(sessionId);
+  if (count > 0) {
+    diag.debug(`compaction buffer cleared: sessionId=${sessionId} discarded=${count}`);
+  }
+  return count;
+}
+
+/** Get the number of buffered messages (for testing/diagnostics). */
+export function getCompactionBufferSize(sessionId: string): number {
+  return COMPACTION_BUFFERS.get(sessionId)?.length ?? 0;
 }
 
 // ---------------------------------------------------------------------------
