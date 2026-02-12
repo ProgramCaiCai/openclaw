@@ -137,4 +137,24 @@ export function clearActiveEmbeddedRun(sessionId: string, handle: EmbeddedPiQueu
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tool-requested compaction flag
+// ---------------------------------------------------------------------------
+const COMPACTION_REQUESTS = new Set<string>();
+
+/** Signal that a session should compact after the current attempt. */
+export function requestSessionCompaction(sessionKey: string): void {
+  COMPACTION_REQUESTS.add(sessionKey);
+  diag.debug(`compaction requested: sessionKey=${sessionKey}`);
+}
+
+/** Consume (and clear) a pending compaction request. Returns true if one existed. */
+export function consumeSessionCompactionRequest(sessionKey: string): boolean {
+  const had = COMPACTION_REQUESTS.delete(sessionKey);
+  if (had) {
+    diag.debug(`compaction request consumed: sessionKey=${sessionKey}`);
+  }
+  return had;
+}
+
 export type { EmbeddedPiQueueHandle };

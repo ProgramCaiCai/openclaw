@@ -53,6 +53,7 @@ import { log } from "./logger.js";
 import { resolveModel } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
+import { consumeSessionCompactionRequest } from "./runs.js";
 import {
   truncateOversizedToolResultsInSession,
   sessionLikelyHasOversizedToolResults,
@@ -846,6 +847,52 @@ export async function runEmbeddedPiAgent(
             } catch (err) {
               log.warn(
                 `[near-limit-compaction] compaction attempt failed: ${describeUnknownError(err).slice(0, 200)}`,
+              );
+            }
+          }
+
+          // Tool-requested compaction (session_compact tool).
+          // Runs after the attempt so the session file is no longer locked.
+          const sessionKeyForCompact = params.sessionKey ?? params.sessionId;
+          if (!aborted && consumeSessionCompactionRequest(sessionKeyForCompact)) {
+            log.info(
+              `[tool-requested-compaction] session_compact tool requested compaction for ${sessionKeyForCompact}`,
+            );
+            try {
+              const compactResult = await compactEmbeddedPiSessionDirect({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                messageChannel: params.messageChannel,
+                messageProvider: params.messageProvider,
+                agentAccountId: params.agentAccountId,
+                authProfileId: lastProfileId,
+                sessionFile: params.sessionFile,
+                workspaceDir: resolvedWorkspace,
+                agentDir,
+                config: params.config,
+                skillsSnapshot: params.skillsSnapshot,
+                senderIsOwner: params.senderIsOwner,
+                provider,
+                model: modelId,
+                thinkLevel,
+                reasoningLevel: params.reasoningLevel,
+                bashElevated: params.bashElevated,
+                extraSystemPrompt: params.extraSystemPrompt,
+                ownerNumbers: params.ownerNumbers,
+              });
+              if (compactResult.compacted) {
+                autoCompactionCount += 1;
+                log.info(
+                  `[tool-requested-compaction] compaction succeeded for ${sessionKeyForCompact}`,
+                );
+              } else {
+                log.info(
+                  `[tool-requested-compaction] nothing to compact: ${compactResult.reason ?? "unknown"}`,
+                );
+              }
+            } catch (err) {
+              log.warn(
+                `[tool-requested-compaction] compaction failed: ${describeUnknownError(err).slice(0, 200)}`,
               );
             }
           }
