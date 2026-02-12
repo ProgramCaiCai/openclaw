@@ -272,6 +272,30 @@ export async function truncateOversizedToolResultsInSession(params: {
     const firstOversizedEntry = branch[firstOversizedIdx];
     const branchFromId = firstOversizedEntry.parentId;
 
+    // S1 fix: pre-scan for unknown entry types before destructive rewrite
+    const KNOWN_ENTRY_TYPES = new Set([
+      "message",
+      "compaction",
+      "thinking_level_change",
+      "model_change",
+      "custom",
+      "custom_message",
+      "branch_summary",
+      "label",
+      "session_info",
+    ]);
+    for (let i = firstOversizedIdx; i < branch.length; i++) {
+      const entryType = (branch[i] as { type?: string }).type;
+      if (entryType && !KNOWN_ENTRY_TYPES.has(entryType)) {
+        log.warn(
+          `[tool-result-truncation] Unknown entry type "${entryType}" at index ${i}, ` +
+            `skipping rewrite to preserve data integrity. ` +
+            `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
+        );
+        return { truncated: false, truncatedCount: 0, reason: `unknown entry type: ${entryType}` };
+      }
+    }
+
     if (!branchFromId) {
       sessionManager.resetLeaf();
     } else {
@@ -356,7 +380,7 @@ export async function truncateOversizedToolResultsInSession(params: {
         `(contextWindow=${params.contextWindowTokens} tokens) ` +
         `sessionKey=${params.sessionKey ?? params.sessionId ?? "unknown"}`,
     );
-    return { truncated: true, truncatedCount };
+    return { truncated: truncatedCount > 0, truncatedCount };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     log.warn(`[tool-result-truncation] Failed to truncate: ${errMsg}`);
