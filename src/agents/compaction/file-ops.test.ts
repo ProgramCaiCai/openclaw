@@ -10,7 +10,7 @@ import {
 function makeAssistant(blocks: unknown[]): AgentMessage {
   return {
     role: "assistant",
-    content: blocks as any,
+    content: blocks as unknown,
     timestamp: 0,
   } as AgentMessage;
 }
