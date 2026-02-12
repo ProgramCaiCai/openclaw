@@ -69,6 +69,46 @@ function getErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
+function getTelegramApiErrorCode(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") {
+    return undefined;
+  }
+  const typed = err as { error_code?: unknown; errorCode?: unknown; status?: unknown };
+  const raw = typed.error_code ?? typed.errorCode ?? typed.status;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function getTelegramRetryAfterSeconds(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") {
+    return undefined;
+  }
+  const params = (err as { parameters?: unknown }).parameters;
+  if (params && typeof params === "object") {
+    const retryAfter = (params as { retry_after?: unknown }).retry_after;
+    if (typeof retryAfter === "number" && Number.isFinite(retryAfter)) {
+      return retryAfter;
+    }
+  }
+  const direct = (err as { retry_after?: unknown; retryAfter?: unknown }).retry_after;
+  if (typeof direct === "number" && Number.isFinite(direct)) {
+    return direct;
+  }
+  const alt = (err as { retryAfter?: unknown }).retryAfter;
+  if (typeof alt === "number" && Number.isFinite(alt)) {
+    return alt;
+  }
+  return undefined;
+}
+
 function collectErrorCandidates(err: unknown): unknown[] {
   const queue = [err];
   const seen = new Set<unknown>();
@@ -113,6 +153,16 @@ function collectErrorCandidates(err: unknown): unknown[] {
   return candidates;
 }
 
+export function extractTelegramRetryAfterMs(err: unknown): number | undefined {
+  for (const candidate of collectErrorCandidates(err)) {
+    const retryAfterSeconds = getTelegramRetryAfterSeconds(candidate);
+    if (typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds)) {
+      return Math.max(0, Math.trunc(retryAfterSeconds * 1000));
+    }
+  }
+  return undefined;
+}
+
 export type TelegramNetworkErrorContext = "polling" | "send" | "webhook" | "unknown";
 
 export function isRecoverableTelegramNetworkError(
@@ -128,6 +178,11 @@ export function isRecoverableTelegramNetworkError(
       : options.context !== "send";
 
   for (const candidate of collectErrorCandidates(err)) {
+    const telegramErrorCode = getTelegramApiErrorCode(candidate);
+    if (telegramErrorCode === 429) {
+      return true;
+    }
+
     const code = normalizeCode(getErrorCode(candidate));
     if (code && RECOVERABLE_ERROR_CODES.has(code)) {
       return true;

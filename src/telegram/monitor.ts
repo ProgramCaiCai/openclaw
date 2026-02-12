@@ -10,7 +10,10 @@ import { registerUnhandledRejectionHandler } from "../infra/unhandled-rejections
 import { resolveTelegramAccount } from "./accounts.js";
 import { resolveTelegramAllowedUpdates } from "./allowed-updates.js";
 import { createTelegramBot } from "./bot.js";
-import { isRecoverableTelegramNetworkError } from "./network-errors.js";
+import {
+  extractTelegramRetryAfterMs,
+  isRecoverableTelegramNetworkError,
+} from "./network-errors.js";
 import { makeProxyFetch } from "./proxy.js";
 import { readTelegramUpdateOffset, writeTelegramUpdateOffset } from "./update-offset-store.js";
 import { startTelegramWebhook } from "./webhook.js";
@@ -166,6 +169,15 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
       return;
     }
 
+    // Ensure polling can take control even if a webhook was previously configured.
+    if (typeof bot.api.deleteWebhook === "function") {
+      await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch((err) => {
+        (opts.runtime?.error ?? console.error)(
+          `telegram: deleteWebhook failed: ${formatErrorMessage(err)}`,
+        );
+      });
+    }
+
     // Use grammyjs/runner for concurrent update processing
     let restartAttempts = 0;
 
@@ -186,13 +198,32 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
           throw err;
         }
         const isConflict = isGetUpdatesConflict(err);
+        const retryAfterMs = extractTelegramRetryAfterMs(err);
         const isRecoverable = isRecoverableTelegramNetworkError(err, { context: "polling" });
         if (!isConflict && !isRecoverable) {
           throw err;
         }
+
+        if (isConflict) {
+          if (typeof bot.api.deleteWebhook === "function") {
+            await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch(
+              (deleteErr) => {
+                (opts.runtime?.error ?? console.error)(
+                  `Telegram getUpdates conflict; deleteWebhook attempt failed: ${formatErrorMessage(deleteErr)}`,
+                );
+              },
+            );
+          }
+        }
+
         restartAttempts += 1;
-        const delayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
-        const reason = isConflict ? "getUpdates conflict" : "network error";
+        const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        const delayMs = Math.max(baseDelayMs, retryAfterMs ?? 0);
+        const reason = retryAfterMs
+          ? "rate limited"
+          : isConflict
+            ? "getUpdates conflict"
+            : "network error";
         const errMsg = formatErrorMessage(err);
         (opts.runtime?.error ?? console.error)(
           `Telegram ${reason}: ${errMsg}; retrying in ${formatDurationPrecise(delayMs)}.`,
