@@ -3,6 +3,7 @@ import type { DmPolicy } from "../../../config/types.js";
 import type { WizardPrompter } from "../../../wizard/prompts.js";
 import type { ChannelOnboardingAdapter, ChannelOnboardingDmPolicy } from "../onboarding-types.js";
 import { formatCliCommand } from "../../../cli/command-format.js";
+import { redactSensitiveText } from "../../../logging/redact.js";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../../routing/session-key.js";
 import {
   listTelegramAccountIds,
@@ -13,6 +14,9 @@ import { formatDocsLink } from "../../../terminal/links.js";
 import { addWildcardAllowFrom, promptAccountId } from "./helpers.js";
 
 const channel = "telegram" as const;
+
+const TELEGRAM_USERNAME_LOOKUP_TIMEOUT_MS = 10_000;
+const TELEGRAM_ALLOWFROM_MAX_ATTEMPTS = 5;
 
 function setTelegramDmPolicy(cfg: OpenClawConfig, dmPolicy: DmPolicy) {
   const allowFrom =
@@ -84,10 +88,14 @@ async function promptTelegramAllowFrom(params: {
     if (!token) {
       return null;
     }
+
     const username = stripped.startsWith("@") ? stripped : `@${stripped}`;
     const url = `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(username)}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_USERNAME_LOOKUP_TIMEOUT_MS);
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) {
         return null;
       }
@@ -100,9 +108,19 @@ async function promptTelegramAllowFrom(params: {
         return String(id);
       }
       return null;
-    } catch {
-      // Network error during username lookup - return null to prompt user for numeric ID
-      return null;
+    } catch (err) {
+      // Only swallow network/timeout errors: prompt user for a numeric ID instead.
+      const name =
+        typeof err === "object" && err !== null && "name" in err
+          ? String((err as { name?: unknown }).name)
+          : "";
+      if (name === "AbortError" || err instanceof TypeError) {
+        return null;
+      }
+      const safe = redactSensitiveText(String(err));
+      throw new Error(`Telegram username lookup failed (${safe}).`, { cause: err });
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
@@ -113,7 +131,14 @@ async function promptTelegramAllowFrom(params: {
       .filter(Boolean);
 
   let resolvedIds: string[] = [];
+  let attempts = 0;
   while (resolvedIds.length === 0) {
+    attempts += 1;
+    if (attempts > TELEGRAM_ALLOWFROM_MAX_ATTEMPTS) {
+      throw new Error(
+        `Could not resolve Telegram allowFrom after ${TELEGRAM_ALLOWFROM_MAX_ATTEMPTS} attempts. Use @username or numeric id.`,
+      );
+    }
     const entry = await prompter.text({
       message: "Telegram allowFrom (username or user id)",
       placeholder: "@username",

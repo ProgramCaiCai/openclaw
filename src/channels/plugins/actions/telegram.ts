@@ -6,7 +6,10 @@ import {
   readStringOrNumberParam,
   readStringParam,
 } from "../../../agents/tools/common.js";
-import { handleTelegramAction } from "../../../agents/tools/telegram-actions.js";
+import {
+  handleTelegramAction,
+  readTelegramButtons,
+} from "../../../agents/tools/telegram-actions.js";
 import { listEnabledTelegramAccounts } from "../../../telegram/accounts.js";
 import { isTelegramInlineButtonsEnabled } from "../../../telegram/inline-buttons.js";
 
@@ -20,7 +23,7 @@ function readTelegramSendParams(params: Record<string, unknown>) {
   const content = message || caption || "";
   const replyTo = readStringParam(params, "replyTo");
   const threadId = readStringParam(params, "threadId");
-  const buttons = params.buttons;
+  const buttons = readTelegramButtons(params);
   const asVoice = typeof params.asVoice === "boolean" ? params.asVoice : undefined;
   const silent = typeof params.silent === "boolean" ? params.silent : undefined;
   const quoteText = readStringParam(params, "quoteText");
@@ -46,7 +49,10 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
       return [];
     }
     const gate = createActionGate(cfg.channels?.telegram?.actions);
-    const actions = new Set<ChannelMessageActionName>(["send"]);
+    const actions = new Set<ChannelMessageActionName>();
+    if (gate("sendMessage")) {
+      actions.add("send");
+    }
     if (gate("reactions")) {
       actions.add("react");
     }

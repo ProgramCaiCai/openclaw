@@ -514,4 +514,25 @@ describe("readTelegramButtons", () => {
     });
     expect(result).toEqual([[{ text: "Option A", callback_data: "cmd:a" }]]);
   });
+
+  it("rejects callback_data longer than 64 bytes", () => {
+    expect(() =>
+      readTelegramButtons({
+        buttons: [[{ text: "A", callback_data: "\u4f60".repeat(22) }]],
+      }),
+    ).toThrow(/64 bytes/i);
+  });
+
+  it("rejects more than 50 rows", () => {
+    const buttons = Array.from({ length: 51 }, () => [{ text: "A", callback_data: "a" }]);
+    expect(() => readTelegramButtons({ buttons })).toThrow(/too many rows/i);
+  });
+
+  it("rejects more than 8 buttons in a row", () => {
+    const row = Array.from({ length: 9 }, (_, idx) => ({
+      text: `B${idx}`,
+      callback_data: `c${idx}`,
+    }));
+    expect(() => readTelegramButtons({ buttons: [row] })).toThrow(/max 8/i);
+  });
 });
