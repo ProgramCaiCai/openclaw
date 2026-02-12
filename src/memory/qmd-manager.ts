@@ -263,40 +263,75 @@ export class QmdMemoryManager implements MemorySearchManager {
       log.warn("qmd query skipped: no managed collections configured");
       return [];
     }
-    const baseArgs = ["query", trimmed, "--json", "-n", String(limit), ...collectionFilterArgs];
-    let stdout: string;
-    let stderr: string;
-    try {
-      // Try with --no-expand first (skips slow 1.7B hyde expansion).
-      // Falls back to plain query if qmd doesn't support the flag.
-      const args = QmdMemoryManager.noExpandSupported
-        ? ["query", trimmed, "--json", "--no-expand", "-n", String(limit), ...collectionFilterArgs]
-        : baseArgs;
-      const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
-      stdout = result.stdout;
-      stderr = result.stderr;
-    } catch (err) {
-      const msg = String(err);
-      // If --no-expand was rejected (unknown flag), retry without it and remember.
-      if (
-        QmdMemoryManager.noExpandSupported &&
-        /unknown.*no-expand|unrecognized.*no-expand|invalid.*no-expand/i.test(msg)
-      ) {
-        log.info("qmd does not support --no-expand, falling back to plain query");
-        QmdMemoryManager.noExpandSupported = false;
-        try {
-          const result = await this.runQmd(baseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
-          stdout = result.stdout;
-          stderr = result.stderr;
-        } catch (retryErr) {
-          log.warn(`qmd query failed (retry): ${String(retryErr)}`);
-          throw retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+    const queryBaseArgs = [
+      "query",
+      trimmed,
+      "--json",
+      "-n",
+      String(limit),
+      ...collectionFilterArgs,
+    ];
+
+    const runQuery = async (): Promise<{ stdout: string; stderr: string }> => {
+      try {
+        // Try with --no-expand first (skips slow 1.7B hyde expansion).
+        // Falls back to plain query if qmd doesn't support the flag.
+        const args = QmdMemoryManager.noExpandSupported
+          ? [
+              "query",
+              trimmed,
+              "--json",
+              "--no-expand",
+              "-n",
+              String(limit),
+              ...collectionFilterArgs,
+            ]
+          : queryBaseArgs;
+        return await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
+      } catch (err) {
+        const msg = String(err);
+        // If --no-expand was rejected (unknown flag), retry without it and remember.
+        if (
+          QmdMemoryManager.noExpandSupported &&
+          /unknown.*no-expand|unrecognized.*no-expand|invalid.*no-expand/i.test(msg)
+        ) {
+          log.info("qmd does not support --no-expand, falling back to plain query");
+          QmdMemoryManager.noExpandSupported = false;
+          const result = await this.runQmd(queryBaseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
+          return result;
         }
-      } else {
         log.warn(`qmd query failed: ${msg}`);
         throw err instanceof Error ? err : new Error(msg);
       }
+    };
+
+    let stdout: string;
+    let stderr: string;
+
+    if (this.qmd.searchMode === "search" || this.qmd.searchMode === "vsearch") {
+      const mode = this.qmd.searchMode;
+      const args = [mode, trimmed, "--json"];
+      try {
+        const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
+        stdout = result.stdout;
+        stderr = result.stderr;
+      } catch (err) {
+        const msg = String(err);
+        if (/unknown.*--json|unrecognized.*--json|invalid.*--json/i.test(msg)) {
+          log.info(`qmd ${mode} does not support --json, falling back to query`);
+        } else {
+          log.warn(`qmd ${mode} failed: ${msg}; falling back to query`);
+        }
+        const result = await runQuery();
+        stdout = result.stdout;
+        stderr = result.stderr;
+      }
+    } else {
+      const result = await runQuery();
+      stdout = result.stdout;
+      stderr = result.stderr;
     }
+
     const parsed = parseQmdQueryJson(stdout, stderr);
     const results: MemorySearchResult[] = [];
     for (const entry of parsed) {
