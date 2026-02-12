@@ -9,6 +9,7 @@ import {
 import { resolveSessionFilePath } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
+import { describeUnknownError } from "../../agents/pi-embedded-runner/utils.js";
 import { formatContextUsageShort, formatTokenCount } from "../status.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { incrementCompactionCount } from "./session-updates.js";
@@ -62,7 +63,14 @@ export const handleCompactCommand: CommandHandler = async (params) => {
   const sessionId = params.sessionEntry.sessionId;
   if (isEmbeddedPiRunActive(sessionId)) {
     abortEmbeddedPiRun(sessionId);
-    await waitForEmbeddedPiRunEnd(sessionId, 15_000);
+    const ended = await waitForEmbeddedPiRunEnd(sessionId, 15_000);
+    if (!ended) {
+      const line = "仍在运行，请稍后重试";
+      enqueueSystemEvent(`Compaction refused: embedded run still active • ${line}`, {
+        sessionKey: params.sessionKey,
+      });
+      return { shouldContinue: false, reply: { text: `⚙️ ${line}` } };
+    }
   }
   const customInstructions = extractCompactInstructions({
     rawBody: params.ctx.CommandBody ?? params.ctx.RawBody ?? params.ctx.Body,
@@ -71,30 +79,38 @@ export const handleCompactCommand: CommandHandler = async (params) => {
     agentId: params.agentId,
     isGroup: params.isGroup,
   });
-  const result = await compactEmbeddedPiSession({
-    sessionId,
-    sessionKey: params.sessionKey,
-    messageChannel: params.command.channel,
-    groupId: params.sessionEntry.groupId,
-    groupChannel: params.sessionEntry.groupChannel,
-    groupSpace: params.sessionEntry.space,
-    spawnedBy: params.sessionEntry.spawnedBy,
-    sessionFile: resolveSessionFilePath(sessionId, params.sessionEntry),
-    workspaceDir: params.workspaceDir,
-    config: params.cfg,
-    skillsSnapshot: params.sessionEntry.skillsSnapshot,
-    provider: params.provider,
-    model: params.model,
-    thinkLevel: params.resolvedThinkLevel ?? (await params.resolveDefaultThinkingLevel()),
-    bashElevated: {
-      enabled: false,
-      allowed: false,
-      defaultLevel: "off",
-    },
-    customInstructions,
-    senderIsOwner: params.command.senderIsOwner,
-    ownerNumbers: params.command.ownerList.length > 0 ? params.command.ownerList : undefined,
-  });
+  let result: Awaited<ReturnType<typeof compactEmbeddedPiSession>>;
+  try {
+    result = await compactEmbeddedPiSession({
+      sessionId,
+      sessionKey: params.sessionKey,
+      messageChannel: params.command.channel,
+      groupId: params.sessionEntry.groupId,
+      groupChannel: params.sessionEntry.groupChannel,
+      groupSpace: params.sessionEntry.space,
+      spawnedBy: params.sessionEntry.spawnedBy,
+      sessionFile: resolveSessionFilePath(sessionId, params.sessionEntry),
+      workspaceDir: params.workspaceDir,
+      config: params.cfg,
+      skillsSnapshot: params.sessionEntry.skillsSnapshot,
+      provider: params.provider,
+      model: params.model,
+      thinkLevel: params.resolvedThinkLevel ?? (await params.resolveDefaultThinkingLevel()),
+      bashElevated: {
+        enabled: false,
+        allowed: false,
+        defaultLevel: "off",
+      },
+      customInstructions,
+      senderIsOwner: params.command.senderIsOwner,
+      ownerNumbers: params.command.ownerList.length > 0 ? params.command.ownerList : undefined,
+    });
+  } catch (err) {
+    const reason = describeUnknownError(err).trim() || "Unknown error";
+    const line = `Compaction failed: ${reason}`;
+    enqueueSystemEvent(line, { sessionKey: params.sessionKey });
+    return { shouldContinue: false, reply: { text: `⚙️ ${line}` } };
+  }
 
   const compactLabel = result.ok
     ? result.compacted
