@@ -35,6 +35,7 @@ import { registerTelegramNativeCommands } from "./bot-native-commands.js";
 import {
   buildTelegramUpdateKey,
   createTelegramUpdateDedupe,
+  getTelegramUpdateCompletionDefer,
   resolveTelegramUpdateId,
   type TelegramUpdateKeyContext,
 } from "./bot-updates.js";
@@ -152,28 +153,93 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   });
 
   const recentUpdates = createTelegramUpdateDedupe();
-  let lastUpdateId =
+  let committedUpdateId =
     typeof opts.updateOffset?.lastUpdateId === "number" ? opts.updateOffset.lastUpdateId : null;
 
-  const recordUpdateId = (ctx: TelegramUpdateKeyContext) => {
-    const updateId = resolveTelegramUpdateId(ctx);
-    if (typeof updateId !== "number") {
+  const pendingUpdates = new Map<number, { done: boolean }>();
+  let commitTask: Promise<void> = Promise.resolve();
+
+  const queueCommit = () => {
+    const onUpdateId = opts.updateOffset?.onUpdateId;
+    if (!onUpdateId) {
       return;
     }
-    if (lastUpdateId !== null && updateId <= lastUpdateId) {
+    commitTask = commitTask
+      .then(async () => {
+        const committed = committedUpdateId ?? -1;
+        let minNotDone = Number.POSITIVE_INFINITY;
+        let maxDone = -1;
+
+        for (const [id, entry] of pendingUpdates) {
+          if (entry.done) {
+            if (id > maxDone) {
+              maxDone = id;
+            }
+            continue;
+          }
+          if (id < minNotDone) {
+            minNotDone = id;
+          }
+        }
+
+        const target =
+          minNotDone !== Number.POSITIVE_INFINITY
+            ? minNotDone - 1
+            : // No pending updates: safe to commit the highest finished update we've seen.
+              maxDone;
+
+        if (target <= committed) {
+          return;
+        }
+
+        await onUpdateId(target);
+        committedUpdateId = target;
+
+        const toDelete: number[] = [];
+        for (const id of pendingUpdates.keys()) {
+          if (id <= target) {
+            toDelete.push(id);
+          }
+        }
+        for (const id of toDelete) {
+          pendingUpdates.delete(id);
+        }
+      })
+      .catch((err) => {
+        runtime.error?.(danger(`telegram: update offset commit failed: ${String(err)}`));
+      });
+  };
+
+  const noteUpdateSeen = (updateId: number) => {
+    if (committedUpdateId !== null && updateId <= committedUpdateId) {
       return;
     }
-    lastUpdateId = updateId;
-    void opts.updateOffset?.onUpdateId?.(updateId);
+    if (!pendingUpdates.has(updateId)) {
+      pendingUpdates.set(updateId, { done: false });
+    }
+  };
+
+  const markUpdateDone = (updateId: number) => {
+    const entry = pendingUpdates.get(updateId);
+    if (!entry || entry.done) {
+      return;
+    }
+    entry.done = true;
+    queueCommit();
   };
 
   const shouldSkipUpdate = (ctx: TelegramUpdateKeyContext) => {
     const updateId = resolveTelegramUpdateId(ctx);
-    if (typeof updateId === "number" && lastUpdateId !== null) {
-      if (updateId <= lastUpdateId) {
+
+    // Only skip updates we have already *safely committed* (persisted). Avoid at-most-once.
+    if (typeof updateId === "number") {
+      if (committedUpdateId !== null && updateId <= committedUpdateId) {
         return true;
       }
+      return false;
     }
+
+    // Fallback: for updates without update_id, dedupe by derived key.
     const key = buildTelegramUpdateKey(ctx);
     const skipped = recentUpdates.check(key);
     if (skipped && key && shouldLogVerbose()) {
@@ -219,8 +285,36 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
       }
     }
+
+    const updateId = resolveTelegramUpdateId(ctx);
+    if (typeof updateId === "number") {
+      noteUpdateSeen(updateId);
+    }
+
     await next();
-    recordUpdateId(ctx);
+
+    if (typeof updateId !== "number") {
+      return;
+    }
+
+    const defer = getTelegramUpdateCompletionDefer(ctx);
+    if (defer) {
+      void defer
+        .then(() => {
+          markUpdateDone(updateId);
+        })
+        .catch((err) => {
+          runtime.error?.(
+            danger(
+              `telegram: deferred update processing failed (update_id=${updateId}): ${String(err)}`,
+            ),
+          );
+          markUpdateDone(updateId);
+        });
+      return;
+    }
+
+    markUpdateDone(updateId);
   });
 
   const historyLimit = Math.max(

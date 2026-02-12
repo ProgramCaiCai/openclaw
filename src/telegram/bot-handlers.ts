@@ -23,7 +23,7 @@ import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bot-access.js";
 import { RegisterTelegramHandlerParams } from "./bot-native-commands.js";
-import { MEDIA_GROUP_TIMEOUT_MS, type MediaGroupEntry } from "./bot-updates.js";
+import { MEDIA_GROUP_TIMEOUT_MS, setTelegramUpdateCompletionDefer } from "./bot-updates.js";
 import { resolveMedia } from "./bot/delivery.js";
 import {
   buildTelegramGroupPeerId,
@@ -63,12 +63,33 @@ export const registerTelegramHandlers = ({
   const TELEGRAM_TEXT_FRAGMENT_MAX_PARTS = 12;
   const TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS = 50_000;
 
+  type Deferred = {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+  };
+
+  const createDeferred = (): Deferred => {
+    let resolve!: () => void;
+    let reject!: (err: unknown) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  type MediaGroupEntry = {
+    messages: Array<{ msg: Message; ctx: TelegramContext; done: Deferred }>;
+    timer: ReturnType<typeof setTimeout>;
+  };
+
   const mediaGroupBuffer = new Map<string, MediaGroupEntry>();
   let mediaGroupProcessing: Promise<void> = Promise.resolve();
 
   type TextFragmentEntry = {
     key: string;
-    messages: Array<{ msg: Message; ctx: TelegramContext; receivedAtMs: number }>;
+    messages: Array<{ msg: Message; ctx: TelegramContext; receivedAtMs: number; done: Deferred }>;
     timer: ReturnType<typeof setTimeout>;
   };
   const textFragmentBuffer = new Map<string, TextFragmentEntry>();
@@ -82,6 +103,7 @@ export const registerTelegramHandlers = ({
     storeAllowFrom: string[];
     debounceKey: string | null;
     botUsername?: string;
+    done: Deferred;
   };
   const inboundDebouncer = createInboundDebouncer<TelegramDebounceEntry>({
     debounceMs,
@@ -97,21 +119,32 @@ export const registerTelegramHandlers = ({
       return !hasControlCommand(text, cfg, { botUsername: entry.botUsername });
     },
     onFlush: async (entries) => {
+      const resolveAll = () => {
+        for (const entry of entries) {
+          entry.done.resolve();
+        }
+      };
+
       const last = entries.at(-1);
       if (!last) {
+        resolveAll();
         return;
       }
       if (entries.length === 1) {
         await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
+        resolveAll();
         return;
       }
+
       const combinedText = entries
         .map((entry) => entry.msg.text ?? entry.msg.caption ?? "")
         .filter(Boolean)
         .join("\n");
       if (!combinedText.trim()) {
+        resolveAll();
         return;
       }
+
       const first = entries[0];
       const baseCtx = first.ctx;
       const getFile =
@@ -131,8 +164,12 @@ export const registerTelegramHandlers = ({
         first.storeAllowFrom,
         messageIdOverride ? { messageIdOverride } : undefined,
       );
+      resolveAll();
     },
-    onError: (err) => {
+    onError: (err, entries) => {
+      for (const entry of entries) {
+        entry.done.reject(err);
+      }
       runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
     },
   });
@@ -220,6 +257,11 @@ export const registerTelegramHandlers = ({
       await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom);
     } catch (err) {
       runtime.error?.(danger(`media group handler failed: ${String(err)}`));
+    } finally {
+      // Ensure offset commit is not advanced past buffered work until we at least attempted it.
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
     }
   };
 
@@ -260,6 +302,11 @@ export const registerTelegramHandlers = ({
       );
     } catch (err) {
       runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
+    } finally {
+      // Ensure offset commit is not advanced past buffered work until we at least attempted it.
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
     }
   };
 
@@ -814,7 +861,9 @@ export const registerTelegramHandlers = ({
               existing.messages.length + 1 <= TELEGRAM_TEXT_FRAGMENT_MAX_PARTS &&
               nextTotalChars <= TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS
             ) {
-              existing.messages.push({ msg, ctx, receivedAtMs: nowMs });
+              const fragmentDone = createDeferred();
+              existing.messages.push({ msg, ctx, receivedAtMs: nowMs, done: fragmentDone });
+              setTelegramUpdateCompletionDefer(ctx, fragmentDone.promise);
               scheduleTextFragmentFlush(existing);
               return;
             }
@@ -833,9 +882,11 @@ export const registerTelegramHandlers = ({
 
         const shouldStart = text.length >= TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS;
         if (shouldStart) {
+          const fragmentDone = createDeferred();
+          setTelegramUpdateCompletionDefer(ctx, fragmentDone.promise);
           const entry: TextFragmentEntry = {
             key,
-            messages: [{ msg, ctx, receivedAtMs: nowMs }],
+            messages: [{ msg, ctx, receivedAtMs: nowMs, done: fragmentDone }],
             timer: setTimeout(() => {}, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS),
           };
           textFragmentBuffer.set(key, entry);
@@ -850,7 +901,9 @@ export const registerTelegramHandlers = ({
         const existing = mediaGroupBuffer.get(mediaGroupId);
         if (existing) {
           clearTimeout(existing.timer);
-          existing.messages.push({ msg, ctx });
+          const mediaDone = createDeferred();
+          existing.messages.push({ msg, ctx, done: mediaDone });
+          setTelegramUpdateCompletionDefer(ctx, mediaDone.promise);
           existing.timer = setTimeout(async () => {
             mediaGroupBuffer.delete(mediaGroupId);
             mediaGroupProcessing = mediaGroupProcessing
@@ -861,8 +914,10 @@ export const registerTelegramHandlers = ({
             await mediaGroupProcessing;
           }, MEDIA_GROUP_TIMEOUT_MS);
         } else {
+          const mediaDone = createDeferred();
+          setTelegramUpdateCompletionDefer(ctx, mediaDone.promise);
           const entry: MediaGroupEntry = {
-            messages: [{ msg, ctx }],
+            messages: [{ msg, ctx, done: mediaDone }],
             timer: setTimeout(async () => {
               mediaGroupBuffer.delete(mediaGroupId);
               mediaGroupProcessing = mediaGroupProcessing
@@ -922,6 +977,8 @@ export const registerTelegramHandlers = ({
       const debounceKey = senderId
         ? `telegram:${accountId ?? "default"}:${conversationKey}:${senderId}`
         : null;
+      const done = createDeferred();
+      setTelegramUpdateCompletionDefer(ctx, done.promise);
       await inboundDebouncer.enqueue({
         ctx,
         msg,
@@ -929,6 +986,7 @@ export const registerTelegramHandlers = ({
         storeAllowFrom,
         debounceKey,
         botUsername: ctx.me?.username,
+        done,
       });
     } catch (err) {
       runtime.error?.(danger(`handler failed: ${String(err)}`));
