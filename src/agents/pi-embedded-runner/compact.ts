@@ -277,7 +277,6 @@ export async function compactEmbeddedPiSessionDirect(
   });
 
   let restoreSkillEnv: (() => void) | undefined;
-  process.chdir(effectiveWorkspace);
   try {
     const shouldLoadSkillEntries = !params.skillsSnapshot || !params.skillsSnapshot.resolvedSkills;
     const skillEntries = shouldLoadSkillEntries
@@ -419,7 +418,7 @@ export async function compactEmbeddedPiSessionDirect(
     const docsPath = await resolveOpenClawDocsPath({
       workspaceDir: effectiveWorkspace,
       argv1: process.argv[1],
-      cwd: process.cwd(),
+      cwd: prevCwd,
       moduleUrl: import.meta.url,
     });
     const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
@@ -575,7 +574,6 @@ export async function compactEmbeddedPiSessionDirect(
     };
   } finally {
     restoreSkillEnv?.();
-    process.chdir(prevCwd);
   }
 }
 
