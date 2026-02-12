@@ -1,8 +1,25 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { FileOperations } from "@mariozechner/pi-coding-agent";
 
-const PATH_KEYS = ["path", "file_path", "filePath", "filepath"] as const;
+const POSSIBLE_SHELL_SIDE_FILE_CHANGES = "possible shell-side file changes";
+
+const PATH_KEYS = [
+  "path",
+  "file_path",
+  "filePath",
+  "filepath",
+  // Common tool params across runners/providers.
+  "cwd",
+  "workdir",
+  "workDir",
+  "directory",
+  "dir",
+] as const;
+
 const PATHS_KEYS = ["paths", "filePaths", "file_paths"] as const;
+
+const MAX_PATH_EXTRACTION_DEPTH = 2;
+const MAX_PATH_EXTRACTION_NODES = 20;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
@@ -39,14 +56,53 @@ function normalizeToolName(name: unknown): string {
 
 function extractPathsFromArgs(args: Record<string, unknown>): string[] {
   const out = new Set<string>();
+  const pathKeys = new Set<string>(PATH_KEYS);
+  const pathsKeys = new Set<string>(PATHS_KEYS);
+  const visited = new Set<object>();
 
-  for (const key of PATH_KEYS) {
-    addPath(out, args[key]);
-  }
+  let nodes = 0;
 
-  for (const key of PATHS_KEYS) {
-    addPaths(out, args[key]);
-  }
+  const walk = (value: unknown, depth: number): void => {
+    if (nodes >= MAX_PATH_EXTRACTION_NODES) {
+      return;
+    }
+    if (depth > MAX_PATH_EXTRACTION_DEPTH) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      nodes += 1;
+      for (const item of value) {
+        walk(item, depth + 1);
+      }
+      return;
+    }
+
+    const rec = asRecord(value);
+    if (!rec) {
+      return;
+    }
+
+    if (visited.has(rec)) {
+      return;
+    }
+    visited.add(rec);
+    nodes += 1;
+
+    for (const [key, child] of Object.entries(rec)) {
+      if (pathKeys.has(key)) {
+        addPath(out, child);
+      }
+      if (pathsKeys.has(key)) {
+        addPaths(out, child);
+      }
+      if (depth < MAX_PATH_EXTRACTION_DEPTH) {
+        walk(child, depth + 1);
+      }
+    }
+  };
+
+  walk(args, 0);
 
   return [...out];
 }
@@ -69,6 +125,10 @@ export function mergeFileOps(target: FileOperations, source: FileOperations): vo
   for (const p of source.edited) {
     target.edited.add(p);
   }
+}
+
+function markPossibleShellSideChanges(fileOps: FileOperations): void {
+  fileOps.written.add(POSSIBLE_SHELL_SIDE_FILE_CHANGES);
 }
 
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
@@ -107,9 +167,6 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
     }
 
     const paths = extractPathsFromArgs(args);
-    if (paths.length === 0) {
-      continue;
-    }
 
     switch (toolName) {
       case "read":
@@ -127,14 +184,31 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
           fileOps.edited.add(p);
         }
         break;
+      case "exec":
+      case "bash":
+      case "shell": {
+        markPossibleShellSideChanges(fileOps);
+        for (const p of paths) {
+          fileOps.written.add(p);
+        }
+        break;
+      }
+      default: {
+        // Only mark unknown tools when they look like shell execution.
+        const hasShellLikePayload =
+          typeof args.command === "string" ||
+          typeof args.cmd === "string" ||
+          typeof args.script === "string";
+        if (hasShellLikePayload) {
+          markPossibleShellSideChanges(fileOps);
+        }
+        break;
+      }
     }
   }
 }
 
-export function extractFileOpsFromMessages(
-  messages: AgentMessage[],
-  fileOps: FileOperations,
-): void {
+export function extractFileOpsFromMessages(messages: AgentMessage[], fileOps: FileOperations): void {
   for (const message of messages) {
     extractFileOpsFromMessage(message, fileOps);
   }
