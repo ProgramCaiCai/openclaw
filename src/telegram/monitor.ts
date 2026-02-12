@@ -170,15 +170,12 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
     }
 
     // Ensure polling can take control even if a webhook was previously configured.
-    const deleteWebhook = bot.api.deleteWebhook;
-    if (typeof deleteWebhook === "function") {
-      await Promise.resolve(deleteWebhook.call(bot.api, { drop_pending_updates: false })).catch(
-        (err) => {
-          (opts.runtime?.error ?? console.error)(
-            `telegram: deleteWebhook failed: ${formatErrorMessage(err)}`,
-          );
-        },
-      );
+    if (typeof bot.api.deleteWebhook === "function") {
+      await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch((err) => {
+        (opts.runtime?.error ?? console.error)(
+          `telegram: deleteWebhook failed: ${formatErrorMessage(err)}`,
+        );
+      });
     }
 
     // Use grammyjs/runner for concurrent update processing
@@ -208,15 +205,14 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
         }
 
         if (isConflict) {
-          const deleteWebhook = bot.api.deleteWebhook;
-          if (typeof deleteWebhook === "function") {
-            await Promise.resolve(
-              deleteWebhook.call(bot.api, { drop_pending_updates: false }),
-            ).catch((deleteErr) => {
-              (opts.runtime?.error ?? console.error)(
-                `Telegram getUpdates conflict; deleteWebhook attempt failed: ${formatErrorMessage(deleteErr)}`,
-              );
-            });
+          if (typeof bot.api.deleteWebhook === "function") {
+            await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch(
+              (deleteErr) => {
+                (opts.runtime?.error ?? console.error)(
+                  `Telegram getUpdates conflict; deleteWebhook attempt failed: ${formatErrorMessage(deleteErr)}`,
+                );
+              },
+            );
           }
         }
 
