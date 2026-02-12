@@ -586,7 +586,7 @@ describe("QmdMemoryManager", () => {
     } as OpenClawConfig;
 
     // Reset the static flag so fallback can be tested
-    (QmdMemoryManager as any).noExpandSupported = true;
+    (QmdMemoryManager as unknown as { noExpandSupported: boolean }).noExpandSupported = true;
 
     let callCount = 0;
     spawnMock.mockImplementation((_cmd: string, args: string[]) => {
@@ -620,7 +620,9 @@ describe("QmdMemoryManager", () => {
     expect(results).toEqual([]);
 
     // Should have been called twice: once with --no-expand (failed), once without
-    const queryCalls = spawnMock.mock.calls.filter((call: any) => call[1]?.[0] === "query");
+    const queryCalls = spawnMock.mock.calls.filter(
+      (call) => Array.isArray(call[1]) && call[1][0] === "query",
+    );
     expect(queryCalls.length).toBe(2);
     expect(queryCalls[0][1]).toContain("--no-expand");
     expect(queryCalls[1][1]).not.toContain("--no-expand");
@@ -641,12 +643,14 @@ describe("QmdMemoryManager", () => {
     });
 
     await manager.search("test2", { sessionKey: "agent:main:slack:dm:u123" });
-    const secondQueryCalls = spawnMock.mock.calls.filter((call: any) => call[1]?.[0] === "query");
+    const secondQueryCalls = spawnMock.mock.calls.filter(
+      (call) => Array.isArray(call[1]) && call[1][0] === "query",
+    );
     expect(secondQueryCalls.length).toBe(1);
     expect(secondQueryCalls[0][1]).not.toContain("--no-expand");
 
     // Restore for other tests
-    (QmdMemoryManager as any).noExpandSupported = true;
+    (QmdMemoryManager as unknown as { noExpandSupported: boolean }).noExpandSupported = true;
     await manager.close();
   });
 
