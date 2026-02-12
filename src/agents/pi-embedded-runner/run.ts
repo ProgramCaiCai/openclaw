@@ -44,6 +44,7 @@ import {
   pickFallbackThinkingLevel,
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
+import { resolveCompactionReserveTokensFloor } from "../pi-settings.js";
 import { normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
@@ -803,13 +804,19 @@ export async function runEmbeddedPiAgent(
 
           // Best-effort: if this run consumed most of the context window, compact now so the
           // next user turn is less likely to overflow.
+          // Threshold is 85% of the SDK compaction point (contextWindow - reserveTokens),
+          // NOT 85% of the raw context window, to ensure this fires before the SDK's
+          // built-in compaction kicks in.
           const promptUsage =
             attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
           const promptTokens = promptUsage?.input ?? 0;
           const contextWindowTokens = ctxInfo.tokens;
-          if (!aborted && promptTokens >= contextWindowTokens * 0.85) {
+          const reserveTokens = resolveCompactionReserveTokensFloor(params.config);
+          const sdkCompactionPoint = Math.max(0, contextWindowTokens - reserveTokens);
+          const proactiveThreshold = Math.floor(sdkCompactionPoint * 0.85);
+          if (!aborted && promptTokens >= proactiveThreshold) {
             log.info(
-              `[near-limit-compaction] promptTokens=${promptTokens} ctx=${contextWindowTokens}; attempting best-effort compaction`,
+              `[near-limit-compaction] promptTokens=${promptTokens} threshold=${proactiveThreshold} ctx=${contextWindowTokens} reserve=${reserveTokens}; attempting best-effort compaction`,
             );
             try {
               const compactResult = await compactEmbeddedPiSessionDirect({
