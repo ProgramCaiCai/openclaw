@@ -267,17 +267,20 @@ export function createSessionsHistoryTool(opts?: {
         sanitizedMessages.map((entry) => entry.message),
         SESSIONS_HISTORY_MAX_BYTES,
       );
-      const droppedMessages = cappedMessages.items.length < selectedMessages.length;
+      // Only treat byte caps / hard caps as "droppedMessages"; filtering (tools/thinking)
+      // is intentional and should not be reported as a drop.
+      const droppedByByteCap = cappedMessages.items.length < sanitizedMessages.length;
       const hardened = enforceSessionsHistoryHardCap({
         items: cappedMessages.items,
         bytes: cappedMessages.bytes,
         maxBytes: SESSIONS_HISTORY_MAX_BYTES,
       });
+      const droppedMessages = droppedByByteCap || hardened.hardCapped;
       return jsonResult({
         sessionKey: displayKey,
         messages: hardened.items,
-        truncated: droppedMessages || contentTruncated || hardened.hardCapped,
-        droppedMessages: droppedMessages || hardened.hardCapped,
+        truncated: droppedMessages || contentTruncated,
+        droppedMessages,
         contentTruncated,
         bytes: hardened.bytes,
       });

@@ -28,6 +28,8 @@ export type SessionListRow = {
   model?: string;
   contextTokens?: number | null;
   totalTokens?: number | null;
+  running?: boolean;
+  activeRunId?: string;
   thinkingLevel?: string;
   verboseLevel?: string;
   systemSent?: boolean;
@@ -352,7 +354,7 @@ export function stripToolMessages(messages: unknown[]): unknown[] {
 
 /**
  * Strip thinking/summary_text content blocks from messages to avoid context bloat
- * when returning session messages via sessions_list.
+ * when returning session messages via sessions_list / sessions_history.
  */
 export function stripThinkingBlocks(messages: unknown[]): unknown[] {
   return messages.map((msg) => {
