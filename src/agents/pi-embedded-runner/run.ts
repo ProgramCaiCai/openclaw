@@ -837,7 +837,9 @@ export async function runEmbeddedPiAgent(
           // built-in compaction kicks in.
           const promptUsage =
             attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
-          const proactivePromptTokens = promptUsage?.input ?? 0;
+          // Include cacheRead to reflect actual context window consumption
+          // (input alone is near-zero when prompt caching is active).
+          const proactivePromptTokens = (promptUsage?.input ?? 0) + (promptUsage?.cacheRead ?? 0);
           const contextWindowTokens = ctxInfo.tokens;
           const reserveTokens = resolveCompactionReserveTokensFloor(params.config);
           const sdkCompactionPoint = Math.max(0, contextWindowTokens - reserveTokens);
