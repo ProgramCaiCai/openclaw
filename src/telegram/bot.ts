@@ -163,6 +163,9 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   const pendingUpdates = new Map<number, { done: boolean }>();
   let commitTask: Promise<void> = Promise.resolve();
 
+  // R1-04: The promise chain via `commitTask = commitTask.then(...)` guarantees
+  // sequential execution in the JS event loop — each `.then` callback runs only
+  // after the previous one resolves. No mutex is needed.
   const queueCommit = () => {
     const onUpdateId = opts.updateOffset?.onUpdateId;
     if (!onUpdateId) {
@@ -214,7 +217,14 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       });
   };
 
+  // R1-11: Only track pending updates when an offset commit callback exists.
+  // In webhook mode (no onUpdateId), tracking without pruning causes unbounded growth.
+  const hasOffsetCallback = Boolean(opts.updateOffset?.onUpdateId);
+
   const noteUpdateSeen = (updateId: number) => {
+    if (!hasOffsetCallback) {
+      return;
+    }
     if (committedUpdateId !== null && updateId <= committedUpdateId) {
       return;
     }
@@ -224,6 +234,9 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   };
 
   const markUpdateDone = (updateId: number) => {
+    if (!hasOffsetCallback) {
+      return;
+    }
     const entry = pendingUpdates.get(updateId);
     if (!entry || entry.done) {
       return;
@@ -337,7 +350,18 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         if (disposition.retryable) {
           // Leave update pending; failing updates should not advance offset.
         } else {
-          // Permanent failures should not stall the offset indefinitely.
+          // R1-03: Permanent failures advance offset to avoid stalling, but must be
+          // highly visible. Log at error level with CRITICAL prefix and emit system event.
+          updateCompletionLogger.error("CRITICAL: permanent update failure — advancing offset", {
+            phase: "inbound.middleware",
+            updateId,
+            errorClass: disposition.errorClass,
+            error: formatErrorMessage(nextError),
+          });
+          enqueueSystemEvent(
+            `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
+            { updateId, errorClass: disposition.errorClass },
+          );
           markUpdateDone(updateId);
           nextError = undefined;
         }
