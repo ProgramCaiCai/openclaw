@@ -53,8 +53,24 @@ async function atomicWriteFile(filePath: string, content: string) {
   await fs.rename(tmpPath, filePath);
 }
 
+function resolveLegacySpoolDir(opts: TelegramWebhookSpoolOptions): string | undefined {
+  const trimmed = opts.accountId?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const sanitized = normalizeAccountDirSegment(opts.accountId);
+  // If sanitization changed the name, the old unsanitized dir may still hold records.
+  if (trimmed === sanitized) {
+    return undefined;
+  }
+  const root =
+    (opts.rootDir ?? process.env.OPENCLAW_TELEGRAM_WEBHOOK_SPOOL_DIR)?.trim() || DEFAULT_SPOOL_DIR;
+  return path.join(root, trimmed);
+}
+
 export function createTelegramWebhookSpool(opts: TelegramWebhookSpoolOptions = {}) {
   const dir = resolveSpoolDir(opts);
+  const legacyDir = resolveLegacySpoolDir(opts);
   const deadLetterDir = path.join(dir, "dead-letter");
 
   const append = async (entry: Omit<TelegramWebhookSpoolEntry, "id">) => {
@@ -98,19 +114,29 @@ export function createTelegramWebhookSpool(opts: TelegramWebhookSpoolOptions = {
   };
 
   const list = async (): Promise<string[]> => {
-    try {
-      const names = await fs.readdir(dir);
-      return names
-        .filter(isRecordFile)
-        .toSorted((a, b) => a.localeCompare(b))
-        .map((name) => path.join(dir, name));
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code === "ENOENT") {
-        return [];
+    const results: string[] = [];
+
+    for (const scanDir of [dir, legacyDir]) {
+      if (!scanDir) {
+        continue;
       }
-      throw err;
+      try {
+        const names = await fs.readdir(scanDir);
+        for (const name of names) {
+          if (isRecordFile(name)) {
+            results.push(path.join(scanDir, name));
+          }
+        }
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === "ENOENT") {
+          continue;
+        }
+        throw err;
+      }
     }
+
+    return results.toSorted((a, b) => path.basename(a).localeCompare(path.basename(b)));
   };
 
   const read = async (filePath: string): Promise<TelegramWebhookSpoolEntry> => {
