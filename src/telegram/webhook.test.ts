@@ -105,8 +105,24 @@ describe("startTelegramWebhook", () => {
     }
     expect(handleUpdateSpy).toHaveBeenCalled();
 
+    // Spool ack happens after handleUpdate finishes; poll to avoid timing flakes.
     const spoolDir = path.join(spoolRoot, "opie");
-    const remaining = (await fs.readdir(spoolDir)).filter((name) => name.endsWith(".json"));
+    let remaining: string[] = [];
+    for (let i = 0; i < 50; i += 1) {
+      try {
+        remaining = (await fs.readdir(spoolDir)).filter((name) => name.endsWith(".json"));
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code !== "ENOENT") {
+          throw err;
+        }
+        remaining = [];
+      }
+      if (remaining.length === 0) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(remaining.length).toBe(0);
 
     abort.abort();
