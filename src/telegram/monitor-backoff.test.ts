@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { monitorTelegramProvider } from "./monitor.js";
 
 const runSpy = vi.fn();
@@ -44,6 +44,11 @@ describe("monitorTelegramProvider restart backoff", () => {
     deleteWebhookSpy.mockReset();
     computeBackoffSpy.mockReset();
     sleepWithAbortSpy.mockReset();
+  });
+
+  afterEach(() => {
+    // Avoid leaking fake timers across test files in the shared worker.
+    vi.useRealTimers();
   });
 
   it("resets restart attempt counter after a stable run", async () => {
@@ -117,12 +122,14 @@ describe("monitorTelegramProvider restart backoff", () => {
       return value;
     });
 
-    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
+    try {
+      await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
 
-    expect(sleepWithAbortSpy).toHaveBeenCalled();
-    const delayMs = sleepWithAbortSpy.mock.calls[0]?.[0];
-    expect(delayMs).toBe(30_000);
-
-    nowSpy.mockRestore();
+      expect(sleepWithAbortSpy).toHaveBeenCalled();
+      const delayMs = sleepWithAbortSpy.mock.calls[0]?.[0];
+      expect(delayMs).toBe(30_000);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
