@@ -22,7 +22,7 @@ import {
 } from "../config/group-policy.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../globals.js";
-import { formatUncaughtError } from "../infra/errors.js";
+import { formatErrorMessage, formatUncaughtError } from "../infra/errors.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -46,6 +46,10 @@ import {
   resolveTelegramStreamMode,
 } from "./bot/helpers.js";
 import { resolveTelegramFetch } from "./fetch.js";
+import {
+  extractTelegramRetryAfterMs,
+  isRecoverableTelegramNetworkError,
+} from "./network-errors.js";
 import { wasSentByBot } from "./sent-message-cache.js";
 
 export type TelegramBotOptions = {
@@ -274,6 +278,26 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     });
   };
 
+  const updateCompletionLogger = createSubsystemLogger(
+    "gateway/channels/telegram/update-completion",
+  );
+
+  type TelegramUpdateFailureDisposition = {
+    retryable: boolean;
+    errorClass: "rate_limit" | "network" | "permanent";
+    retryAfterMs?: number;
+  };
+
+  const classifyTelegramUpdateFailure = (err: unknown): TelegramUpdateFailureDisposition => {
+    const retryAfterMs = extractTelegramRetryAfterMs(err);
+    if (typeof retryAfterMs === "number") {
+      return { retryable: true, errorClass: "rate_limit", retryAfterMs };
+    }
+
+    const retryable = isRecoverableTelegramNetworkError(err, { context: "polling" });
+    return { retryable, errorClass: retryable ? "network" : "permanent" };
+  };
+
   bot.use(async (ctx, next) => {
     if (shouldLogVerbose()) {
       try {
@@ -300,12 +324,23 @@ export function createTelegramBot(opts: TelegramBotOptions) {
 
     if (typeof updateId === "number") {
       if (nextError) {
-        runtime.error?.(
-          danger(
-            `telegram: update middleware failed (update_id=${updateId}): ${String(nextError)}`,
-          ),
-        );
-        markUpdateDone(updateId);
+        const disposition = classifyTelegramUpdateFailure(nextError);
+        updateCompletionLogger.error("telegram update middleware failed", {
+          phase: "inbound.middleware",
+          updateId,
+          errorClass: disposition.errorClass,
+          retryable: disposition.retryable,
+          retryAfterMs: disposition.retryAfterMs,
+          error: formatErrorMessage(nextError),
+        });
+
+        if (disposition.retryable) {
+          // Leave update pending; failing updates should not advance offset.
+        } else {
+          // Permanent failures should not stall the offset indefinitely.
+          markUpdateDone(updateId);
+          nextError = undefined;
+        }
       } else {
         const defer = getTelegramUpdateCompletionDefer(ctx);
         if (defer) {
@@ -314,11 +349,20 @@ export function createTelegramBot(opts: TelegramBotOptions) {
               markUpdateDone(updateId);
             })
             .catch((err) => {
-              runtime.error?.(
-                danger(
-                  `telegram: deferred update processing failed (update_id=${updateId}): ${String(err)}`,
-                ),
-              );
+              const disposition = classifyTelegramUpdateFailure(err);
+              updateCompletionLogger.error("telegram deferred update processing failed", {
+                phase: "inbound.defer",
+                updateId,
+                errorClass: disposition.errorClass,
+                retryable: disposition.retryable,
+                retryAfterMs: disposition.retryAfterMs,
+                error: formatErrorMessage(err),
+              });
+
+              if (disposition.retryable) {
+                return;
+              }
+              // Permanent deferred failures should not stall the offset indefinitely.
               markUpdateDone(updateId);
             });
         } else {

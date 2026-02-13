@@ -105,7 +105,17 @@ describe("monitorTelegramProvider (grammY)", () => {
     Object.values(api).forEach((fn) => {
       fn?.mockReset?.();
     });
-    await monitorTelegramProvider({ token: "tok" });
+
+    const abort = new AbortController();
+    runSpy.mockImplementationOnce(() => ({
+      task: () => {
+        abort.abort();
+        return Promise.resolve();
+      },
+      stop: vi.fn(),
+    }));
+
+    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
     expect(handlers.message).toBeDefined();
     await handlers.message?.({
       message: {
@@ -128,7 +138,16 @@ describe("monitorTelegramProvider (grammY)", () => {
       channels: { telegram: {} },
     });
 
-    await monitorTelegramProvider({ token: "tok" });
+    const abort = new AbortController();
+    runSpy.mockImplementationOnce(() => ({
+      task: () => {
+        abort.abort();
+        return Promise.resolve();
+      },
+      stop: vi.fn(),
+    }));
+
+    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
 
     expect(runSpy).toHaveBeenCalledWith(
       expect.anything(),
@@ -147,7 +166,17 @@ describe("monitorTelegramProvider (grammY)", () => {
     Object.values(api).forEach((fn) => {
       fn?.mockReset?.();
     });
-    await monitorTelegramProvider({ token: "tok" });
+
+    const abort = new AbortController();
+    runSpy.mockImplementationOnce(() => ({
+      task: () => {
+        abort.abort();
+        return Promise.resolve();
+      },
+      stop: vi.fn(),
+    }));
+
+    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
     await handlers.message?.({
       message: {
         message_id: 2,
@@ -161,6 +190,7 @@ describe("monitorTelegramProvider (grammY)", () => {
   });
 
   it("retries on recoverable network errors", async () => {
+    const abort = new AbortController();
     const networkError = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
     runSpy
       .mockImplementationOnce(() => ({
@@ -168,11 +198,14 @@ describe("monitorTelegramProvider (grammY)", () => {
         stop: vi.fn(),
       }))
       .mockImplementationOnce(() => ({
-        task: () => Promise.resolve(),
+        task: () => {
+          abort.abort();
+          return Promise.resolve();
+        },
         stop: vi.fn(),
       }));
 
-    await monitorTelegramProvider({ token: "tok" });
+    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal });
 
     expect(computeBackoff).toHaveBeenCalled();
     expect(sleepWithAbort).toHaveBeenCalled();

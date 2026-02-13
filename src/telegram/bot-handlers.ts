@@ -17,13 +17,18 @@ import { loadConfig } from "../config/config.js";
 import { writeConfigFile } from "../config/io.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { danger, logVerbose, warn } from "../globals.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bot-access.js";
 import { RegisterTelegramHandlerParams } from "./bot-native-commands.js";
-import { MEDIA_GROUP_TIMEOUT_MS, setTelegramUpdateCompletionDefer } from "./bot-updates.js";
+import {
+  MEDIA_GROUP_TIMEOUT_MS,
+  resolveTelegramUpdateId,
+  setTelegramUpdateCompletionDefer,
+} from "./bot-updates.js";
 import { resolveMedia } from "./bot/delivery.js";
 import {
   buildTelegramGroupPeerId,
@@ -250,6 +255,18 @@ export const registerTelegramHandlers = ({
   };
 
   const processMediaGroup = async (entry: MediaGroupEntry) => {
+    const settleOk = () => {
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
+    };
+
+    const settleErr = (err: unknown) => {
+      for (const msg of entry.messages) {
+        msg.done.reject(err);
+      }
+    };
+
     try {
       entry.messages.sort((a, b) => a.msg.message_id - b.msg.message_id);
 
@@ -270,28 +287,50 @@ export const registerTelegramHandlers = ({
 
       const storeAllowFrom = await readChannelAllowFromStore("telegram").catch(() => []);
       await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom);
+      settleOk();
     } catch (err) {
-      runtime.error?.(danger(`media group handler failed: ${String(err)}`));
-    } finally {
-      // Ensure offset commit is not advanced past buffered work until we at least attempted it.
-      for (const msg of entry.messages) {
-        msg.done.resolve();
-      }
+      const primary = entry.messages[0];
+      logger.error(
+        {
+          phase: "inbound.media_group",
+          updateId: primary ? resolveTelegramUpdateId(primary.ctx) : undefined,
+          chatId: primary?.msg.chat.id,
+          messageId: primary?.msg.message_id,
+          mediaGroupId: primary?.msg.media_group_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram media group handler failed",
+      );
+      settleErr(err);
     }
   };
 
   const flushTextFragments = async (entry: TextFragmentEntry) => {
+    const settleOk = () => {
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
+    };
+
+    const settleErr = (err: unknown) => {
+      for (const msg of entry.messages) {
+        msg.done.reject(err);
+      }
+    };
+
     try {
       entry.messages.sort((a, b) => a.msg.message_id - b.msg.message_id);
 
       const first = entry.messages[0];
       const last = entry.messages.at(-1);
       if (!first || !last) {
+        settleOk();
         return;
       }
 
       const combinedText = entry.messages.map((m) => m.msg.text ?? "").join("");
       if (!combinedText.trim()) {
+        settleOk();
         return;
       }
 
@@ -315,13 +354,22 @@ export const registerTelegramHandlers = ({
         storeAllowFrom,
         { messageIdOverride: String(last.msg.message_id) },
       );
+      settleOk();
     } catch (err) {
-      runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
-    } finally {
-      // Ensure offset commit is not advanced past buffered work until we at least attempted it.
-      for (const msg of entry.messages) {
-        msg.done.resolve();
-      }
+      const primary = entry.messages[0];
+      logger.error(
+        {
+          phase: "inbound.text_fragments",
+          updateId: primary ? resolveTelegramUpdateId(primary.ctx) : undefined,
+          chatId: primary?.msg.chat.id,
+          messageId: primary?.msg.message_id,
+          bufferKey: entry.key,
+          parts: entry.messages.length,
+          error: formatErrorMessage(err),
+        },
+        "telegram text fragment handler failed",
+      );
+      settleErr(err);
     }
   };
 
@@ -680,7 +728,19 @@ export const registerTelegramHandlers = ({
         messageIdOverride: callback.id,
       });
     } catch (err) {
-      runtime.error?.(danger(`callback handler failed: ${String(err)}`));
+      const callback = ctx.callbackQuery;
+      const msg = callback?.message;
+      logger.error(
+        {
+          phase: "inbound.callback_query",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          callbackId: callback?.id,
+          error: formatErrorMessage(err),
+        },
+        "telegram callback handler failed",
+      );
     }
   });
 
@@ -732,7 +792,17 @@ export const registerTelegramHandlers = ({
         );
       }
     } catch (err) {
-      runtime.error?.(danger(`[telegram] Group migration handler failed: ${String(err)}`));
+      const msg = ctx.message;
+      logger.error(
+        {
+          phase: "inbound.group_migration",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram group migration handler failed",
+      );
     }
   });
 
@@ -1009,7 +1079,19 @@ export const registerTelegramHandlers = ({
         throw err;
       }
     } catch (err) {
-      runtime.error?.(danger(`handler failed: ${String(err)}`));
+      const msg = ctx.message;
+      logger.error(
+        {
+          phase: "inbound.message",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          mediaGroupId: msg?.media_group_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram message handler failed",
+      );
+      runtime.error?.(danger(`handler failed: ${formatErrorMessage(err)}`));
     }
   });
 };
