@@ -291,13 +291,24 @@ Use jobId as the canonical identifier; id is accepted for compatibility. Use con
       switch (action) {
         case "status":
           return jsonResult(await callGatewayTool("cron.status", gatewayOpts, {}));
-        case "list":
+        case "list": {
+          const includePayload = Boolean(params.includePayload);
+          const jobId = readStringParam(params, "jobId") ?? readStringParam(params, "id");
+
+          // Avoid accidentally requesting all cron payloads (can be huge) when the
+          // caller forgot to scope the request to a single job.
+          if (includePayload && !jobId) {
+            throw new Error("includePayload requires jobId");
+          }
+
           return jsonResult(
             await callGatewayTool("cron.list", gatewayOpts, {
               includeDisabled: Boolean(params.includeDisabled),
-              includePayload: Boolean(params.includePayload),
+              includePayload,
+              jobId,
             }),
           );
+        }
         case "add": {
           // Flat-params recovery: non-frontier models (e.g. Grok) sometimes flatten
           // job properties to the top level alongside `action` instead of nesting

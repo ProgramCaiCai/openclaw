@@ -49,15 +49,38 @@ export const cronHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as { includeDisabled?: boolean; includePayload?: boolean };
+    const p = params as { includeDisabled?: boolean; includePayload?: boolean; jobId?: string };
+    const includePayload = p.includePayload === true;
+    const jobId = typeof p.jobId === "string" && p.jobId.trim() ? p.jobId.trim() : undefined;
+    if (includePayload && !jobId) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "includePayload requires jobId to avoid huge responses; pass jobId or omit includePayload",
+        ),
+      );
+      return;
+    }
+
     const jobs = await context.cron.list({
       includeDisabled: p.includeDisabled,
     });
 
-    const includePayload = p.includePayload === true;
+    const selectedJobs = jobId ? jobs.filter((job) => job.id === jobId) : jobs;
+    if (jobId && selectedJobs.length === 0) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, `unknown cron job id: ${jobId}`),
+      );
+      return;
+    }
+
     const compactJobs = includePayload
-      ? jobs
-      : jobs.map((job) => {
+      ? selectedJobs
+      : selectedJobs.map((job) => {
           const payload = job.payload as unknown;
           if (!payload || typeof payload !== "object") {
             return job;

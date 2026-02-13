@@ -38,13 +38,20 @@ export function registerCronListCommand(cron: Command) {
       .command("list")
       .description("List cron jobs")
       .option("--all", "Include disabled jobs", false)
-      .option("--include-payload", "Include payload message/text", false)
+      .option("--job-id <id>", "Filter by job id")
+      .option("--include-payload", "Include payload message/text (requires --job-id)", false)
       .option("--json", "Output JSON", false)
       .action(async (opts) => {
         try {
+          const jobId = typeof (opts as { jobId?: unknown }).jobId === "string" ? opts.jobId : "";
+          const includePayload = Boolean((opts as Record<string, unknown>).includePayload);
+          if (includePayload && !jobId) {
+            throw new Error("--include-payload requires --job-id (safety)");
+          }
           const res = await callGatewayFromCli("cron.list", opts, {
             includeDisabled: Boolean(opts.all),
-            includePayload: Boolean((opts as Record<string, unknown>).includePayload),
+            includePayload,
+            jobId: jobId || undefined,
           });
           if (opts.json) {
             defaultRuntime.log(JSON.stringify(res, null, 2));

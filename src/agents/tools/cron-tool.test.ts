@@ -47,6 +47,40 @@ describe("cron tool", () => {
     expect(call.params).toEqual(expectedParams);
   });
 
+  it("passes jobId to cron.list", async () => {
+    const tool = createCronTool();
+    await tool.execute("call-list", {
+      action: "list",
+      jobId: "job-1",
+      includePayload: true,
+    });
+
+    expect(callGatewayMock).toHaveBeenCalledTimes(1);
+    const call = callGatewayMock.mock.calls[0]?.[0] as {
+      method?: string;
+      params?: unknown;
+    };
+    expect(call.method).toBe("cron.list");
+    expect(call.params).toEqual({
+      includeDisabled: false,
+      includePayload: true,
+      jobId: "job-1",
+    });
+  });
+
+  it("rejects includePayload without jobId for cron.list", async () => {
+    const tool = createCronTool();
+
+    await expect(
+      tool.execute("call-list-bad", {
+        action: "list",
+        includePayload: true,
+      }),
+    ).rejects.toThrow("includePayload requires jobId");
+
+    expect(callGatewayMock).not.toHaveBeenCalled();
+  });
+
   it("prefers jobId over id when both are provided", async () => {
     const tool = createCronTool();
     await tool.execute("call1", {
