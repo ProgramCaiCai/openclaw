@@ -358,10 +358,17 @@ export function createTelegramBot(opts: TelegramBotOptions) {
             errorClass: disposition.errorClass,
             error: formatErrorMessage(nextError),
           });
-          runtime.error?.(
-            danger(
-              `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
-            ),
+          const route = resolveAgentRoute({
+            cfg,
+            channel: "telegram",
+            accountId: account.accountId,
+          });
+          enqueueSystemEvent(
+            `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
+            {
+              sessionKey: route.sessionKey,
+              contextKey: `telegram:update:permanent:${updateId}:${disposition.errorClass}`,
+            },
           );
           markUpdateDone(updateId);
           nextError = undefined;
