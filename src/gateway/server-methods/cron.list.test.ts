@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ErrorCodes } from "../protocol/index.js";
 import { cronHandlers } from "./cron.js";
 
+type CronListHandlerArgs = Parameters<(typeof cronHandlers)["cron.list"]>[0];
+
 const noop = () => false;
 
 describe("cron.list", () => {
@@ -19,11 +21,11 @@ describe("cron.list", () => {
         cron: {
           list: vi.fn().mockResolvedValue(jobs),
         },
-      } as any,
+      },
       client: null,
       req: { id: "req-1", type: "req", method: "cron.list" },
       isWebchatConnect: noop,
-    } as any);
+    } as unknown as CronListHandlerArgs);
 
     expect(respond).toHaveBeenCalledWith(
       true,
@@ -43,11 +45,11 @@ describe("cron.list", () => {
     await cronHandlers["cron.list"]({
       params: { includePayload: true },
       respond,
-      context: { cron: { list: vi.fn() } } as any,
+      context: { cron: { list: vi.fn() } },
       client: null,
       req: { id: "req-2", type: "req", method: "cron.list" },
       isWebchatConnect: noop,
-    } as any);
+    } as unknown as CronListHandlerArgs);
 
     expect(respond).toHaveBeenCalledWith(
       false,
@@ -72,11 +74,11 @@ describe("cron.list", () => {
         cron: {
           list: vi.fn().mockResolvedValue(jobs),
         },
-      } as any,
+      },
       client: null,
       req: { id: "req-3", type: "req", method: "cron.list" },
       isWebchatConnect: noop,
-    } as any);
+    } as unknown as CronListHandlerArgs);
 
     expect(respond).toHaveBeenCalledWith(
       true,
@@ -98,11 +100,11 @@ describe("cron.list", () => {
         cron: {
           list: vi.fn().mockResolvedValue(jobs),
         },
-      } as any,
+      },
       client: null,
       req: { id: "req-4", type: "req", method: "cron.list" },
       isWebchatConnect: noop,
-    } as any);
+    } as unknown as CronListHandlerArgs);
 
     expect(respond).toHaveBeenCalledWith(
       false,
