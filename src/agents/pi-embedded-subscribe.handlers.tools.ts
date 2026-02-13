@@ -16,7 +16,11 @@ import {
   sanitizeToolResult,
 } from "./pi-embedded-subscribe.tools.js";
 import { inferToolMetaFromArgs } from "./pi-embedded-utils.js";
-import { hardCapToolOutput } from "./tool-output-hard-cap.js";
+import {
+  hardCapToolOutput,
+  TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
+  TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
+} from "./tool-output-hard-cap.js";
 import { normalizeToolName } from "./tool-policy.js";
 
 /** Track tool execution start times and args for after_tool_call hook */
@@ -42,6 +46,19 @@ function extendExecMeta(toolName: string, args: unknown, meta?: string): string 
   }
   const suffix = flags.join(" · ");
   return meta ? `${meta} · ${suffix}` : suffix;
+}
+
+function resolveToolOutputCapOverrides(
+  toolName: string,
+): { maxBytes: number; maxLines: number } | undefined {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized !== "exec" && normalized !== "bash") {
+    return undefined;
+  }
+  return {
+    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
+    maxLines: TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
+  };
 }
 
 export async function handleToolExecutionStart(
@@ -150,7 +167,7 @@ export function handleToolExecutionUpdate(
   const toolCallId = String(evt.toolCallId);
   const partial = evt.partialResult;
   const sanitized = sanitizeToolResult(partial);
-  const capped = hardCapToolOutput(sanitized);
+  const capped = hardCapToolOutput(sanitized, resolveToolOutputCapOverrides(toolName));
   emitAgentEvent({
     runId: ctx.params.runId,
     stream: "tool",
@@ -186,7 +203,7 @@ export async function handleToolExecutionEnd(
   const result = evt.result;
   const isToolError = isError || isToolResultError(result);
   const sanitizedResult = sanitizeToolResult(result);
-  const cappedResult = hardCapToolOutput(sanitizedResult);
+  const cappedResult = hardCapToolOutput(sanitizedResult, resolveToolOutputCapOverrides(toolName));
   const meta = ctx.state.toolMetaById.get(toolCallId);
   ctx.state.toolMetas.push({ toolName, meta });
   ctx.state.toolMetaById.delete(toolCallId);
@@ -250,7 +267,8 @@ export async function handleToolExecutionEnd(
   if (ctx.params.onToolResult && ctx.shouldEmitToolOutput()) {
     const outputText = extractToolResultText(sanitizedResult);
     if (outputText) {
-      ctx.emitToolOutput(toolName, meta, outputText);
+      const cappedText = hardCapToolOutput(outputText, resolveToolOutputCapOverrides(toolName));
+      ctx.emitToolOutput(toolName, meta, typeof cappedText === "string" ? cappedText : outputText);
     }
   }
 
@@ -264,7 +282,7 @@ export async function handleToolExecutionEnd(
     const hookEvent: PluginHookAfterToolCallEvent = {
       toolName,
       params: (toolArgs && typeof toolArgs === "object" ? toolArgs : {}) as Record<string, unknown>,
-      result: sanitizedResult,
+      result: cappedResult,
       error: isToolError ? extractToolErrorMessage(sanitizedResult) : undefined,
       durationMs,
     };

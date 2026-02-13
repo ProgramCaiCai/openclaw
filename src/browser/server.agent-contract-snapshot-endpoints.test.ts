@@ -1,6 +1,9 @@
 import { type AddressInfo, createServer } from "node:net";
 import { fetch as realFetch } from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isolateGatewayAuthEnvForBrowserServerTests } from "./server.test-env.js";
+
+isolateGatewayAuthEnvForBrowserServerTests();
 import { DEFAULT_AI_SNAPSHOT_MAX_CHARS } from "./constants.js";
 
 let testPort = 0;

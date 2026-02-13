@@ -25,6 +25,7 @@ import {
 
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
+  artifactPaths: Type.Optional(Type.Array(Type.String())),
   label: Type.Optional(Type.String()),
   agentId: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
@@ -93,6 +94,18 @@ export function createSessionsSpawnTool(opts?: {
       const thinkingOverrideRaw = readStringParam(params, "thinking");
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+      const artifactPaths = (() => {
+        const raw = (params as { artifactPaths?: unknown }).artifactPaths;
+        if (!Array.isArray(raw)) {
+          return undefined;
+        }
+        const trimmed = raw
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .slice(0, 12);
+        return trimmed.length > 0 ? trimmed : undefined;
+      })();
       const requesterOrigin = normalizeDeliveryContext({
         channel: opts?.agentChannel,
         accountId: opts?.agentAccountId,
@@ -291,6 +304,7 @@ export function createSessionsSpawnTool(opts?: {
         requesterDisplayKey,
         task,
         cleanup,
+        artifactPaths,
         label: label || undefined,
         runTimeoutSeconds,
       });

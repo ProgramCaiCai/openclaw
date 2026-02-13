@@ -16,6 +16,7 @@ export type SubagentRunRecord = {
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
+  artifactPaths?: string[];
   cleanup: "delete" | "keep";
   label?: string;
   createdAt: number;
@@ -69,6 +70,7 @@ function resumeSubagentRun(runId: string) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
+      artifactPaths: entry.artifactPaths,
       timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
@@ -232,6 +234,7 @@ function ensureListener() {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
+      artifactPaths: entry.artifactPaths,
       timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
@@ -288,6 +291,7 @@ export function registerSubagentRun(params: {
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
+  artifactPaths?: string[];
   cleanup: "delete" | "keep";
   label?: string;
   runTimeoutSeconds?: number;
@@ -305,6 +309,7 @@ export function registerSubagentRun(params: {
     requesterOrigin,
     requesterDisplayKey: params.requesterDisplayKey,
     task: params.task,
+    artifactPaths: params.artifactPaths?.length ? [...params.artifactPaths] : undefined,
     cleanup: params.cleanup,
     label: params.label,
     createdAt: now,
@@ -380,6 +385,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
+      artifactPaths: entry.artifactPaths,
       timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
