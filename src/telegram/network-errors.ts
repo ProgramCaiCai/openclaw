@@ -165,6 +165,9 @@ export function extractTelegramRetryAfterMs(err: unknown): number | undefined {
 
 export type TelegramNetworkErrorContext = "polling" | "send" | "webhook" | "unknown";
 
+/** Telegram API HTTP status codes that are transient server errors (safe to retry in polling/webhook). */
+const RECOVERABLE_TELEGRAM_HTTP_CODES = new Set([500, 502, 503, 504]);
+
 export function isRecoverableTelegramNetworkError(
   err: unknown,
   options: { context?: TelegramNetworkErrorContext; allowMessageMatch?: boolean } = {},
@@ -180,6 +183,16 @@ export function isRecoverableTelegramNetworkError(
   for (const candidate of collectErrorCandidates(err)) {
     const telegramErrorCode = getTelegramApiErrorCode(candidate);
     if (telegramErrorCode === 429) {
+      return true;
+    }
+
+    // Treat transient server errors (5xx) as recoverable in polling/webhook contexts
+    // to prevent the polling loop from terminating on temporary Telegram API outages.
+    if (
+      telegramErrorCode &&
+      RECOVERABLE_TELEGRAM_HTTP_CODES.has(telegramErrorCode) &&
+      options.context !== "send"
+    ) {
       return true;
     }
 

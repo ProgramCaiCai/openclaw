@@ -643,8 +643,17 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     logger,
   });
 
+  // Expose a method to flush pending offset commits before runner restart.
+  // This prevents duplicate delivery when the polling loop restarts.
+  (bot as TelegramBotWithFlush)._flushPendingCommits = () => commitTask;
+
   return bot;
 }
+
+/** Bot instance augmented with internal flush helper (used by monitor). */
+export type TelegramBotWithFlush = Bot & {
+  _flushPendingCommits?: () => Promise<void>;
+};
 
 export function createTelegramWebhookCallback(bot: Bot, path = "/telegram-webhook") {
   return { path, handler: webhookCallback(bot, "http") };

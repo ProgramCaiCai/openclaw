@@ -9,7 +9,7 @@ import { formatDurationPrecise } from "../infra/format-time/format-duration.ts";
 import { registerUnhandledRejectionHandler } from "../infra/unhandled-rejections.js";
 import { resolveTelegramAccount } from "./accounts.js";
 import { resolveTelegramAllowedUpdates } from "./allowed-updates.js";
-import { createTelegramBot } from "./bot.js";
+import { createTelegramBot, type TelegramBotWithFlush } from "./bot.js";
 import {
   extractTelegramRetryAfterMs,
   isRecoverableTelegramNetworkError,
@@ -222,6 +222,17 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
 
         if (opts.abortSignal?.aborted) {
           return;
+        }
+
+        // Flush any pending offset commits before restarting the runner to prevent
+        // duplicate delivery of already-processed updates (R1-09).
+        const flushFn = (bot as TelegramBotWithFlush)._flushPendingCommits;
+        if (flushFn) {
+          await flushFn().catch((flushErr) => {
+            (opts.runtime?.error ?? console.error)(
+              `Telegram: failed to flush pending offset commits before restart: ${formatErrorMessage(flushErr)}`,
+            );
+          });
         }
 
         restartAttempts += 1;
