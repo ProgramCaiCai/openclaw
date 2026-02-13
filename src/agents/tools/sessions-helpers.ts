@@ -351,6 +351,33 @@ export function stripToolMessages(messages: unknown[]): unknown[] {
 }
 
 /**
+ * Strip thinking/summary_text content blocks from messages to avoid context bloat
+ * when returning session messages via sessions_list.
+ */
+export function stripThinkingBlocks(messages: unknown[]): unknown[] {
+  return messages.map((msg) => {
+    if (!msg || typeof msg !== "object") {
+      return msg;
+    }
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      return msg;
+    }
+    const filtered = content.filter((block) => {
+      if (!block || typeof block !== "object") {
+        return true;
+      }
+      const type = (block as { type?: unknown }).type;
+      return type !== "thinking" && type !== "summary_text";
+    });
+    if (filtered.length === content.length) {
+      return msg;
+    }
+    return { ...msg, content: filtered };
+  });
+}
+
+/**
  * Sanitize text content to strip tool call markers and thinking tags.
  * This ensures user-facing text doesn't leak internal tool representations.
  */
