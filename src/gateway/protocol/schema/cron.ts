@@ -135,6 +135,8 @@ export const CronJobSchema = Type.Object(
 export const CronListParamsSchema = Type.Object(
   {
     includeDisabled: Type.Optional(Type.Boolean()),
+    // When false/omitted, cron.list will omit the potentially large/sensitive payload text.
+    includePayload: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );

@@ -32,6 +32,7 @@ const CronToolSchema = Type.Object({
   gatewayToken: Type.Optional(Type.String()),
   timeoutMs: Type.Optional(Type.Number()),
   includeDisabled: Type.Optional(Type.Boolean()),
+  includePayload: Type.Optional(Type.Boolean()),
   job: Type.Optional(Type.Object({}, { additionalProperties: true })),
   jobId: Type.Optional(Type.String()),
   id: Type.Optional(Type.String()),
@@ -294,6 +295,7 @@ Use jobId as the canonical identifier; id is accepted for compatibility. Use con
           return jsonResult(
             await callGatewayTool("cron.list", gatewayOpts, {
               includeDisabled: Boolean(params.includeDisabled),
+              includePayload: Boolean(params.includePayload),
             }),
           );
         case "add": {

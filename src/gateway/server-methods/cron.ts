@@ -1,4 +1,4 @@
-import type { CronJobCreate, CronJobPatch } from "../../cron/types.js";
+import type { CronJobCreate, CronJobPatch, CronPayload } from "../../cron/types.js";
 import type { GatewayRequestHandlers } from "./types.js";
 import { normalizeCronJobCreate, normalizeCronJobPatch } from "../../cron/normalize.js";
 import { readCronRunLogEntries, resolveCronRunLogPath } from "../../cron/run-log.js";
@@ -49,11 +49,33 @@ export const cronHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as { includeDisabled?: boolean };
+    const p = params as { includeDisabled?: boolean; includePayload?: boolean };
     const jobs = await context.cron.list({
       includeDisabled: p.includeDisabled,
     });
-    respond(true, { jobs }, undefined);
+
+    const includePayload = p.includePayload === true;
+    const compactJobs = includePayload
+      ? jobs
+      : jobs.map((job) => {
+          const payload = job.payload as unknown;
+          if (!payload || typeof payload !== "object") {
+            return job;
+          }
+          const compacted = { ...(payload as Record<string, unknown>) } as Record<string, unknown>;
+          if (compacted.kind === "agentTurn") {
+            delete compacted.message;
+          }
+          if (compacted.kind === "systemEvent") {
+            delete compacted.text;
+          }
+          return {
+            ...job,
+            payload: compacted as unknown as CronPayload,
+          };
+        });
+
+    respond(true, { jobs: compactJobs }, undefined);
   },
   "cron.status": async ({ params, respond, context }) => {
     if (!validateCronStatusParams(params)) {
