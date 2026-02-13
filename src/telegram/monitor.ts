@@ -60,6 +60,9 @@ const TELEGRAM_POLL_RESTART_POLICY = {
   jitter: 0.25,
 };
 
+const TELEGRAM_POLL_RESTART_STABLE_RESET_MS = 5 * 60_000;
+const TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS = 5;
+
 const isGetUpdatesConflict = (err: unknown) => {
   if (!err || typeof err !== "object") {
     return false;
@@ -171,17 +174,36 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
 
     // Ensure polling can take control even if a webhook was previously configured.
     if (typeof bot.api.deleteWebhook === "function") {
-      await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch((err) => {
-        (opts.runtime?.error ?? console.error)(
-          `telegram: deleteWebhook failed: ${formatErrorMessage(err)}`,
-        );
-      });
+      for (let attempt = 1; attempt <= TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false }));
+          break;
+        } catch (err) {
+          const retryAfterMs = extractTelegramRetryAfterMs(err);
+          const isRecoverable = isRecoverableTelegramNetworkError(err, { context: "polling" });
+          if (!isRecoverable && typeof retryAfterMs !== "number") {
+            throw err;
+          }
+          if (attempt >= TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS) {
+            throw err;
+          }
+
+          const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, attempt);
+          const cappedDelayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
+          const delayMs = Math.max(cappedDelayMs, retryAfterMs ?? 0);
+          (opts.runtime?.error ?? console.error)(
+            `Telegram deleteWebhook failed (attempt ${attempt}/${TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS}): ${formatErrorMessage(err)}; retrying in ${formatDurationPrecise(delayMs)}.`,
+          );
+          await sleepWithAbort(delayMs, opts.abortSignal);
+        }
+      }
     }
 
     // Use grammyjs/runner for concurrent update processing
     let restartAttempts = 0;
 
     while (!opts.abortSignal?.aborted) {
+      const runStartedAtMs = Date.now();
       const runner = run(bot, createTelegramRunnerOptions(cfg));
       const stopOnAbort = () => {
         if (opts.abortSignal?.aborted) {
@@ -193,18 +215,29 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
         // runner.task() resolves when the runner stops (normally or unexpectedly).
         await runner.task();
 
+        const runDurationMs = Date.now() - runStartedAtMs;
+        if (runDurationMs >= TELEGRAM_POLL_RESTART_STABLE_RESET_MS) {
+          restartAttempts = 0;
+        }
+
         if (opts.abortSignal?.aborted) {
           return;
         }
 
         restartAttempts += 1;
-        const delayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        const delayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
         (opts.runtime?.error ?? console.error)(
-          `Telegram polling stopped unexpectedly; restarting in ${formatDurationPrecise(delayMs)}.`,
+          `Telegram polling stopped unexpectedly (attempt ${restartAttempts}); restarting in ${formatDurationPrecise(delayMs)}.`,
         );
         await sleepWithAbort(delayMs, opts.abortSignal);
         continue;
       } catch (err) {
+        const runDurationMs = Date.now() - runStartedAtMs;
+        if (runDurationMs >= TELEGRAM_POLL_RESTART_STABLE_RESET_MS) {
+          restartAttempts = 0;
+        }
+
         if (opts.abortSignal?.aborted) {
           throw err;
         }
@@ -229,7 +262,8 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
 
         restartAttempts += 1;
         const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
-        const delayMs = Math.max(baseDelayMs, retryAfterMs ?? 0);
+        const cappedDelayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
+        const delayMs = Math.max(cappedDelayMs, retryAfterMs ?? 0);
         const reason = retryAfterMs
           ? "rate limited"
           : isConflict
@@ -237,7 +271,7 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
             : "network error";
         const errMsg = formatErrorMessage(err);
         (opts.runtime?.error ?? console.error)(
-          `Telegram ${reason}: ${errMsg}; retrying in ${formatDurationPrecise(delayMs)}.`,
+          `Telegram ${reason} (attempt ${restartAttempts}): ${errMsg}; retrying in ${formatDurationPrecise(delayMs)}.`,
         );
         try {
           await sleepWithAbort(delayMs, opts.abortSignal);
