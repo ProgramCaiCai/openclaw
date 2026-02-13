@@ -29,6 +29,7 @@ import { enqueueSystemEvent } from "../infra/system-events.js";
 import { logInfo, logWarn } from "../logger.js";
 import { formatSpawnError, spawnWithFallback } from "../process/spawn-utils.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+import { stripAnsi } from "../terminal/ansi.js";
 import {
   type ProcessSession,
   type SessionStdin,
@@ -698,6 +699,14 @@ async function runExecProcess(opts: {
     }
   };
 
+  const sanitizePtyOutput = (text: string) => {
+    // Best-effort: strip terminal control sequences so persisted tool output is readable
+    // and can't spoof terminal-like UIs (cursor moves, erase line, etc.).
+    const withoutAnsi = stripAnsi(text);
+    const withoutCsi = withoutAnsi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+    return withoutCsi.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "");
+  };
+
   if (pty) {
     const cursorResponse = buildCursorPositionResponse();
     pty.onData((data) => {
@@ -708,7 +717,7 @@ async function runExecProcess(opts: {
           pty.write(cursorResponse);
         }
       }
-      handleStdout(cleaned);
+      handleStdout(sanitizePtyOutput(cleaned));
     });
   } else if (child) {
     child.stdout.on("data", handleStdout);
