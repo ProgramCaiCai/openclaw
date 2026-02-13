@@ -28,6 +28,8 @@ export type SessionListRow = {
   model?: string;
   contextTokens?: number | null;
   totalTokens?: number | null;
+  running?: boolean;
+  activeRunId?: string;
   thinkingLevel?: string;
   verboseLevel?: string;
   systemSent?: boolean;

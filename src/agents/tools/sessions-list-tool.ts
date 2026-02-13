@@ -188,6 +188,8 @@ export function createSessionsListTool(opts?: {
           model: typeof entry.model === "string" ? entry.model : undefined,
           contextTokens: typeof entry.contextTokens === "number" ? entry.contextTokens : undefined,
           totalTokens: typeof entry.totalTokens === "number" ? entry.totalTokens : undefined,
+          running: typeof entry.running === "boolean" ? entry.running : undefined,
+          activeRunId: typeof entry.activeRunId === "string" ? entry.activeRunId : undefined,
           thinkingLevel: typeof entry.thinkingLevel === "string" ? entry.thinkingLevel : undefined,
           verboseLevel: typeof entry.verboseLevel === "string" ? entry.verboseLevel : undefined,
           systemSent: typeof entry.systemSent === "boolean" ? entry.systemSent : undefined,

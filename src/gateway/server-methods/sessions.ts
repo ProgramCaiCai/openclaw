@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { GatewayRequestHandlers } from "./types.js";
 import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun, waitForEmbeddedPiRunEnd } from "../../agents/pi-embedded.js";
+import { listSubagentRunsForRequester } from "../../agents/subagent-registry.js";
 import { stopSubagentsForRequester } from "../../auto-reply/reply/abort.js";
 import { clearSessionQueues } from "../../auto-reply/reply/queue.js";
 import { loadConfig } from "../../config/config.js";
@@ -43,7 +44,7 @@ import { applySessionsPatchToStore } from "../sessions-patch.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
 
 export const sessionsHandlers: GatewayRequestHandlers = {
-  "sessions.list": ({ params, respond }) => {
+  "sessions.list": ({ params, respond, context }) => {
     if (!validateSessionsListParams(params)) {
       respond(
         false,
@@ -64,7 +65,58 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       store,
       opts: p,
     });
-    respond(true, result, undefined);
+
+    // Token fields are persisted only after runs complete; runtime registries are the
+    // source of truth for distinguishing idle vs in-flight sessions.
+    const webchatActiveRunBySessionKey = new Map<string, { runId: string; startedAtMs: number }>();
+    for (const [runId, active] of context.chatAbortControllers) {
+      const key = typeof active?.sessionKey === "string" ? active.sessionKey.trim() : "";
+      if (!key) {
+        continue;
+      }
+      const startedAtMs = typeof active?.startedAtMs === "number" ? active.startedAtMs : 0;
+      const existing = webchatActiveRunBySessionKey.get(key);
+      if (!existing || startedAtMs >= existing.startedAtMs) {
+        webchatActiveRunBySessionKey.set(key, { runId, startedAtMs });
+      }
+    }
+
+    // Subagent runs are tracked per requester session key; group by spawnedBy to keep this fast.
+    const requesterKeys = new Set<string>();
+    for (const row of result.sessions) {
+      const spawnedByValue = store[row.key]?.spawnedBy;
+      if (typeof spawnedByValue === "string" && spawnedByValue.trim()) {
+        requesterKeys.add(spawnedByValue.trim());
+      }
+    }
+
+    const activeSubagentRunByChildSessionKey = new Map<string, string>();
+    for (const requesterKey of requesterKeys) {
+      const runs = listSubagentRunsForRequester(requesterKey);
+      for (const run of runs) {
+        const endedAt = run.endedAt;
+        if (typeof endedAt === "number" && endedAt > 0) {
+          continue;
+        }
+        if (run.childSessionKey && run.runId) {
+          activeSubagentRunByChildSessionKey.set(run.childSessionKey, run.runId);
+        }
+      }
+    }
+
+    const sessions = result.sessions.map((row) => {
+      const webchatActive = webchatActiveRunBySessionKey.get(row.key);
+      if (webchatActive) {
+        return { ...row, running: true, activeRunId: webchatActive.runId };
+      }
+      const subagentRunId = activeSubagentRunByChildSessionKey.get(row.key);
+      if (subagentRunId) {
+        return { ...row, running: true, activeRunId: subagentRunId };
+      }
+      return row;
+    });
+
+    respond(true, { ...result, sessions }, undefined);
   },
   "sessions.preview": ({ params, respond }) => {
     if (!validateSessionsPreviewParams(params)) {
