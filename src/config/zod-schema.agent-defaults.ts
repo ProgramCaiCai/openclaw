@@ -102,6 +102,14 @@ export const AgentDefaultsSchema = z
           })
           .strict()
           .optional(),
+        autoCompact: z
+          .object({
+            enabled: z.boolean().optional(),
+            thresholdPct: z.number().int().min(50).max(95).optional(),
+            minTurns: z.number().int().nonnegative().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

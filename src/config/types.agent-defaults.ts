@@ -254,6 +254,17 @@ export type AgentCompactionConfig = {
   maxHistoryShare?: number;
   /** Pre-compaction memory flush (agentic turn). Default: enabled. */
   memoryFlush?: AgentCompactionMemoryFlushConfig;
+  /** Proactive auto-compaction based on context usage percentage. */
+  autoCompact?: AgentAutoCompactConfig;
+};
+
+export type AgentAutoCompactConfig = {
+  /** Enable proactive auto-compaction (default: false). */
+  enabled?: boolean;
+  /** Context usage percentage threshold to trigger compaction (50–95, default: 70). */
+  thresholdPct?: number;
+  /** Minimum turn count before auto-compact can trigger (default: 10). */
+  minTurns?: number;
 };
 
 export type AgentCompactionMemoryFlushConfig = {

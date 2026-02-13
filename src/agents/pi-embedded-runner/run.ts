@@ -44,7 +44,7 @@ import {
   pickFallbackThinkingLevel,
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
-import { resolveCompactionReserveTokensFloor } from "../pi-settings.js";
+import { resolveCompactionReserveTokensFloor, resolveAutoCompactConfig } from "../pi-settings.js";
 import { derivePromptTokens, normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
@@ -875,6 +875,51 @@ export async function runEmbeddedPiAgent(
               log.warn(
                 `[near-limit-compaction] compaction attempt failed: ${describeUnknownError(err).slice(0, 200)}`,
               );
+            }
+          }
+
+          // Proactive auto-compaction based on configurable context usage threshold.
+          // Fires only when enabled, context usage >= thresholdPct, and enough turns have passed.
+          if (!aborted && autoCompactionCount === 0) {
+            const autoCompactCfg = resolveAutoCompactConfig(params.config);
+            if (autoCompactCfg.enabled && contextWindowTokens > 0) {
+              const usagePct = Math.round((proactivePromptTokens / contextWindowTokens) * 100);
+              if (usagePct >= autoCompactCfg.thresholdPct) {
+                log.info(
+                  `[auto-compact] usagePct=${usagePct}% threshold=${autoCompactCfg.thresholdPct}% ctx=${contextWindowTokens}; triggering proactive compaction`,
+                );
+                try {
+                  const compactResult = await compactEmbeddedPiSessionDirect({
+                    sessionId: params.sessionId,
+                    sessionKey: params.sessionKey,
+                    messageChannel: params.messageChannel,
+                    messageProvider: params.messageProvider,
+                    agentAccountId: params.agentAccountId,
+                    authProfileId: lastProfileId,
+                    sessionFile: params.sessionFile,
+                    workspaceDir: resolvedWorkspace,
+                    agentDir,
+                    config: params.config,
+                    skillsSnapshot: params.skillsSnapshot,
+                    senderIsOwner: params.senderIsOwner,
+                    provider,
+                    model: modelId,
+                    thinkLevel,
+                    reasoningLevel: params.reasoningLevel,
+                    bashElevated: params.bashElevated,
+                    extraSystemPrompt: params.extraSystemPrompt,
+                    ownerNumbers: params.ownerNumbers,
+                  });
+                  if (compactResult.compacted) {
+                    autoCompactionCount += 1;
+                    log.info(`[auto-compact] compaction succeeded (usagePct=${usagePct}%)`);
+                  }
+                } catch (err) {
+                  log.warn(
+                    `[auto-compact] compaction failed: ${describeUnknownError(err).slice(0, 200)}`,
+                  );
+                }
+              }
             }
           }
 
