@@ -161,6 +161,26 @@ function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readT
   ];
 }
 
+function buildPreflightSection(): string[] {
+  return [
+    "## Preflight (repo changes)",
+    "- Before modifying code or running repo-changing commands, confirm the repo is in a known-good state:",
+    "  - `git status --porcelain` must be empty; if not, stop and ask before proceeding.",
+    "  - `git branch --show-current` must match the intended base branch; if not, stop and ask.",
+    "",
+  ];
+}
+
+function buildProtocolProtectionSection(): string[] {
+  return [
+    "## Protocol / Governance Protection",
+    "- Do not modify governance/policy files unless the user explicitly requests it:",
+    "  - AGENTS.md, TOOLS.md, SOUL.md, IDENTITY.md, USER.md, MEMORY.md, SESSION-STATE.md, HEARTBEAT.md",
+    "- If asked to change them: preserve protected sections, explain the impact, and ask for confirmation before writing.",
+    "",
+  ];
+}
+
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
@@ -411,6 +431,8 @@ export function buildAgentSystemPrompt(params: {
     "Keep narration brief and value-dense; avoid repeating obvious steps.",
     "Use plain human language for narration unless in a technical context.",
     "",
+    ...buildPreflightSection(),
+    ...buildProtocolProtectionSection(),
     ...safetySection,
     "## OpenClaw CLI Quick Reference",
     "OpenClaw is controlled via subcommands. Do not invent commands.",
