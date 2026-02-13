@@ -25,6 +25,7 @@ import {
   queueEmbeddedPiMessage,
   waitForEmbeddedPiRunEnd,
 } from "./pi-embedded.js";
+import { assertSandboxPath } from "./sandbox-paths.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "./subagent-announce-queue.js";
 import { readLatestAssistantReply } from "./tools/agent-step.js";
 
@@ -389,11 +390,28 @@ async function resolveLatestArtifactMtimeMs(artifactPaths?: string[]): Promise<n
     return null;
   }
 
+  const sandboxRoot = process.cwd();
   let latest: number | null = null;
   for (const raw of unique) {
-    const resolved = path.resolve(raw);
+    const candidate = raw.trim();
+    if (!candidate || candidate.length > 1024) {
+      continue;
+    }
+    if (
+      path.isAbsolute(candidate) ||
+      /^[a-zA-Z]:[\\/]/.test(candidate) ||
+      candidate.startsWith("\\\\")
+    ) {
+      continue;
+    }
+
     try {
-      const stat = await fs.stat(resolved);
+      const resolved = await assertSandboxPath({
+        filePath: candidate,
+        cwd: sandboxRoot,
+        root: sandboxRoot,
+      });
+      const stat = await fs.stat(resolved.resolved);
       const mtimeMs = stat.mtimeMs;
       if (Number.isFinite(mtimeMs) && (latest == null || mtimeMs > latest)) {
         latest = mtimeMs;
