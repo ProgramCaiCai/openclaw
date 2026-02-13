@@ -366,10 +366,11 @@ export function applyContextPruningDefaults(cfg: OpenClawConfig): OpenClawConfig
   const heartbeat = defaults.heartbeat ?? {};
 
   if (defaults.contextPruning?.mode === undefined) {
+    // Enable pruning without forcing a TTL string; the pruning extension will
+    // apply its own (short) default TTL unless the user configures one.
     nextDefaults.contextPruning = {
       ...contextPruning,
       mode: "cache-ttl",
-      ttl: defaults.contextPruning?.ttl ?? "1h",
     };
     mutated = true;
   }

@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import {
+  computeEffectiveSettings,
+  DEFAULT_CONTEXT_PRUNING_SETTINGS,
+} from "../agents/pi-extensions/context-pruning/settings.js";
 import { withTempHome } from "./test-helpers.js";
 
 describe("config pruning defaults", () => {
@@ -36,7 +40,7 @@ describe("config pruning defaults", () => {
     }
   });
 
-  it("enables cache-ttl pruning + 1h heartbeat for Anthropic OAuth", async () => {
+  it("enables cache-ttl pruning + 1h heartbeat for Anthropic OAuth (ttl defaults to pruning settings)", async () => {
     await withTempHome(async (home) => {
       const configDir = path.join(home, ".openclaw");
       await fs.mkdir(configDir, { recursive: true });
@@ -62,12 +66,16 @@ describe("config pruning defaults", () => {
       const cfg = loadConfig();
 
       expect(cfg.agents?.defaults?.contextPruning?.mode).toBe("cache-ttl");
-      expect(cfg.agents?.defaults?.contextPruning?.ttl).toBe("1h");
+      // Auto-enable should not inject a long ttl string; extension defaults apply.
+      expect(cfg.agents?.defaults?.contextPruning?.ttl).toBeUndefined();
       expect(cfg.agents?.defaults?.heartbeat?.every).toBe("1h");
+
+      const effective = computeEffectiveSettings(cfg.agents?.defaults?.contextPruning);
+      expect(effective?.ttlMs).toBe(DEFAULT_CONTEXT_PRUNING_SETTINGS.ttlMs);
     });
   });
 
-  it("enables cache-ttl pruning + 1h cache TTL for Anthropic API keys", async () => {
+  it("enables cache-ttl pruning + short cache TTL for Anthropic API keys (ttl defaults to pruning settings)", async () => {
     await withTempHome(async (home) => {
       const configDir = path.join(home, ".openclaw");
       await fs.mkdir(configDir, { recursive: true });
@@ -97,11 +105,14 @@ describe("config pruning defaults", () => {
       const cfg = loadConfig();
 
       expect(cfg.agents?.defaults?.contextPruning?.mode).toBe("cache-ttl");
-      expect(cfg.agents?.defaults?.contextPruning?.ttl).toBe("1h");
+      expect(cfg.agents?.defaults?.contextPruning?.ttl).toBeUndefined();
       expect(cfg.agents?.defaults?.heartbeat?.every).toBe("30m");
       expect(
         cfg.agents?.defaults?.models?.["anthropic/claude-opus-4-5"]?.params?.cacheRetention,
       ).toBe("short");
+
+      const effective = computeEffectiveSettings(cfg.agents?.defaults?.contextPruning);
+      expect(effective?.ttlMs).toBe(DEFAULT_CONTEXT_PRUNING_SETTINGS.ttlMs);
     });
   });
 

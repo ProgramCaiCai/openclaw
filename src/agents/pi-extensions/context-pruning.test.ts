@@ -84,6 +84,11 @@ describe("context-pruning", () => {
     expect(computeEffectiveSettings({})).toBeNull();
   });
 
+  it("defaults keep TTL short and reduce context growth", () => {
+    expect(DEFAULT_CONTEXT_PRUNING_SETTINGS.ttlMs).toBe(3 * 60 * 1000);
+    expect(DEFAULT_CONTEXT_PRUNING_SETTINGS.softTrimRatio).toBe(0.1);
+  });
+
   it("does not touch tool results after the last N assistants", () => {
     const messages: AgentMessage[] = [
       makeUser("u1"),

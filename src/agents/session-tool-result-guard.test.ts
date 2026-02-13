@@ -2,7 +2,11 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { installSessionToolResultGuard } from "./session-tool-result-guard.js";
-import { TOOL_OUTPUT_HARD_MAX_BYTES, TOOL_OUTPUT_HARD_MAX_LINES } from "./tool-output-hard-cap.js";
+import {
+  TOOL_OUTPUT_HARD_MAX_BYTES,
+  TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
+  TOOL_OUTPUT_HARD_MAX_LINES,
+} from "./tool-output-hard-cap.js";
 
 type AppendMessage = Parameters<SessionManager["appendMessage"]>[0];
 
@@ -304,5 +308,69 @@ describe("installSessionToolResultGuard", () => {
       text: string;
     };
     expect(textBlock.text).toBe(originalText);
+  });
+
+  it("applies stricter caps for exec tool results", () => {
+    const sm = SessionManager.inMemory();
+    installSessionToolResultGuard(sm);
+
+    const large = "x".repeat(10_000);
+
+    sm.appendMessage(
+      asAppendMessage({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_read", name: "read", arguments: {} }],
+      }),
+    );
+    sm.appendMessage(
+      asAppendMessage({
+        role: "toolResult",
+        toolCallId: "call_read",
+        toolName: "read",
+        content: [{ type: "text", text: large }],
+        isError: false,
+        timestamp: Date.now(),
+      }),
+    );
+
+    sm.appendMessage(
+      asAppendMessage({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_exec", name: "exec", arguments: {} }],
+      }),
+    );
+    sm.appendMessage(
+      asAppendMessage({
+        role: "toolResult",
+        toolCallId: "call_exec",
+        toolName: "exec",
+        content: [{ type: "text", text: large }],
+        isError: false,
+        timestamp: Date.now(),
+      }),
+    );
+
+    const messages = sm
+      .getEntries()
+      .filter((e) => e.type === "message")
+      .map((e) => (e as { message: AgentMessage }).message);
+
+    const readResult = messages.find(
+      (m) => m.role === "toolResult" && m.toolCallId === "call_read",
+    ) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(readResult.content[0].text).toBe(large);
+
+    const execResult = messages.find(
+      (m) => m.role === "toolResult" && m.toolCallId === "call_exec",
+    ) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const execText = execResult.content[0].text;
+    expect(Buffer.byteLength(execText, "utf8")).toBeLessThanOrEqual(
+      TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
+    );
+    expect(execText).toContain("exceeded hard limit");
   });
 });

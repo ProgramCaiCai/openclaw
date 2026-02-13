@@ -47,9 +47,9 @@ export type EffectiveContextPruningSettings = {
 
 export const DEFAULT_CONTEXT_PRUNING_SETTINGS: EffectiveContextPruningSettings = {
   mode: "cache-ttl",
-  ttlMs: 5 * 60 * 1000,
+  ttlMs: 3 * 60 * 1000,
   keepLastAssistants: 3,
-  softTrimRatio: 0.3,
+  softTrimRatio: 0.1,
   hardClearRatio: 0.5,
   minPrunableToolChars: 50_000,
   tools: {},

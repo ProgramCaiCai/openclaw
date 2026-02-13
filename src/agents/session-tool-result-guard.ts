@@ -5,25 +5,48 @@ import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
 import {
   hardTruncateText,
+  makeHardLimitSuffix,
   TOOL_OUTPUT_HARD_MAX_BYTES,
+  TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
   TOOL_OUTPUT_HARD_MAX_LINES,
+  TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
 } from "./tool-output-hard-cap.js";
 
 type ToolCall = { id: string; name?: string };
 
-const GUARD_TRUNCATION_SUFFIX =
-  "⚠️ [Content truncated during persistence - exceeded hard limit (50KB / 2000 lines). " +
-  "Use offset/limit parameters or request specific sections for large content.]";
+type ToolOutputCaps = { maxBytes: number; maxLines: number };
+
+function resolveToolOutputCaps(toolName?: string | null): ToolOutputCaps {
+  if (toolName === "exec") {
+    return {
+      maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
+      maxLines: TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
+    };
+  }
+  return {
+    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES,
+    maxLines: TOOL_OUTPUT_HARD_MAX_LINES,
+  };
+}
+
+const GUARD_TRUNCATION_SUFFIX = makeHardLimitSuffix({
+  context: "Content truncated during persistence",
+});
 
 /**
  * Apply the system toolResult hard-cap policy before persisting to a session transcript.
  * Returns the original message reference when no changes are needed.
  */
-function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage {
+function hardCapToolResultMessageForPersistence(
+  msg: AgentMessage,
+  meta?: { toolName?: string | null },
+): AgentMessage {
   const role = (msg as { role?: string }).role;
   if (role !== "toolResult") {
     return msg;
   }
+
+  const caps = resolveToolOutputCaps(meta?.toolName);
 
   const content = (msg as { content?: unknown }).content;
   if (!Array.isArray(content)) {
@@ -53,7 +76,7 @@ function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage
     if (nonTextBlocks > 0) {
       try {
         const bytes = Buffer.byteLength(JSON.stringify(msg), "utf8");
-        if (bytes > TOOL_OUTPUT_HARD_MAX_BYTES) {
+        if (bytes > caps.maxBytes) {
           return {
             ...msg,
             content: [
@@ -61,7 +84,7 @@ function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage
                 type: "text" as const,
                 text:
                   `⚠️ [Tool result contained ${nonTextBlocks} non-text block(s) totaling ${bytes} bytes — ` +
-                  `exceeded hard limit (${TOOL_OUTPUT_HARD_MAX_BYTES} bytes). Content removed during persistence.]`,
+                  `exceeded hard limit (${caps.maxBytes} bytes). Content removed during persistence.]`,
               },
             ],
           } as AgentMessage;
@@ -86,7 +109,7 @@ function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage
   if (!forceTextOnly) {
     try {
       const bytes = Buffer.byteLength(JSON.stringify(msg), "utf8");
-      forceTextOnly = bytes > TOOL_OUTPUT_HARD_MAX_BYTES;
+      forceTextOnly = bytes > caps.maxBytes;
     } catch {
       forceTextOnly = true;
     }
@@ -97,8 +120,8 @@ function hardCapToolResultMessageForPersistence(msg: AgentMessage): AgentMessage
     : combined;
 
   const capped = hardTruncateText(prefix, {
-    maxBytes: TOOL_OUTPUT_HARD_MAX_BYTES,
-    maxLines: TOOL_OUTPUT_HARD_MAX_LINES,
+    maxBytes: caps.maxBytes,
+    maxLines: caps.maxLines,
     suffix: GUARD_TRUNCATION_SUFFIX,
   });
 
@@ -196,7 +219,7 @@ export function installSessionToolResultGuard(
           isSynthetic: true,
         });
         // Apply the hard cap *after* any hook transforms so plugins can't re-inflate tool results.
-        const capped = hardCapToolResultMessageForPersistence(transformed);
+        const capped = hardCapToolResultMessageForPersistence(transformed, { toolName: name });
         originalAppend(capped as never);
       }
     }
@@ -226,13 +249,13 @@ export function installSessionToolResultGuard(
       }
       // Apply the hard cap before + after hook transforms so persisted tool results
       // always conform to the system limits.
-      const preCapped = hardCapToolResultMessageForPersistence(nextMessage);
+      const preCapped = hardCapToolResultMessageForPersistence(nextMessage, { toolName });
       const transformed = persistToolResult(preCapped, {
         toolCallId: id ?? undefined,
         toolName,
         isSynthetic: false,
       });
-      const postCapped = hardCapToolResultMessageForPersistence(transformed);
+      const postCapped = hardCapToolResultMessageForPersistence(transformed, { toolName });
       return originalAppend(postCapped as never);
     }
 
