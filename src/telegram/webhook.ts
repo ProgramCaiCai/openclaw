@@ -117,19 +117,86 @@ export async function startTelegramWebhook(opts: {
     }
   };
 
+  // R1-02: Track per-file retry counts; move to dead-letter after max retries.
+  const SPOOL_MAX_RETRIES = 3;
+  const spoolRetryCounts = new Map<string, number>();
+
+  // R1-01: In-memory fallback queue for updates that failed both spool and processing.
+  const FALLBACK_QUEUE_MAX = 200;
+  const fallbackQueue: Array<{ update: unknown; updateId?: number }> = [];
+
   const replaySpoolOnce = async () => {
-    const pending = await spool.list();
-    for (const filePath of pending) {
-      try {
-        const entry = await spool.read(filePath);
-        await processUpdate(entry.update, filePath);
-      } catch (err) {
-        webhookLog.error("webhook spool replay failed", {
-          phase: "webhook.replay",
-          error: formatErrorMessage(err),
-          spoolPath: filePath,
-        });
+    // R1-12: Top-level try/catch prevents unhandled rejections from setInterval.
+    try {
+      const pending = await spool.list();
+      for (const filePath of pending) {
+        try {
+          const entry = await spool.read(filePath);
+          await processUpdate(entry.update, filePath);
+          // Success — clear retry counter.
+          spoolRetryCounts.delete(filePath);
+        } catch (err) {
+          const retries = (spoolRetryCounts.get(filePath) ?? 0) + 1;
+          spoolRetryCounts.set(filePath, retries);
+
+          const isPermanent = retries >= SPOOL_MAX_RETRIES;
+          webhookLog.error("webhook spool replay failed", {
+            phase: "webhook.replay",
+            error: formatErrorMessage(err),
+            spoolPath: filePath,
+            retryCount: retries,
+            permanent: isPermanent,
+          });
+
+          // R1-02: Move permanently-failed files to dead-letter after max retries.
+          if (isPermanent) {
+            try {
+              const dest = await spool.moveToDeadLetter(filePath);
+              spoolRetryCounts.delete(filePath);
+              webhookLog.warn("spool file moved to dead-letter", {
+                phase: "webhook.replay",
+                spoolPath: filePath,
+                deadLetterPath: dest,
+                retryCount: retries,
+              });
+            } catch (moveErr) {
+              webhookLog.error("failed to move spool file to dead-letter", {
+                phase: "webhook.replay",
+                error: formatErrorMessage(moveErr),
+                spoolPath: filePath,
+              });
+            }
+          }
+        }
       }
+
+      // R1-01: Drain in-memory fallback queue.
+      while (fallbackQueue.length > 0) {
+        const item = fallbackQueue.shift();
+        if (!item) {
+          break;
+        }
+        try {
+          await processUpdate(item.update);
+        } catch (err) {
+          webhookLog.error("fallback queue replay failed", {
+            phase: "webhook.fallback",
+            error: formatErrorMessage(err),
+            updateId: item.updateId,
+          });
+          // Re-queue at end if still within bounds.
+          if (fallbackQueue.length < FALLBACK_QUEUE_MAX) {
+            fallbackQueue.push(item);
+          }
+          break; // Stop draining on failure to avoid tight loop.
+        }
+      }
+    } catch (err) {
+      // R1-12: Catch top-level errors (e.g. spool.list() failure) to prevent unhandled rejections.
+      webhookLog.error("webhook spool replay top-level error", {
+        phase: "webhook.replay",
+        error: formatErrorMessage(err),
+      });
     }
   };
 
@@ -178,15 +245,24 @@ export async function startTelegramWebhook(opts: {
         update = await readJsonBody(req, { maxBytes: 1_000_000 });
       } catch (err) {
         const errMsg = formatErrorMessage(err);
+        // R1-10: Include content-length and content-type for debugging parse failures.
         webhookLog.error("webhook body parse failed", {
           phase: "webhook.body",
           error: errMsg,
+          contentLength: req.headers["content-length"],
+          contentType: req.headers["content-type"],
         });
         runtime.log?.(`webhook body parse failed: ${errMsg}`);
         return;
       }
 
       if (!update) {
+        // R1-10: Warn on empty body so silent drops are observable.
+        webhookLog.warn("webhook received empty body", {
+          phase: "webhook.body",
+          contentLength: req.headers["content-length"],
+          contentType: req.headers["content-type"],
+        });
         return;
       }
 
@@ -217,7 +293,29 @@ export async function startTelegramWebhook(opts: {
           updateId: resolvedUpdateId,
         });
         runtime.log?.(`webhook spool append failed: ${errMsg}`);
-        await processUpdate(update);
+        // R1-01: Fallback to direct processing; if that also fails, queue in memory.
+        try {
+          await processUpdate(update);
+        } catch (processErr) {
+          webhookLog.error(
+            "CRITICAL: webhook double failure — spool append AND processing failed",
+            {
+              phase: "webhook.spool",
+              spoolError: errMsg,
+              processError: formatErrorMessage(processErr),
+              updateId: resolvedUpdateId,
+            },
+          );
+          if (fallbackQueue.length < FALLBACK_QUEUE_MAX) {
+            fallbackQueue.push({ update, updateId: resolvedUpdateId });
+          } else {
+            webhookLog.error("CRITICAL: fallback queue full — update dropped", {
+              phase: "webhook.spool",
+              updateId: resolvedUpdateId,
+              queueSize: fallbackQueue.length,
+            });
+          }
+        }
       }
     })();
   });

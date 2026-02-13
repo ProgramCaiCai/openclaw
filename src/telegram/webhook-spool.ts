@@ -40,6 +40,7 @@ async function atomicWriteFile(filePath: string, content: string) {
 
 export function createTelegramWebhookSpool(opts: TelegramWebhookSpoolOptions = {}) {
   const dir = resolveSpoolDir(opts);
+  const deadLetterDir = path.join(dir, "dead-letter");
 
   const append = async (entry: Omit<TelegramWebhookSpoolEntry, "id">) => {
     await ensureDir(dir);
@@ -54,6 +55,15 @@ export function createTelegramWebhookSpool(opts: TelegramWebhookSpoolOptions = {
 
   const ack = async (filePath: string) => {
     await fs.unlink(filePath);
+  };
+
+  // R1-02: Move permanently-failed spool files to dead-letter directory.
+  const moveToDeadLetter = async (filePath: string) => {
+    await ensureDir(deadLetterDir);
+    const baseName = path.basename(filePath);
+    const dest = path.join(deadLetterDir, baseName);
+    await fs.rename(filePath, dest);
+    return dest;
   };
 
   const list = async (): Promise<string[]> => {
@@ -74,5 +84,5 @@ export function createTelegramWebhookSpool(opts: TelegramWebhookSpoolOptions = {
     return JSON.parse(raw) as TelegramWebhookSpoolEntry;
   };
 
-  return { dir, append, ack, list, read };
+  return { dir, deadLetterDir, append, ack, moveToDeadLetter, list, read };
 }
