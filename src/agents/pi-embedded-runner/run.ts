@@ -76,6 +76,23 @@ function scrubAnthropicRefusalMagic(prompt: string): string {
   );
 }
 
+function estimateUserTurns(messages: unknown[] | undefined): number | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+  let turns = 0;
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") {
+      continue;
+    }
+    const role = (msg as { role?: unknown }).role;
+    if (role === "user" || role === "human") {
+      turns += 1;
+    }
+  }
+  return turns;
+}
+
 type UsageAccumulator = {
   input: number;
   output: number;
@@ -836,7 +853,7 @@ export async function runEmbeddedPiAgent(
           // NOT 85% of the raw context window, to ensure this fires before the SDK's
           // built-in compaction kicks in.
           const promptUsage =
-            attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
+            normalizeUsage(lastAssistant?.usage as UsageLike) ?? attempt.attemptUsage;
           // Include cacheRead to reflect actual context window consumption
           // (input alone is near-zero when prompt caching is active).
           const proactivePromptTokens = (promptUsage?.input ?? 0) + (promptUsage?.cacheRead ?? 0);
@@ -886,7 +903,15 @@ export async function runEmbeddedPiAgent(
             const autoCompactCfg = resolveAutoCompactConfig(params.config);
             if (autoCompactCfg.enabled && contextWindowTokens > 0) {
               const usagePct = Math.round((proactivePromptTokens / contextWindowTokens) * 100);
-              if (usagePct >= autoCompactCfg.thresholdPct) {
+              const userTurns = estimateUserTurns(attempt.messagesSnapshot);
+              const hasEnoughTurns =
+                autoCompactCfg.minTurns <= 0 ||
+                (typeof userTurns === "number" && userTurns >= autoCompactCfg.minTurns);
+              if (!hasEnoughTurns) {
+                log.debug(
+                  `[auto-compact] skip: userTurns=${userTurns ?? "unknown"} minTurns=${autoCompactCfg.minTurns}`,
+                );
+              } else if (usagePct >= autoCompactCfg.thresholdPct) {
                 log.info(
                   `[auto-compact] usagePct=${usagePct}% threshold=${autoCompactCfg.thresholdPct}% ctx=${contextWindowTokens}; triggering proactive compaction`,
                 );
