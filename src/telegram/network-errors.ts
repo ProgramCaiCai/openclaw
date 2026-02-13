@@ -73,17 +73,34 @@ function getTelegramApiErrorCode(err: unknown): number | undefined {
   if (!err || typeof err !== "object") {
     return undefined;
   }
-  const typed = err as { error_code?: unknown; errorCode?: unknown; status?: unknown };
-  const raw = typed.error_code ?? typed.errorCode ?? typed.status;
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw;
-  }
-  if (typeof raw === "string" && raw.trim()) {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed)) {
-      return parsed;
+  const typed = err as {
+    error_code?: unknown;
+    errorCode?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown } | null;
+  };
+
+  const candidates = [
+    typed.error_code,
+    typed.errorCode,
+    typed.status,
+    typed.statusCode,
+    typed.response?.status,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+    if (typeof candidate === "string" && candidate.trim()) {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
     }
   }
+
   return undefined;
 }
 
@@ -188,12 +205,10 @@ export function isRecoverableTelegramNetworkError(
 
     // Treat transient server errors (5xx) as recoverable in polling/webhook contexts
     // to prevent the polling loop from terminating on temporary Telegram API outages.
-    if (
-      telegramErrorCode &&
-      RECOVERABLE_TELEGRAM_HTTP_CODES.has(telegramErrorCode) &&
-      options.context !== "send"
-    ) {
-      return true;
+    if (telegramErrorCode && RECOVERABLE_TELEGRAM_HTTP_CODES.has(telegramErrorCode)) {
+      if (options.context === "polling" || options.context === "webhook") {
+        return true;
+      }
     }
 
     const code = normalizeCode(getErrorCode(candidate));

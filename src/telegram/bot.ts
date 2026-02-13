@@ -358,9 +358,10 @@ export function createTelegramBot(opts: TelegramBotOptions) {
             errorClass: disposition.errorClass,
             error: formatErrorMessage(nextError),
           });
-          enqueueSystemEvent(
-            `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
-            { updateId, errorClass: disposition.errorClass },
+          runtime.error?.(
+            danger(
+              `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
+            ),
           );
           markUpdateDone(updateId);
           nextError = undefined;

@@ -411,6 +411,23 @@ export const registerTelegramHandlers = ({
     // R1-07: Attach completion defer so offset middleware waits for async processing.
     const done = createDeferred();
     setTelegramUpdateCompletionDefer(ctx, done.promise);
+
+    let completionSettled = false;
+    const resolveCompletionOnce = () => {
+      if (completionSettled) {
+        return;
+      }
+      completionSettled = true;
+      done.resolve();
+    };
+    const rejectCompletionOnce = (err: unknown) => {
+      if (completionSettled) {
+        return;
+      }
+      completionSettled = true;
+      done.reject(err);
+    };
+
     // Answer immediately to prevent Telegram from retrying while we process
     await withTelegramApiErrorLogging({
       operation: "answerCallbackQuery",
@@ -745,7 +762,7 @@ export const registerTelegramHandlers = ({
         messageIdOverride: callback.id,
       });
     } catch (err) {
-      done.reject(err);
+      rejectCompletionOnce(err);
       const callback = ctx.callbackQuery;
       const msg = callback?.message;
       logger.error(
@@ -760,8 +777,9 @@ export const registerTelegramHandlers = ({
         "telegram callback handler failed",
       );
       return;
+    } finally {
+      resolveCompletionOnce();
     }
-    done.resolve();
   });
 
   // Handle group migration to supergroup (chat ID changes)

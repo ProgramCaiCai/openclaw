@@ -37,7 +37,16 @@ async function readJsonBody(req: IncomingMessage, opts: { maxBytes: number }) {
   if (!raw) {
     return undefined;
   }
-  return JSON.parse(raw) as unknown;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (err) {
+    const preview = raw.slice(0, 200).replace(/[^\x20-\x7E]/g, ".");
+    const wrapped = new Error(`webhook JSON parse failed: ${formatErrorMessage(err)}`);
+    const typed = wrapped as Error & { bodyLength?: number; bodyPreview?: string };
+    typed.bodyLength = raw.length;
+    typed.bodyPreview = preview;
+    throw wrapped;
+  }
 }
 
 function resolveSecretHeader(req: IncomingMessage): string | undefined {
@@ -114,6 +123,7 @@ export async function startTelegramWebhook(opts: {
         });
       }
       runtime.log?.(`webhook update processing failed: ${errMsg}`);
+      throw err;
     }
   };
 
@@ -245,12 +255,15 @@ export async function startTelegramWebhook(opts: {
         update = await readJsonBody(req, { maxBytes: 1_000_000 });
       } catch (err) {
         const errMsg = formatErrorMessage(err);
+        const extra = err as { bodyLength?: unknown; bodyPreview?: unknown };
         // R1-10: Include content-length and content-type for debugging parse failures.
         webhookLog.error("webhook body parse failed", {
           phase: "webhook.body",
           error: errMsg,
           contentLength: req.headers["content-length"],
           contentType: req.headers["content-type"],
+          bodyLength: typeof extra.bodyLength === "number" ? extra.bodyLength : undefined,
+          bodyPreview: typeof extra.bodyPreview === "string" ? extra.bodyPreview : undefined,
         });
         runtime.log?.(`webhook body parse failed: ${errMsg}`);
         return;
@@ -273,8 +286,11 @@ export async function startTelegramWebhook(opts: {
       const resolvedUpdateId = typeof updateId === "number" ? updateId : undefined;
       const receivedAtMs = Date.now();
 
+      let appended: { filePath: string } | undefined;
+      let appendErrMsg: string | undefined;
+
       try {
-        const appended = await spool.append({
+        appended = await spool.append({
           receivedAtMs,
           updateId: resolvedUpdateId,
           update,
@@ -284,37 +300,43 @@ export async function startTelegramWebhook(opts: {
           updateId: resolvedUpdateId,
           durationMs: Date.now() - requestStart,
         });
-        await processUpdate(update, appended.filePath);
       } catch (err) {
-        const errMsg = formatErrorMessage(err);
+        appendErrMsg = formatErrorMessage(err);
         webhookLog.error("webhook spool append failed", {
           phase: "webhook.spool",
-          error: errMsg,
+          error: appendErrMsg,
           updateId: resolvedUpdateId,
         });
-        runtime.log?.(`webhook spool append failed: ${errMsg}`);
-        // R1-01: Fallback to direct processing; if that also fails, queue in memory.
+        runtime.log?.(`webhook spool append failed: ${appendErrMsg}`);
+      }
+
+      if (appended) {
         try {
-          await processUpdate(update);
-        } catch (processErr) {
-          webhookLog.error(
-            "CRITICAL: webhook double failure — spool append AND processing failed",
-            {
-              phase: "webhook.spool",
-              spoolError: errMsg,
-              processError: formatErrorMessage(processErr),
-              updateId: resolvedUpdateId,
-            },
-          );
-          if (fallbackQueue.length < FALLBACK_QUEUE_MAX) {
-            fallbackQueue.push({ update, updateId: resolvedUpdateId });
-          } else {
-            webhookLog.error("CRITICAL: fallback queue full — update dropped", {
-              phase: "webhook.spool",
-              updateId: resolvedUpdateId,
-              queueSize: fallbackQueue.length,
-            });
-          }
+          await processUpdate(update, appended.filePath);
+        } catch {
+          // processUpdate already logged; leave the spooled file for replay.
+        }
+        return;
+      }
+
+      // R1-01: Fallback to direct processing; if that also fails, queue in memory.
+      try {
+        await processUpdate(update);
+      } catch (processErr) {
+        webhookLog.fatal("webhook double failure: spool append AND processing failed", {
+          phase: "webhook.spool",
+          spoolError: appendErrMsg ?? "unknown",
+          processError: formatErrorMessage(processErr),
+          updateId: resolvedUpdateId,
+        });
+        if (fallbackQueue.length < FALLBACK_QUEUE_MAX) {
+          fallbackQueue.push({ update, updateId: resolvedUpdateId });
+        } else {
+          webhookLog.fatal("fallback queue full: update dropped", {
+            phase: "webhook.spool",
+            updateId: resolvedUpdateId,
+            queueSize: fallbackQueue.length,
+          });
         }
       }
     })();
@@ -368,9 +390,22 @@ export async function startTelegramWebhook(opts: {
 
   runtime.log?.(`webhook listening on ${publicUrl}`);
 
-  const replayTimer = setInterval(() => {
-    void replaySpoolOnce();
-  }, 5000);
+  // Serialize spool replays to avoid overlapping interval runs.
+  let replayQueue: Promise<void> = Promise.resolve();
+  const enqueueReplay = () => {
+    replayQueue = replayQueue
+      .then(async () => {
+        await replaySpoolOnce();
+      })
+      .catch((err) => {
+        webhookLog.error("webhook spool replay queue error", {
+          phase: "webhook.replay",
+          error: formatErrorMessage(err),
+        });
+      });
+  };
+
+  const replayTimer = setInterval(enqueueReplay, 5000);
 
   const shutdown = () => {
     clearInterval(replayTimer);
