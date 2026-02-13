@@ -381,7 +381,21 @@ export const registerTelegramHandlers = ({
         .then(async () => {
           await flushTextFragments(entry);
         })
-        .catch(() => undefined);
+        .catch((err) => {
+          // R1-06: Log escaped text fragment flush errors instead of silently swallowing.
+          // Individual defers are already settled by flushTextFragments; this catches
+          // only unexpected errors that escape the inner try/catch.
+          logger.error(
+            {
+              phase: "inbound.text_fragments.chain",
+              bufferKey: entry.key,
+              parts: entry.messages.length,
+              updateIds: entry.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+              error: formatErrorMessage(err),
+            },
+            "text fragment processing chain error",
+          );
+        });
       await textFragmentProcessing;
     }, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS);
   };
@@ -394,6 +408,9 @@ export const registerTelegramHandlers = ({
     if (shouldSkipUpdate(ctx)) {
       return;
     }
+    // R1-07: Attach completion defer so offset middleware waits for async processing.
+    const done = createDeferred();
+    setTelegramUpdateCompletionDefer(ctx, done.promise);
     // Answer immediately to prevent Telegram from retrying while we process
     await withTelegramApiErrorLogging({
       operation: "answerCallbackQuery",
@@ -728,6 +745,7 @@ export const registerTelegramHandlers = ({
         messageIdOverride: callback.id,
       });
     } catch (err) {
+      done.reject(err);
       const callback = ctx.callbackQuery;
       const msg = callback?.message;
       logger.error(
@@ -741,7 +759,9 @@ export const registerTelegramHandlers = ({
         },
         "telegram callback handler failed",
       );
+      return;
     }
+    done.resolve();
   });
 
   // Handle group migration to supergroup (chat ID changes)
@@ -961,7 +981,18 @@ export const registerTelegramHandlers = ({
             .then(async () => {
               await flushTextFragments(existing);
             })
-            .catch(() => undefined);
+            .catch((err) => {
+              // R1-06: Log escaped flush errors; defers already settled inside flushTextFragments.
+              logger.error(
+                {
+                  phase: "inbound.text_fragments.chain",
+                  bufferKey: existing.key,
+                  parts: existing.messages.length,
+                  error: formatErrorMessage(err),
+                },
+                "text fragment processing chain error",
+              );
+            });
           await textFragmentProcessing;
         }
 
@@ -995,7 +1026,19 @@ export const registerTelegramHandlers = ({
               .then(async () => {
                 await processMediaGroup(existing);
               })
-              .catch(() => undefined);
+              .catch((err) => {
+                // R1-05: Log escaped media group flush errors; defers already settled inside processMediaGroup.
+                logger.error(
+                  {
+                    phase: "inbound.media_group.chain",
+                    mediaGroupId,
+                    parts: existing.messages.length,
+                    updateIds: existing.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+                    error: formatErrorMessage(err),
+                  },
+                  "media group processing chain error",
+                );
+              });
             await mediaGroupProcessing;
           }, MEDIA_GROUP_TIMEOUT_MS);
         } else {
@@ -1009,7 +1052,19 @@ export const registerTelegramHandlers = ({
                 .then(async () => {
                   await processMediaGroup(entry);
                 })
-                .catch(() => undefined);
+                .catch((err) => {
+                  // R1-05: Log escaped media group flush errors; defers already settled inside processMediaGroup.
+                  logger.error(
+                    {
+                      phase: "inbound.media_group.chain",
+                      mediaGroupId,
+                      parts: entry.messages.length,
+                      updateIds: entry.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+                      error: formatErrorMessage(err),
+                    },
+                    "media group processing chain error",
+                  );
+                });
               await mediaGroupProcessing;
             }, MEDIA_GROUP_TIMEOUT_MS),
           };
