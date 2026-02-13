@@ -151,6 +151,7 @@ export function armTimer(state: CronServiceState) {
       state.deps.log.error({ err: String(err) }, "cron: timer tick failed");
     }
   }, clampedDelay);
+  state.timer.unref?.();
   state.deps.log.debug(
     { nextAt, delayMs: clampedDelay, clamped: delay > MAX_TIMER_DELAY_MS },
     "cron: timer armed",
@@ -158,6 +159,12 @@ export function armTimer(state: CronServiceState) {
 }
 
 export async function onTimer(state: CronServiceState) {
+  if (!state.deps.cronEnabled) {
+    // Defense in depth: even if a stale timer tick fires after cron is disabled,
+    // ensure no jobs run and converge the timer state.
+    stopTimer(state);
+    return;
+  }
   if (state.running) {
     // Re-arm the timer so the scheduler keeps ticking even when a job is
     // still executing.  Without this, a long-running job (e.g. an agentTurn

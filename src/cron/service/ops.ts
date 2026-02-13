@@ -16,6 +16,8 @@ import { armTimer, emit, executeJob, runMissedJobs, stopTimer, wake } from "./ti
 export async function start(state: CronServiceState) {
   await locked(state, async () => {
     if (!state.deps.cronEnabled) {
+      // Converge any previously-armed timers if cron is disabled at runtime.
+      stopTimer(state);
       state.deps.log.info({ enabled: false }, "cron: disabled");
       return;
     }
