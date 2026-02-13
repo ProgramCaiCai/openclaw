@@ -902,18 +902,28 @@ export async function runEmbeddedPiAgent(
           if (!aborted && autoCompactionCount === 0) {
             const autoCompactCfg = resolveAutoCompactConfig(params.config);
             if (autoCompactCfg.enabled && contextWindowTokens > 0) {
-              const usagePct = Math.round((proactivePromptTokens / contextWindowTokens) * 100);
+              const usageTotal = promptUsage?.total;
+              const totalTokens =
+                typeof usageTotal === "number" && Number.isFinite(usageTotal) && usageTotal > 0
+                  ? usageTotal
+                  : (promptUsage?.input ?? 0) +
+                    (promptUsage?.output ?? 0) +
+                    (promptUsage?.cacheRead ?? 0);
+              // Align with `session_status`: percentUsed = totalTokens / contextTokens.
+              const usagePct = Math.min(999, Math.round((totalTokens / contextWindowTokens) * 100));
               const userTurns = estimateUserTurns(attempt.messagesSnapshot);
+              // If snapshot isn't available, don't block auto-compact forever; let the % gate decide.
               const hasEnoughTurns =
                 autoCompactCfg.minTurns <= 0 ||
-                (typeof userTurns === "number" && userTurns >= autoCompactCfg.minTurns);
+                typeof userTurns !== "number" ||
+                userTurns >= autoCompactCfg.minTurns;
               if (!hasEnoughTurns) {
                 log.debug(
                   `[auto-compact] skip: userTurns=${userTurns ?? "unknown"} minTurns=${autoCompactCfg.minTurns}`,
                 );
               } else if (usagePct >= autoCompactCfg.thresholdPct) {
                 log.info(
-                  `[auto-compact] usagePct=${usagePct}% threshold=${autoCompactCfg.thresholdPct}% ctx=${contextWindowTokens}; triggering proactive compaction`,
+                  `[auto-compact] usagePct=${usagePct}% threshold=${autoCompactCfg.thresholdPct}% ctx=${contextWindowTokens} totalTokens=${totalTokens}; triggering proactive compaction`,
                 );
                 try {
                   const compactResult = await compactEmbeddedPiSessionDirect({
