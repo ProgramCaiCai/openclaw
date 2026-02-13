@@ -25,6 +25,8 @@ const SessionsListToolSchema = Type.Object({
   messageLimit: Type.Optional(Type.Number({ minimum: 0 })),
 });
 
+const SESSIONS_LIST_MESSAGE_LIMIT_CAP = 10;
+
 function resolveSandboxSessionToolsVisibility(cfg: ReturnType<typeof loadConfig>) {
   return cfg.agents?.defaults?.sandbox?.sessionToolsVisibility ?? "spawned";
 }
@@ -77,7 +79,7 @@ export function createSessionsListTool(opts?: {
         typeof params.messageLimit === "number" && Number.isFinite(params.messageLimit)
           ? Math.max(0, Math.floor(params.messageLimit))
           : 0;
-      const messageLimit = Math.min(messageLimitRaw, 20);
+      const messageLimit = Math.min(messageLimitRaw, SESSIONS_LIST_MESSAGE_LIMIT_CAP);
 
       const list = await callGateway<{ sessions: Array<SessionListRow>; path: string }>({
         method: "sessions.list",

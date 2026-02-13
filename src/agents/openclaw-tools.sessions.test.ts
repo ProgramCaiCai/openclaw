@@ -147,6 +147,50 @@ describe("sessions tools", () => {
     expect(cronDetails.sessions?.[0]?.kind).toBe("cron");
   });
 
+  it("sessions_list clamps messageLimit before calling chat.history", async () => {
+    callGatewayMock.mockReset();
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string };
+      if (request.method === "sessions.list") {
+        return {
+          path: "/tmp/sessions.json",
+          sessions: [
+            {
+              key: "main",
+              kind: "direct",
+              sessionId: "s-main",
+              updatedAt: 1,
+            },
+          ],
+        };
+      }
+      if (request.method === "chat.history") {
+        return {
+          messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+        };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "sessions_list");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_list tool");
+    }
+
+    await tool.execute("call1b", { messageLimit: 999 });
+    const historyCall = callGatewayMock.mock.calls.find(
+      (call) => (call[0] as { method?: string }).method === "chat.history",
+    );
+    expect(historyCall?.[0]).toMatchObject({
+      method: "chat.history",
+      params: {
+        sessionKey: "main",
+        limit: 10,
+      },
+    });
+  });
+
   it("sessions_history filters tool messages by default", async () => {
     callGatewayMock.mockReset();
     callGatewayMock.mockImplementation(async (opts: unknown) => {
@@ -339,7 +383,44 @@ describe("sessions tools", () => {
     );
     expect(historyCall?.[0]).toMatchObject({
       method: "chat.history",
-      params: { sessionKey: targetKey },
+      params: { sessionKey: targetKey, safeLimit: true },
+    });
+  });
+
+  it("sessions_history clamps oversized limits and keeps safeLimit enabled", async () => {
+    callGatewayMock.mockReset();
+    const targetKey = "main";
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string };
+      if (request.method === "sessions.resolve") {
+        return { ok: true, key: targetKey };
+      }
+      if (request.method === "chat.history") {
+        return {
+          messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+        };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "sessions_history");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_history tool");
+    }
+
+    await tool.execute("call5b", { sessionKey: "main", limit: 999 });
+
+    const historyCall = callGatewayMock.mock.calls.find(
+      (call) => (call[0] as { method?: string }).method === "chat.history",
+    );
+    expect(historyCall?.[0]).toMatchObject({
+      method: "chat.history",
+      params: {
+        sessionKey: targetKey,
+        limit: 50,
+        safeLimit: true,
+      },
     });
   });
 

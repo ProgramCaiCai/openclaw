@@ -251,12 +251,12 @@ export function createSessionsHistoryTool(opts?: {
 
       const limit =
         typeof params.limit === "number" && Number.isFinite(params.limit)
-          ? Math.max(1, Math.floor(params.limit))
+          ? Math.max(1, Math.min(50, Math.floor(params.limit)))
           : undefined;
       const includeTools = Boolean(params.includeTools);
       const result = await callGateway<{ messages: Array<unknown> }>({
         method: "chat.history",
-        params: { sessionKey: resolvedKey, limit },
+        params: { sessionKey: resolvedKey, limit, safeLimit: true },
       });
       const rawMessages = Array.isArray(result?.messages) ? result.messages : [];
       const selectedMessages = includeTools ? rawMessages : stripToolMessages(rawMessages);

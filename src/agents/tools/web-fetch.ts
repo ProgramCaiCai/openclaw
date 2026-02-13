@@ -37,7 +37,8 @@ export { extractReadableContent } from "./web-fetch-utils.js";
 
 const EXTRACT_MODES = ["markdown", "text"] as const;
 
-const DEFAULT_FETCH_MAX_CHARS = 50_000;
+const HARD_FETCH_MAX_CHARS_CAP = 5_000;
+const DEFAULT_FETCH_MAX_CHARS = HARD_FETCH_MAX_CHARS_CAP;
 const DEFAULT_FETCH_MAX_REDIRECTS = 3;
 const DEFAULT_ERROR_MAX_CHARS = 4_000;
 const DEFAULT_FIRECRAWL_BASE_URL = "https://api.firecrawl.dev";
@@ -116,7 +117,8 @@ function resolveFetchMaxCharsCap(fetch?: WebFetchConfig): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) {
     return DEFAULT_FETCH_MAX_CHARS;
   }
-  return Math.max(100, Math.floor(raw));
+  const bounded = Math.max(100, Math.floor(raw));
+  return Math.min(bounded, HARD_FETCH_MAX_CHARS_CAP);
 }
 
 function resolveFirecrawlConfig(fetch?: WebFetchConfig): FirecrawlFetchConfig {

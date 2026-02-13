@@ -108,6 +108,7 @@ describe("browser tool snapshot maxChars", () => {
       expect.objectContaining({
         format: "ai",
         maxChars: DEFAULT_AI_SNAPSHOT_MAX_CHARS,
+        compact: true,
       }),
     );
   });
@@ -129,6 +130,22 @@ describe("browser tool snapshot maxChars", () => {
     );
   });
 
+  it("clamps oversized maxChars overrides", async () => {
+    const tool = createBrowserTool();
+    await tool.execute?.(null, {
+      action: "snapshot",
+      snapshotFormat: "ai",
+      maxChars: DEFAULT_AI_SNAPSHOT_MAX_CHARS * 10,
+    });
+
+    expect(browserClientMocks.browserSnapshot).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        maxChars: DEFAULT_AI_SNAPSHOT_MAX_CHARS,
+      }),
+    );
+  });
+
   it("skips the default when maxChars is explicitly zero", async () => {
     const tool = createBrowserTool();
     await tool.execute?.(null, {
@@ -140,6 +157,22 @@ describe("browser tool snapshot maxChars", () => {
     expect(browserClientMocks.browserSnapshot).toHaveBeenCalled();
     const [, opts] = browserClientMocks.browserSnapshot.mock.calls.at(-1) ?? [];
     expect(Object.hasOwn(opts ?? {}, "maxChars")).toBe(false);
+  });
+
+  it("lets callers disable compact mode explicitly", async () => {
+    const tool = createBrowserTool();
+    await tool.execute?.(null, {
+      action: "snapshot",
+      snapshotFormat: "ai",
+      compact: false,
+    });
+
+    expect(browserClientMocks.browserSnapshot).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        compact: false,
+      }),
+    );
   });
 
   it("lists profiles", async () => {

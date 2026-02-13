@@ -159,6 +159,39 @@ describe("web_fetch extraction fallbacks", () => {
     expect(details.wrappedLength).toBe(details.text?.length);
   });
 
+  it("uses a bounded default maxChars when omitted", async () => {
+    const longText = "x".repeat(20_000);
+    const mockFetch = vi.fn((input: RequestInfo) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: makeHeaders({ "content-type": "text/plain" }),
+        text: async () => longText,
+        url: requestUrl(input),
+      } as Response),
+    );
+    // @ts-expect-error mock fetch
+    global.fetch = mockFetch;
+
+    const tool = createWebFetchTool({
+      config: {
+        tools: {
+          web: {
+            fetch: { cacheTtlMinutes: 0, firecrawl: { enabled: false } },
+          },
+        },
+      },
+      sandboxed: false,
+    });
+
+    const result = await tool?.execute?.("call", { url: "https://example.com/default-cap" });
+    const details = result?.details as { text?: string; length?: number; truncated?: boolean };
+
+    expect(details.length).toBeLessThanOrEqual(5_000);
+    expect(details.text?.length).toBeLessThanOrEqual(5_000);
+    expect(details.truncated).toBe(true);
+  });
+
   it("enforces maxChars after wrapping", async () => {
     const longText = "x".repeat(5_000);
     const mockFetch = vi.fn((input: RequestInfo) =>
@@ -370,7 +403,7 @@ describe("web_fetch extraction fallbacks", () => {
     const details = result?.details as { text?: string; length?: number; truncated?: boolean };
     expect(details.text).toContain("<<<EXTERNAL_UNTRUSTED_CONTENT>>>");
     expect(details.text).toContain("Source: Web Fetch");
-    expect(details.length).toBeLessThanOrEqual(10_000);
+    expect(details.length).toBeLessThanOrEqual(5_000);
     expect(details.truncated).toBe(true);
   });
   it("strips and truncates HTML from error responses", async () => {
