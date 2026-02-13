@@ -4,58 +4,56 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTelegramWebhookSpool } from "./webhook-spool.js";
 
-describe("telegram webhook spool", () => {
-  let root: string | null = null;
+describe("createTelegramWebhookSpool", () => {
+  let rootDir: string | null = null;
 
   afterEach(async () => {
-    if (root) {
-      await fs.rm(root, { recursive: true, force: true });
-      root = null;
+    if (rootDir) {
+      await fs.rm(rootDir, { recursive: true, force: true });
+      rootDir = null;
     }
   });
 
-  it("sanitizes accountId into a safe spool directory and still replays legacy records", async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-tg-spool-test-"));
+  it("normalizes accountId into a safe directory segment", async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-webhook-spool-test-"));
 
-    const spool = createTelegramWebhookSpool({ accountId: "my bot", rootDir: root });
+    const spool = createTelegramWebhookSpool({ rootDir, accountId: "../evil" });
+    const rel = path.relative(rootDir, spool.dir);
 
-    expect(spool.dir).toBe(path.join(root, "my_bot"));
+    // Should not escape the configured root directory.
+    expect(rel.startsWith(".." + path.sep) || rel === "..").toBe(false);
 
-    // Simulate an existing legacy record written by older versions.
-    const legacyDir = path.join(root, "my bot");
-    await fs.mkdir(legacyDir, { recursive: true });
-    const legacyPath = path.join(legacyDir, "100-unknown-legacy.json");
-    await fs.writeFile(
-      legacyPath,
-      JSON.stringify({ id: "legacy", receivedAtMs: 100, update: { update_id: 1 } }),
-      "utf8",
-    );
-
-    const listed = await spool.list();
-    expect(listed).toContain(legacyPath);
+    // Should still be writable.
+    const appended = await spool.append({ receivedAtMs: Date.now(), update: { ok: true } });
+    expect(await fs.readFile(appended.filePath, "utf8")).toContain('"ok":true');
   });
 
-  it("lists spool files deterministically (sorted by receivedAtMs prefix)", async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-tg-spool-test-"));
+  it("treats ack as idempotent", async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-webhook-spool-test-"));
 
-    const spool = createTelegramWebhookSpool({ accountId: "default", rootDir: root });
-
-    await spool.append({ receivedAtMs: 300, updateId: 3, update: { update_id: 3 } });
-    await spool.append({ receivedAtMs: 100, updateId: 1, update: { update_id: 1 } });
-    await spool.append({ receivedAtMs: 200, updateId: 2, update: { update_id: 2 } });
-
-    const listed = await spool.list();
-    const prefixes = listed.map((filePath) => Number(path.basename(filePath).split("-")[0]));
-    expect(prefixes).toEqual([100, 200, 300]);
-  });
-
-  it("ack is idempotent (ENOENT is tolerated)", async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-tg-spool-test-"));
-
-    const spool = createTelegramWebhookSpool({ accountId: "default", rootDir: root });
-    const appended = await spool.append({ receivedAtMs: 100, updateId: 1, update: {} });
+    const spool = createTelegramWebhookSpool({ rootDir, accountId: "acct" });
+    const appended = await spool.append({ receivedAtMs: 1, updateId: 1, update: { ok: true } });
 
     await spool.ack(appended.filePath);
     await expect(spool.ack(appended.filePath)).resolves.toBeUndefined();
+  });
+
+  it("lists spool files deterministically", async () => {
+    rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-webhook-spool-test-"));
+
+    const spool = createTelegramWebhookSpool({ rootDir, accountId: "acct" });
+    await fs.mkdir(spool.dir, { recursive: true });
+
+    const names = ["2-unknown-b.json", "1-unknown-a.json", "3-unknown-c.json"];
+    for (const name of names) {
+      await fs.writeFile(path.join(spool.dir, name), "{}", "utf8");
+    }
+
+    const listed = await spool.list();
+    expect(listed.map((p) => path.basename(p))).toEqual([
+      "1-unknown-a.json",
+      "2-unknown-b.json",
+      "3-unknown-c.json",
+    ]);
   });
 });
