@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
 
+vi.mock("./subagent-registry.js", () => {
+  return {
+    registerSubagentRun: vi.fn(),
+  };
+});
+
 vi.mock("../config/config.js", async () => {
   const actual = await vi.importActual("../config/config.js");
   return {
@@ -70,5 +76,31 @@ describe("sessions_spawn thinking defaults", () => {
 
     expect(agentCall?.params?.thinking).toBe("low");
     expect(thinkingPatch?.params?.thinkingLevel).toBe("low");
+  });
+
+  it("sanitizes artifactPaths to relative sandboxed paths", async () => {
+    const tool = createSessionsSpawnTool({ agentSessionKey: "agent:test:main" });
+    const result = await tool.execute("call-3", {
+      task: "hello",
+      artifactPaths: [
+        "/etc/passwd",
+        "../secrets.txt",
+        "src/agents/tools/../tools/sessions-spawn-tool.ts",
+        "src/agents/tools/sessions-spawn-tool.ts",
+        "C:\\Windows\\system32",
+        "\\\\server\\share\\file",
+        "src/agents/subagent-announce.ts",
+      ],
+    });
+    expect(result.details).toMatchObject({ status: "accepted" });
+
+    const { registerSubagentRun } = await import("./subagent-registry.js");
+    const calls = (registerSubagentRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const lastArgs = calls.at(-1)?.[0] as { artifactPaths?: string[] } | undefined;
+
+    expect(lastArgs?.artifactPaths).toEqual([
+      "src/agents/tools/sessions-spawn-tool.ts",
+      "src/agents/subagent-announce.ts",
+    ]);
   });
 });

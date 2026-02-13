@@ -343,12 +343,23 @@ export const sessionsHandlers: GatewayRequestHandlers = {
 
     const archived: string[] = [];
     if (deleteTranscript && sessionId) {
-      for (const candidate of resolveSessionTranscriptCandidates(
+      const transcriptCandidates = resolveSessionTranscriptCandidates(
         sessionId,
         storePath,
         entry?.sessionFile,
         target.agentId,
-      )) {
+      );
+      // Deleting a session must also clean up adjacent session write-lock artifacts.
+      const artifactCandidates = Array.from(
+        new Set([
+          ...transcriptCandidates,
+          ...transcriptCandidates.map((candidate) =>
+            candidate.endsWith(".lock") ? candidate : `${candidate}.lock`,
+          ),
+        ]),
+      );
+
+      for (const candidate of artifactCandidates) {
         if (!fs.existsSync(candidate)) {
           continue;
         }

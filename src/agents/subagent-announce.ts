@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { loadConfig } from "../config/config.js";
@@ -24,6 +25,7 @@ import {
   queueEmbeddedPiMessage,
   waitForEmbeddedPiRunEnd,
 } from "./pi-embedded.js";
+import { assertSandboxPath } from "./sandbox-paths.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "./subagent-announce-queue.js";
 import { readLatestAssistantReply } from "./tools/agent-step.js";
 
@@ -373,6 +375,55 @@ export type SubagentRunOutcome = {
 
 export type SubagentAnnounceType = "subagent task" | "cron job";
 
+const ARTIFACT_ACTIVITY_GRACE_MS = 60_000;
+
+async function resolveLatestArtifactMtimeMs(artifactPaths?: string[]): Promise<number | null> {
+  if (!artifactPaths || artifactPaths.length === 0) {
+    return null;
+  }
+  const unique = Array.from(
+    new Set(
+      artifactPaths.map((value) => (typeof value === "string" ? value.trim() : "")).filter(Boolean),
+    ),
+  ).slice(0, 12);
+  if (unique.length === 0) {
+    return null;
+  }
+
+  const sandboxRoot = process.cwd();
+  let latest: number | null = null;
+  for (const raw of unique) {
+    const candidate = raw.trim();
+    if (!candidate || candidate.length > 1024) {
+      continue;
+    }
+    if (
+      path.isAbsolute(candidate) ||
+      /^[a-zA-Z]:[\\/]/.test(candidate) ||
+      candidate.startsWith("\\\\")
+    ) {
+      continue;
+    }
+
+    try {
+      const resolved = await assertSandboxPath({
+        filePath: candidate,
+        cwd: sandboxRoot,
+        root: sandboxRoot,
+      });
+      const stat = await fs.stat(resolved.resolved);
+      const mtimeMs = stat.mtimeMs;
+      if (Number.isFinite(mtimeMs) && (latest == null || mtimeMs > latest)) {
+        latest = mtimeMs;
+      }
+    } catch {
+      // Ignore missing/invalid artifact paths.
+    }
+  }
+
+  return latest;
+}
+
 export async function runSubagentAnnounceFlow(params: {
   childSessionKey: string;
   childRunId: string;
@@ -380,6 +431,7 @@ export async function runSubagentAnnounceFlow(params: {
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
   task: string;
+  artifactPaths?: string[];
   timeoutMs: number;
   cleanup: "delete" | "keep";
   roundOneReply?: string;
@@ -463,6 +515,19 @@ export async function runSubagentAnnounceFlow(params: {
         initialReply: reply,
         maxWaitMs: params.timeoutMs,
       });
+    }
+
+    if (!reply?.trim()) {
+      const latestArtifactMtimeMs = await resolveLatestArtifactMtimeMs(params.artifactPaths);
+      if (
+        latestArtifactMtimeMs != null &&
+        Date.now() - latestArtifactMtimeMs < ARTIFACT_ACTIVITY_GRACE_MS
+      ) {
+        // Prefer filesystem artifacts (e.g., reports/*) as the primary liveness signal for
+        // report-driven tasks where chat output may be delayed.
+        shouldDeleteChildSession = false;
+        return false;
+      }
     }
 
     if (!reply?.trim() && childSessionId && isEmbeddedPiRunActive(childSessionId)) {

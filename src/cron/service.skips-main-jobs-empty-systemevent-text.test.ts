@@ -131,6 +131,54 @@ describe("CronService", () => {
     await store.cleanup();
   });
 
+  it("clears existing timers when cron is disabled after being enabled", async () => {
+    const store = await makeStorePath();
+    const enqueueSystemEvent = vi.fn();
+    const requestHeartbeatNow = vi.fn();
+
+    const cron = new CronService({
+      storePath: store.storePath,
+      cronEnabled: true,
+      log: noopLogger,
+      enqueueSystemEvent,
+      requestHeartbeatNow,
+      runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" })),
+    });
+
+    await cron.start();
+
+    // Schedule a job far enough in the future that the scheduler arms a timer.
+    const atMs = Date.parse("2025-12-13T00:10:00.000Z");
+    await cron.add({
+      name: "disable clears timer",
+      enabled: true,
+      schedule: { kind: "at", at: new Date(atMs).toISOString() },
+      sessionTarget: "main",
+      wakeMode: "now",
+      payload: { kind: "systemEvent", text: "hello" },
+    });
+
+    const internal = cron as unknown as {
+      state: { deps: { cronEnabled: boolean }; timer: unknown };
+    };
+    expect(internal.state.timer).not.toBeNull();
+
+    // Simulate a runtime config toggle without calling cron.stop().
+    internal.state.deps.cronEnabled = false;
+    await cron.start();
+
+    expect(internal.state.timer).toBeNull();
+
+    // Even if time advances to the due time, nothing should execute.
+    vi.setSystemTime(new Date(atMs));
+    await vi.runOnlyPendingTimersAsync();
+    expect(enqueueSystemEvent).not.toHaveBeenCalled();
+    expect(requestHeartbeatNow).not.toHaveBeenCalled();
+
+    cron.stop();
+    await store.cleanup();
+  });
+
   it("status reports next wake when enabled", async () => {
     const store = await makeStorePath();
     const enqueueSystemEvent = vi.fn();

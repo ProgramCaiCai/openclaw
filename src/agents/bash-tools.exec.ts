@@ -29,6 +29,7 @@ import { enqueueSystemEvent } from "../infra/system-events.js";
 import { logInfo, logWarn } from "../logger.js";
 import { formatSpawnError, spawnWithFallback } from "../process/spawn-utils.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+import { stripAnsi } from "../terminal/ansi.js";
 import {
   type ProcessSession,
   type SessionStdin,
@@ -698,6 +699,19 @@ async function runExecProcess(opts: {
     }
   };
 
+  // eslint-disable-next-line no-control-regex
+  const PTY_CSI_REGEX = new RegExp("\\x1b\\[[0-?]*[ -/]*[@-~]", "g");
+  // eslint-disable-next-line no-control-regex
+  const PTY_OSC_REGEX = new RegExp("\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)", "g");
+
+  const sanitizePtyOutput = (text: string) => {
+    // Best-effort: strip terminal control sequences so persisted tool output is readable
+    // and can't spoof terminal-like UIs (cursor moves, erase line, etc.).
+    const withoutAnsi = stripAnsi(text);
+    const withoutCsi = withoutAnsi.replace(PTY_CSI_REGEX, "");
+    return withoutCsi.replace(PTY_OSC_REGEX, "");
+  };
+
   if (pty) {
     const cursorResponse = buildCursorPositionResponse();
     pty.onData((data) => {
@@ -708,7 +722,7 @@ async function runExecProcess(opts: {
           pty.write(cursorResponse);
         }
       }
-      handleStdout(cleaned);
+      handleStdout(sanitizePtyOutput(cleaned));
     });
   } else if (child) {
     child.stdout.on("data", handleStdout);

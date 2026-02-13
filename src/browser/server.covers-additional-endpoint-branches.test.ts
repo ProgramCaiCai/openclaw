@@ -1,6 +1,9 @@
 import { type AddressInfo, createServer } from "node:net";
 import { fetch as realFetch } from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isolateGatewayAuthEnvForBrowserServerTests } from "./server.test-env.js";
+
+isolateGatewayAuthEnvForBrowserServerTests();
 
 let testPort = 0;
 let _cdpBaseUrl = "";

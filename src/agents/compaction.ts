@@ -40,6 +40,7 @@ function sanitizeTokensAfterEstimate(tokensAfter: number, tokensBefore: number):
     return tokensBefore;
   }
   return tokensAfter;
+}
 
 function stripToolResultDetails(messages: AgentMessage[]): AgentMessage[] {
   let touched = false;

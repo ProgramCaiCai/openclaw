@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import crypto from "node:crypto";
+import path from "node:path";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import type { AnyAgentTool } from "./common.js";
 import { formatThinkingLevels, normalizeThinkLevel } from "../../auto-reply/thinking.js";
@@ -13,6 +14,7 @@ import {
 import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
 import { resolveAgentConfig } from "../agent-scope.js";
 import { AGENT_LANE_SUBAGENT } from "../lanes.js";
+import { resolveSandboxPath } from "../sandbox-paths.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import { buildSubagentSystemPrompt } from "../subagent-announce.js";
 import { registerSubagentRun } from "../subagent-registry.js";
@@ -25,6 +27,7 @@ import {
 
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
+  artifactPaths: Type.Optional(Type.Array(Type.String())),
   label: Type.Optional(Type.String()),
   agentId: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
@@ -93,6 +96,61 @@ export function createSessionsSpawnTool(opts?: {
       const thinkingOverrideRaw = readStringParam(params, "thinking");
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete" ? params.cleanup : "keep";
+      const artifactPaths = (() => {
+        const raw = (params as { artifactPaths?: unknown }).artifactPaths;
+        if (!Array.isArray(raw)) {
+          return undefined;
+        }
+
+        const sandboxRoot = process.cwd();
+        const seen = new Set<string>();
+        const out: string[] = [];
+
+        for (const value of raw) {
+          if (typeof value !== "string") {
+            continue;
+          }
+          const candidate = value.trim();
+          if (!candidate) {
+            continue;
+          }
+          if (candidate.length > 1024) {
+            continue;
+          }
+
+          // Only accept relative paths and keep them within the current sandbox root.
+          if (
+            path.isAbsolute(candidate) ||
+            /^[a-zA-Z]:[\\/]/.test(candidate) ||
+            candidate.startsWith("\\\\")
+          ) {
+            continue;
+          }
+
+          try {
+            const resolved = resolveSandboxPath({
+              filePath: candidate,
+              cwd: sandboxRoot,
+              root: sandboxRoot,
+            });
+            if (!resolved.relative) {
+              continue;
+            }
+            if (seen.has(resolved.relative)) {
+              continue;
+            }
+            seen.add(resolved.relative);
+            out.push(resolved.relative);
+            if (out.length >= 12) {
+              break;
+            }
+          } catch {
+            // Ignore escaping/invalid artifact paths.
+          }
+        }
+
+        return out.length > 0 ? out : undefined;
+      })();
       const requesterOrigin = normalizeDeliveryContext({
         channel: opts?.agentChannel,
         accountId: opts?.agentAccountId,
@@ -291,6 +349,7 @@ export function createSessionsSpawnTool(opts?: {
         requesterDisplayKey,
         task,
         cleanup,
+        artifactPaths,
         label: label || undefined,
         runTimeoutSeconds,
       });
