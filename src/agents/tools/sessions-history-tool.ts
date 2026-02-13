@@ -13,6 +13,7 @@ import {
   resolveInternalSessionKey,
   SessionListRow,
   stripToolMessages,
+  stripThinkingBlocks,
 } from "./sessions-helpers.js";
 
 const SessionsHistoryToolSchema = Type.Object({
@@ -259,7 +260,8 @@ export function createSessionsHistoryTool(opts?: {
       });
       const rawMessages = Array.isArray(result?.messages) ? result.messages : [];
       const selectedMessages = includeTools ? rawMessages : stripToolMessages(rawMessages);
-      const sanitizedMessages = selectedMessages.map((message) => sanitizeHistoryMessage(message));
+      const withoutThinking = stripThinkingBlocks(selectedMessages);
+      const sanitizedMessages = withoutThinking.map((message) => sanitizeHistoryMessage(message));
       const contentTruncated = sanitizedMessages.some((entry) => entry.truncated);
       const cappedMessages = capArrayByJsonBytes(
         sanitizedMessages.map((entry) => entry.message),
