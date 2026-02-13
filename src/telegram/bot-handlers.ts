@@ -119,52 +119,67 @@ export const registerTelegramHandlers = ({
       return !hasControlCommand(text, cfg, { botUsername: entry.botUsername });
     },
     onFlush: async (entries) => {
+      if (entries.length === 0) {
+        return;
+      }
+
       const resolveAll = () => {
         for (const entry of entries) {
           entry.done.resolve();
         }
       };
 
-      const last = entries.at(-1);
-      if (!last) {
-        resolveAll();
-        return;
-      }
-      if (entries.length === 1) {
-        await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
-        resolveAll();
-        return;
-      }
-
-      const combinedText = entries
-        .map((entry) => entry.msg.text ?? entry.msg.caption ?? "")
-        .filter(Boolean)
-        .join("\n");
-      if (!combinedText.trim()) {
-        resolveAll();
-        return;
-      }
-
-      const first = entries[0];
-      const baseCtx = first.ctx;
-      const getFile =
-        typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
-      const syntheticMessage: Message = {
-        ...first.msg,
-        text: combinedText,
-        caption: undefined,
-        caption_entities: undefined,
-        entities: undefined,
-        date: last.msg.date ?? first.msg.date,
+      const rejectAll = (err: unknown) => {
+        for (const entry of entries) {
+          entry.done.reject(err);
+        }
       };
-      const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
-      await processMessage(
-        { message: syntheticMessage, me: baseCtx.me, getFile },
-        [],
-        first.storeAllowFrom,
-        messageIdOverride ? { messageIdOverride } : undefined,
-      );
-      resolveAll();
+
+      try {
+        const last = entries.at(-1);
+        if (!last) {
+          resolveAll();
+          return;
+        }
+        if (entries.length === 1) {
+          await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
+          resolveAll();
+          return;
+        }
+
+        const combinedText = entries
+          .map((entry) => entry.msg.text ?? entry.msg.caption ?? "")
+          .filter(Boolean)
+          .join("\n");
+        if (!combinedText.trim()) {
+          resolveAll();
+          return;
+        }
+
+        const first = entries[0];
+        const baseCtx = first.ctx;
+        const getFile =
+          typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
+        const syntheticMessage: Message = {
+          ...first.msg,
+          text: combinedText,
+          caption: undefined,
+          caption_entities: undefined,
+          entities: undefined,
+          date: last.msg.date ?? first.msg.date,
+        };
+        const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
+        await processMessage(
+          { message: syntheticMessage, me: baseCtx.me, getFile },
+          [],
+          first.storeAllowFrom,
+          messageIdOverride ? { messageIdOverride } : undefined,
+        );
+        resolveAll();
+      } catch (err) {
+        rejectAll(err);
+        runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
+      }
     },
     onError: (err, entries) => {
       for (const entry of entries) {
@@ -979,15 +994,20 @@ export const registerTelegramHandlers = ({
         : null;
       const done = createDeferred();
       setTelegramUpdateCompletionDefer(ctx, done.promise);
-      await inboundDebouncer.enqueue({
-        ctx,
-        msg,
-        allMedia,
-        storeAllowFrom,
-        debounceKey,
-        botUsername: ctx.me?.username,
-        done,
-      });
+      try {
+        await inboundDebouncer.enqueue({
+          ctx,
+          msg,
+          allMedia,
+          storeAllowFrom,
+          debounceKey,
+          botUsername: ctx.me?.username,
+          done,
+        });
+      } catch (err) {
+        done.reject(err);
+        throw err;
+      }
     } catch (err) {
       runtime.error?.(danger(`handler failed: ${String(err)}`));
     }

@@ -291,30 +291,45 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       noteUpdateSeen(updateId);
     }
 
-    await next();
-
-    if (typeof updateId !== "number") {
-      return;
+    let nextError: unknown;
+    try {
+      await next();
+    } catch (err) {
+      nextError = err;
     }
 
-    const defer = getTelegramUpdateCompletionDefer(ctx);
-    if (defer) {
-      void defer
-        .then(() => {
+    if (typeof updateId === "number") {
+      if (nextError) {
+        runtime.error?.(
+          danger(
+            `telegram: update middleware failed (update_id=${updateId}): ${String(nextError)}`,
+          ),
+        );
+        markUpdateDone(updateId);
+      } else {
+        const defer = getTelegramUpdateCompletionDefer(ctx);
+        if (defer) {
+          void defer
+            .then(() => {
+              markUpdateDone(updateId);
+            })
+            .catch((err) => {
+              runtime.error?.(
+                danger(
+                  `telegram: deferred update processing failed (update_id=${updateId}): ${String(err)}`,
+                ),
+              );
+              markUpdateDone(updateId);
+            });
+        } else {
           markUpdateDone(updateId);
-        })
-        .catch((err) => {
-          runtime.error?.(
-            danger(
-              `telegram: deferred update processing failed (update_id=${updateId}): ${String(err)}`,
-            ),
-          );
-          markUpdateDone(updateId);
-        });
-      return;
+        }
+      }
     }
 
-    markUpdateDone(updateId);
+    if (nextError) {
+      throw nextError;
+    }
   });
 
   const historyLimit = Math.max(

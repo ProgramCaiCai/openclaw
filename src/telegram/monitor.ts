@@ -190,9 +190,20 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
       };
       opts.abortSignal?.addEventListener("abort", stopOnAbort, { once: true });
       try {
-        // runner.task() returns a promise that resolves when the runner stops
+        // runner.task() resolves when the runner stops (normally or unexpectedly).
         await runner.task();
-        return;
+
+        if (opts.abortSignal?.aborted) {
+          return;
+        }
+
+        restartAttempts += 1;
+        const delayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        (opts.runtime?.error ?? console.error)(
+          `Telegram polling stopped unexpectedly; restarting in ${formatDurationPrecise(delayMs)}.`,
+        );
+        await sleepWithAbort(delayMs, opts.abortSignal);
+        continue;
       } catch (err) {
         if (opts.abortSignal?.aborted) {
           throw err;
