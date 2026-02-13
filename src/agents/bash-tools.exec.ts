@@ -699,12 +699,17 @@ async function runExecProcess(opts: {
     }
   };
 
+  // eslint-disable-next-line no-control-regex
+  const PTY_CSI_REGEX = new RegExp("\\x1b\\[[0-?]*[ -/]*[@-~]", "g");
+  // eslint-disable-next-line no-control-regex
+  const PTY_OSC_REGEX = new RegExp("\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)", "g");
+
   const sanitizePtyOutput = (text: string) => {
     // Best-effort: strip terminal control sequences so persisted tool output is readable
     // and can't spoof terminal-like UIs (cursor moves, erase line, etc.).
     const withoutAnsi = stripAnsi(text);
-    const withoutCsi = withoutAnsi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-    return withoutCsi.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "");
+    const withoutCsi = withoutAnsi.replace(PTY_CSI_REGEX, "");
+    return withoutCsi.replace(PTY_OSC_REGEX, "");
   };
 
   if (pty) {
