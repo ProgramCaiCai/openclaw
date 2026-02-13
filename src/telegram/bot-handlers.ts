@@ -134,12 +134,6 @@ export const registerTelegramHandlers = ({
         }
       };
 
-      const rejectAll = (err: unknown) => {
-        for (const entry of entries) {
-          entry.done.reject(err);
-        }
-      };
-
       try {
         const last = entries.at(-1);
         if (!last) {
@@ -182,8 +176,27 @@ export const registerTelegramHandlers = ({
         );
         resolveAll();
       } catch (err) {
-        rejectAll(err);
-        runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
+        runtime.error?.(
+          danger(
+            `telegram debounce flush failed (combined); falling back per-entry: ${formatErrorMessage(err)}` +
+              ` (entries=${entries.length})`,
+          ),
+        );
+
+        for (const entry of entries) {
+          try {
+            await processMessage(entry.ctx, entry.allMedia, entry.storeAllowFrom);
+            entry.done.resolve();
+          } catch (entryErr) {
+            entry.done.reject(entryErr);
+            runtime.error?.(
+              danger(
+                `telegram debounce flush failed (entry=${resolveTelegramUpdateId(entry.ctx) ?? "unknown"}): ` +
+                  formatErrorMessage(entryErr),
+              ),
+            );
+          }
+        }
       }
     },
     onError: (err, entries) => {

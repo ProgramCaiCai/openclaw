@@ -28,13 +28,13 @@ import {
 import { normalizeProviderId } from "../model-selection.js";
 import { ensureOpenClawModelsJson } from "../models-config.js";
 import {
-  BILLING_ERROR_USER_MESSAGE,
+  formatBillingErrorMessage,
   classifyFailoverReason,
   formatAssistantErrorText,
   isAuthAssistantError,
   isBillingAssistantError,
   isCompactionFailureError,
-  isContextOverflowError,
+  isLikelyContextOverflowError,
   isFailoverAssistantError,
   isFailoverErrorMessage,
   parseImageSizeError,
@@ -45,7 +45,7 @@ import {
   type FailoverReason,
 } from "../pi-embedded-helpers.js";
 import { resolveCompactionReserveTokensFloor } from "../pi-settings.js";
-import { normalizeUsage, type UsageLike } from "../usage.js";
+import { derivePromptTokens, normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { compactEmbeddedPiSessionDirect } from "./compact.js";
 import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
@@ -82,6 +82,10 @@ type UsageAccumulator = {
   cacheRead: number;
   cacheWrite: number;
   total: number;
+  /** Cache fields from the most recent API call (not accumulated). */
+  lastCacheRead: number;
+  lastCacheWrite: number;
+  lastInput: number;
 };
 
 const createUsageAccumulator = (): UsageAccumulator => ({
@@ -90,6 +94,9 @@ const createUsageAccumulator = (): UsageAccumulator => ({
   cacheRead: 0,
   cacheWrite: 0,
   total: 0,
+  lastCacheRead: 0,
+  lastCacheWrite: 0,
+  lastInput: 0,
 });
 
 const hasUsageValues = (
@@ -117,6 +124,12 @@ const mergeUsageIntoAccumulator = (
     usage.total ??
     (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
   target.total = Math.max(target.total, usageTotal);
+  // Track the most recent API call's cache fields for accurate context-size reporting.
+  // Accumulated cache totals inflate context size when there are multiple tool-call round-trips,
+  // since each call reports cacheRead ≈ current_context_size.
+  target.lastCacheRead = usage.cacheRead ?? 0;
+  target.lastCacheWrite = usage.cacheWrite ?? 0;
+  target.lastInput = usage.input ?? 0;
 };
 
 const toNormalizedUsage = (usage: UsageAccumulator) => {
@@ -129,13 +142,21 @@ const toNormalizedUsage = (usage: UsageAccumulator) => {
   if (!hasUsage) {
     return undefined;
   }
-  const derivedTotal = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  // Use the LAST API call's cache fields for context-size calculation.
+  // The accumulated cacheRead/cacheWrite inflate context size because each tool-call
+  // round-trip reports cacheRead ≈ current_context_size, and summing N calls gives
+  // N × context_size which gets clamped to contextWindow (e.g. 200k).
+  // See: https://github.com/openclaw/openclaw/issues/13698
+  //
+  // We use lastInput/lastCacheRead/lastCacheWrite (from the most recent API call) for
+  // cache-related fields, but keep accumulated output (total generated text this turn).
+  const lastPromptTokens = usage.lastInput + usage.lastCacheRead + usage.lastCacheWrite;
   return {
-    input: usage.input || undefined,
+    input: usage.lastInput || undefined,
     output: usage.output || undefined,
-    cacheRead: usage.cacheRead || undefined,
-    cacheWrite: usage.cacheWrite || undefined,
-    total: usage.total || derivedTotal || undefined,
+    cacheRead: usage.lastCacheRead || undefined,
+    cacheWrite: usage.lastCacheWrite || undefined,
+    total: lastPromptTokens + usage.output || undefined,
   };
 };
 
@@ -392,6 +413,7 @@ export async function runEmbeddedPiAgent(
       let overflowCompactionAttempts = 0;
       let toolResultTruncationAttempted = false;
       const usageAccumulator = createUsageAccumulator();
+      let lastRunPromptUsage: ReturnType<typeof normalizeUsage> | undefined;
       let autoCompactionCount = 0;
       try {
         while (true) {
@@ -453,21 +475,25 @@ export async function runEmbeddedPiAgent(
             onToolResult: params.onToolResult,
             onAgentEvent: params.onAgentEvent,
             extraSystemPrompt: params.extraSystemPrompt,
+            inputProvenance: params.inputProvenance,
             streamParams: params.streamParams,
             ownerNumbers: params.ownerNumbers,
             enforceFinalTag: params.enforceFinalTag,
           });
 
           const { aborted, promptError, timedOut, sessionIdUsed, lastAssistant } = attempt;
-          mergeUsageIntoAccumulator(
-            usageAccumulator,
-            attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike),
-          );
+          const lastAssistantUsage = normalizeUsage(lastAssistant?.usage as UsageLike);
+          const attemptUsage = attempt.attemptUsage ?? lastAssistantUsage;
+          mergeUsageIntoAccumulator(usageAccumulator, attemptUsage);
+          // Keep prompt size from the latest model call so session totalTokens
+          // reflects current context usage, not accumulated tool-loop usage.
+          lastRunPromptUsage = lastAssistantUsage ?? attemptUsage;
           autoCompactionCount += Math.max(0, attempt.compactionCount ?? 0);
           const formattedAssistantErrorText = lastAssistant
             ? formatAssistantErrorText(lastAssistant, {
                 cfg: params.config,
                 sessionKey: params.sessionKey ?? params.sessionId,
+                provider,
               })
             : undefined;
           const assistantErrorText =
@@ -479,14 +505,14 @@ export async function runEmbeddedPiAgent(
             ? (() => {
                 if (promptError) {
                   const errorText = describeUnknownError(promptError);
-                  if (isContextOverflowError(errorText)) {
+                  if (isLikelyContextOverflowError(errorText)) {
                     return { text: errorText, source: "promptError" as const };
                   }
                   // Prompt submission failed with a non-overflow error. Do not
                   // inspect prior assistant errors from history for this attempt.
                   return null;
                 }
-                if (assistantErrorText && isContextOverflowError(assistantErrorText)) {
+                if (assistantErrorText && isLikelyContextOverflowError(assistantErrorText)) {
                   return { text: assistantErrorText, source: "assistantError" as const };
                 }
                 return null;
@@ -778,6 +804,7 @@ export async function runEmbeddedPiAgent(
                   ? formatAssistantErrorText(lastAssistant, {
                       cfg: params.config,
                       sessionKey: params.sessionKey ?? params.sessionId,
+                      provider,
                     })
                   : undefined) ||
                 lastAssistant?.errorMessage?.trim() ||
@@ -786,7 +813,7 @@ export async function runEmbeddedPiAgent(
                   : rateLimitFailure
                     ? "LLM request rate limited."
                     : billingFailure
-                      ? BILLING_ERROR_USER_MESSAGE
+                      ? formatBillingErrorMessage(provider)
                       : authFailure
                         ? "LLM request unauthorized."
                         : "LLM request failed.");
@@ -810,14 +837,14 @@ export async function runEmbeddedPiAgent(
           // built-in compaction kicks in.
           const promptUsage =
             attempt.attemptUsage ?? normalizeUsage(lastAssistant?.usage as UsageLike);
-          const promptTokens = promptUsage?.input ?? 0;
+          const proactivePromptTokens = promptUsage?.input ?? 0;
           const contextWindowTokens = ctxInfo.tokens;
           const reserveTokens = resolveCompactionReserveTokensFloor(params.config);
           const sdkCompactionPoint = Math.max(0, contextWindowTokens - reserveTokens);
           const proactiveThreshold = Math.floor(sdkCompactionPoint * 0.85);
-          if (!aborted && promptTokens >= proactiveThreshold) {
+          if (!aborted && proactivePromptTokens >= proactiveThreshold) {
             log.info(
-              `[near-limit-compaction] promptTokens=${promptTokens} threshold=${proactiveThreshold} ctx=${contextWindowTokens} reserve=${reserveTokens}; attempting best-effort compaction`,
+              `[near-limit-compaction] promptTokens=${proactivePromptTokens} threshold=${proactiveThreshold} ctx=${contextWindowTokens} reserve=${reserveTokens}; attempting best-effort compaction`,
             );
             try {
               const compactResult = await compactEmbeddedPiSessionDirect({
@@ -898,11 +925,20 @@ export async function runEmbeddedPiAgent(
           }
 
           const usage = toNormalizedUsage(usageAccumulator);
+          // Extract the last individual API call's usage for context-window
+          // utilization display. The accumulated `usage` sums input tokens
+          // across all calls (tool-use loops, compaction retries), which
+          // overstates the actual context size. `lastCallUsage` reflects only
+          // the final call, giving an accurate snapshot of current context.
+          const lastCallUsage = normalizeUsage(lastAssistant?.usage as UsageLike);
+          const promptTokens = derivePromptTokens(lastRunPromptUsage);
           const agentMeta: EmbeddedPiAgentMeta = {
             sessionId: sessionIdUsed,
             provider: lastAssistant?.provider ?? provider,
             model: lastAssistant?.model ?? model.id,
             usage,
+            lastCallUsage: lastCallUsage ?? undefined,
+            promptTokens,
             compactionCount: autoCompactionCount > 0 ? autoCompactionCount : undefined,
           };
 
@@ -913,6 +949,7 @@ export async function runEmbeddedPiAgent(
             lastToolError: attempt.lastToolError,
             config: params.config,
             sessionKey: params.sessionKey ?? params.sessionId,
+            provider,
             verboseLevel: params.verboseLevel,
             reasoningLevel: params.reasoningLevel,
             toolResultFormat: resolvedToolResultFormat,

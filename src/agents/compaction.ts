@@ -40,10 +40,30 @@ function sanitizeTokensAfterEstimate(tokensAfter: number, tokensBefore: number):
     return tokensBefore;
   }
   return tokensAfter;
+
+function stripToolResultDetails(messages: AgentMessage[]): AgentMessage[] {
+  let touched = false;
+  const out: AgentMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object" || (msg as { role?: unknown }).role !== "toolResult") {
+      out.push(msg);
+      continue;
+    }
+    if (!("details" in msg)) {
+      out.push(msg);
+      continue;
+    }
+    const { details: _details, ...rest } = msg as unknown as Record<string, unknown>;
+    touched = true;
+    out.push(rest as unknown as AgentMessage);
+  }
+  return touched ? out : messages;
 }
 
 export function estimateMessagesTokens(messages: AgentMessage[]): number {
-  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+  // SECURITY: toolResult.details can contain untrusted/verbose payloads; never include in LLM-facing compaction.
+  const safe = stripToolResultDetails(messages);
+  return safe.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
 
 function normalizeParts(parts: number, messageCount: number): number {
@@ -180,7 +200,9 @@ async function summarizeChunks(params: {
     return params.previousSummary ?? DEFAULT_SUMMARY_FALLBACK;
   }
 
-  const chunks = chunkMessagesByMaxTokens(params.messages, params.maxChunkTokens);
+  // SECURITY: never feed toolResult.details into summarization prompts.
+  const safeMessages = stripToolResultDetails(params.messages);
+  const chunks = chunkMessagesByMaxTokens(safeMessages, params.maxChunkTokens);
   let summary = params.previousSummary;
 
   for (const chunk of chunks) {

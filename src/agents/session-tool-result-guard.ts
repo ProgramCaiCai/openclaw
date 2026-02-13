@@ -176,6 +176,10 @@ export function installSessionToolResultGuard(
   sessionManager: SessionManager,
   opts?: {
     /**
+     * Optional transform applied to any message before persistence.
+     */
+    transformMessageForPersistence?: (message: AgentMessage) => AgentMessage;
+    /**
      * Optional, synchronous transform applied to toolResult messages *before* they are
      * persisted to the session transcript.
      */
@@ -195,6 +199,10 @@ export function installSessionToolResultGuard(
 } {
   const originalAppend = sessionManager.appendMessage.bind(sessionManager);
   const pending = new Map<string, string | undefined>();
+  const persistMessage = (message: AgentMessage) => {
+    const transformer = opts?.transformMessageForPersistence;
+    return transformer ? transformer(message) : message;
+  };
 
   const persistToolResult = (
     message: AgentMessage,
@@ -213,7 +221,7 @@ export function installSessionToolResultGuard(
     if (allowSyntheticToolResults) {
       for (const [id, name] of pending.entries()) {
         const synthetic = makeMissingToolResult({ toolCallId: id, toolName: name });
-        const transformed = persistToolResult(synthetic, {
+        const transformed = persistToolResult(persistMessage(synthetic), {
           toolCallId: id,
           toolName: name,
           isSynthetic: true,
@@ -249,7 +257,9 @@ export function installSessionToolResultGuard(
       }
       // Apply the hard cap before + after hook transforms so persisted tool results
       // always conform to the system limits.
-      const preCapped = hardCapToolResultMessageForPersistence(nextMessage, { toolName });
+      const preCapped = hardCapToolResultMessageForPersistence(persistMessage(nextMessage), {
+        toolName,
+      });
       const transformed = persistToolResult(preCapped, {
         toolCallId: id ?? undefined,
         toolName,
@@ -275,7 +285,7 @@ export function installSessionToolResultGuard(
       }
     }
 
-    const result = originalAppend(nextMessage as never);
+    const result = originalAppend(persistMessage(nextMessage) as never);
 
     const sessionFile = (
       sessionManager as { getSessionFile?: () => string | null }
