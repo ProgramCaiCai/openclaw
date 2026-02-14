@@ -13,6 +13,8 @@ import {
   TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
 } from "./tool-output-hard-cap.js";
 
+type ToolCall = { id: string; name?: string };
+
 type ToolOutputCaps = { maxBytes: number; maxLines: number };
 
 function resolveToolOutputCaps(toolName?: string | null): ToolOutputCaps {
@@ -216,12 +218,7 @@ export function installSessionToolResultGuard(
         });
         // Apply the hard cap *after* any hook transforms so plugins can't re-inflate tool results.
         const capped = hardCapToolResultMessageForPersistence(transformed, { toolName: name });
-        const result = hookedAppend(capped);
-        // Only clear the pending entry if the message was actually persisted
-        // (not blocked by beforeMessageWriteHook).
-        if (result !== undefined) {
-          pending.delete(id);
-        }
+        originalAppend(capped as never);
       }
     } else {
       pending.clear();
@@ -262,7 +259,18 @@ export function installSessionToolResultGuard(
       if (id && result !== undefined) {
         pending.delete(id);
       }
-      return result;
+      // Apply the hard cap before + after hook transforms so persisted tool results
+      // always conform to the system limits.
+      const preCapped = hardCapToolResultMessageForPersistence(persistMessage(nextMessage), {
+        toolName,
+      });
+      const transformed = persistToolResult(preCapped, {
+        toolCallId: id ?? undefined,
+        toolName,
+        isSynthetic: false,
+      });
+      const postCapped = hardCapToolResultMessageForPersistence(transformed, { toolName });
+      return originalAppend(postCapped as never);
     }
 
     const toolCalls =

@@ -24,11 +24,15 @@ describe("web_fetch excludeFromContext", () => {
   const priorFetch = global.fetch;
 
   beforeEach(() => {
-    const lookupMock = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
-    const resolvePinnedHostnameWithPolicy = ssrf.resolvePinnedHostnameWithPolicy;
-    vi.spyOn(ssrf, "resolvePinnedHostnameWithPolicy").mockImplementation((hostname, params) =>
-      resolvePinnedHostnameWithPolicy(hostname, { ...params, lookupFn: lookupMock }),
-    );
+    vi.spyOn(ssrf, "resolvePinnedHostname").mockImplementation(async (hostname) => {
+      const normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
+      const addresses = ["93.184.216.34"];
+      return {
+        hostname: normalized,
+        addresses,
+        lookup: ssrf.createPinnedLookup({ hostname: normalized, addresses }),
+      };
+    });
   });
 
   afterEach(() => {
@@ -98,6 +102,6 @@ describe("web_fetch excludeFromContext", () => {
     expect(details.outputFile).toBeTruthy();
 
     const artifactContent = fs.readFileSync(details.outputFile!, "utf-8");
-    expect(artifactContent.length).toBeGreaterThanOrEqual(4_000);
+    expect(artifactContent.length).toBeGreaterThanOrEqual(12_000);
   });
 });

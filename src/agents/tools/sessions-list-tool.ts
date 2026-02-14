@@ -28,6 +28,11 @@ const SessionsListToolSchema = Type.Object({
 
 const SESSIONS_LIST_LIMIT_CAP = 100;
 const SESSIONS_LIST_MESSAGE_LIMIT_CAP = 10;
+
+function resolveSandboxSessionToolsVisibility(cfg: ReturnType<typeof loadConfig>) {
+  return cfg.agents?.defaults?.sandbox?.sessionToolsVisibility ?? "spawned";
+}
+
 export function createSessionsListTool(opts?: {
   agentSessionKey?: string;
   sandboxed?: boolean;

@@ -95,6 +95,11 @@ describe("config pruning defaults", () => {
     });
   });
 
+      const effective = computeEffectiveSettings(cfg.agents?.defaults?.contextPruning);
+      expect(effective?.ttlMs).toBe(DEFAULT_CONTEXT_PRUNING_SETTINGS.ttlMs);
+    });
+  });
+
   it("does not override explicit contextPruning mode", async () => {
     await withTempHome(async (home) => {
       await writeConfigForTest(home, { agents: { defaults: { contextPruning: { mode: "off" } } } });

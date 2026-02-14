@@ -15,10 +15,6 @@ vi.mock("../config/config.js", async (importOriginal) => {
         scope: "per-sender",
         agentToAgent: { maxPingPongTurns: 2 },
       },
-      tools: {
-        sessions: { visibility: "all" },
-        agentToAgent: { enabled: true, allow: ["*"] },
-      },
     }),
     resolveGatewayPort: () => 18789,
   };
@@ -76,6 +72,7 @@ describe("sessions tools", () => {
     expect(schemaProp("sessions_send", "timeoutSeconds").type).toBe("number");
     expect(schemaProp("sessions_spawn", "thinking").type).toBe("string");
     expect(schemaProp("sessions_spawn", "runTimeoutSeconds").type).toBe("number");
+    expect(schemaProp("sessions_spawn", "timeoutSeconds").type).toBe("number");
   });
 
   it("sessions_list filters kinds and includes messages", async () => {

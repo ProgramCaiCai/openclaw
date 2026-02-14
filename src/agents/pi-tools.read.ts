@@ -1,6 +1,8 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import type { AnyAgentTool } from "./pi-tools.types.js";
+import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import { detectMime } from "../media/mime.js";
 import { sniffMimeFromBase64 } from "../media/sniff-mime-from-base64.js";
 import type { ImageSanitizationLimits } from "./image-sanitization.js";
@@ -398,11 +400,7 @@ export function createOpenClawReadTool(base: AnyAgentTool, opts?: ReadToolOption
       const result = await base.execute(toolCallId, baseParams, signal);
       const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
       const normalizedResult = await normalizeReadImageResult(result, filePath);
-      const sanitized = await sanitizeToolResultImages(
-        normalizedResult,
-        `read:${filePath}`,
-        opts?.imageSanitization,
-      );
+      const sanitized = await sanitizeToolResultImages(normalizedResult, `read:${filePath}`);
 
       if (!excludeFromContext) {
         return sanitized;

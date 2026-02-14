@@ -1,6 +1,6 @@
 import type { TextContent } from "@mariozechner/pi-ai";
-import { sliceUtf16Safe } from "../utils.js";
 import type { AnyAgentTool } from "./pi-tools.types.js";
+import { sliceUtf16Safe } from "../utils.js";
 
 export type ToolOutputHardLimits = {
   maxBytesUtf8: number;
