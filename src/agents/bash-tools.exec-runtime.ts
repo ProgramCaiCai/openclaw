@@ -120,6 +120,12 @@ export const execSchema = Type.Object({
         "Run in a pseudo-terminal (PTY) when available (TTY-required CLIs, coding agents)",
     }),
   ),
+  excludeFromContext: Type.Optional(
+    Type.Boolean({
+      description:
+        "When true, save full output to an artifact file and return only a short preview to keep the session context small.",
+    }),
+  ),
   elevated: Type.Optional(
     Type.Boolean({
       description: "Run on the host with elevated permissions (if allowed)",
