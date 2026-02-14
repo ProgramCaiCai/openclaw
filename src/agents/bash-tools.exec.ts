@@ -58,6 +58,12 @@ import {
   resolveWorkdir,
   truncateMiddle,
 } from "./bash-tools.shared.js";
+import {
+  EXCLUDED_CONTEXT_PREVIEW_CHARS,
+  formatExcludedFromContextHeader,
+  tailText,
+  writeToolOutputArtifact,
+} from "./tool-output-artifacts.js";
 import { callGatewayTool } from "./tools/gateway.js";
 import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
 
@@ -106,6 +112,9 @@ export type ExecToolDetails =
       durationMs: number;
       aggregated: string;
       cwd?: string;
+      /** When present, full output was saved outside the toolResult content/details. */
+      outputFile?: string;
+      excludedFromContext?: boolean;
     }
   | {
       status: "approval-pending";
@@ -151,7 +160,7 @@ export function createExecTool(
     description:
       "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents).",
     parameters: execSchema,
-    execute: async (_toolCallId, args, signal, onUpdate) => {
+    execute: async (toolCallId, args, signal, onUpdate) => {
       const params = args as {
         command: string;
         workdir?: string;
@@ -160,6 +169,7 @@ export function createExecTool(
         background?: boolean;
         timeout?: number;
         pty?: boolean;
+        excludeFromContext?: boolean;
         elevated?: boolean;
         host?: string;
         security?: string;
@@ -959,7 +969,7 @@ export function createExecTool(
         }
 
         run.promise
-          .then((outcome) => {
+          .then(async (outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
@@ -970,11 +980,46 @@ export function createExecTool(
               reject(new Error(outcome.reason ?? "Command failed."));
               return;
             }
+            const warningText = getWarningText();
+
+            if (params.excludeFromContext) {
+              const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
+              const outputFile = await writeToolOutputArtifact({
+                preferredCwd: defaults?.cwd ?? run.session.cwd,
+                toolName: "exec",
+                toolCallId: artifactId,
+                output: outcome.aggregated ?? "",
+                extension: "log",
+              });
+              const preview = tailText(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
+              const header = formatExcludedFromContextHeader({ toolName: "exec", outputFile });
+              const body = preview || "(no output)";
+
+              resolve({
+                content: [
+                  {
+                    type: "text",
+                    text: `${warningText}${header}\n\n${body}`,
+                  },
+                ],
+                details: {
+                  status: "completed",
+                  exitCode: outcome.exitCode ?? 0,
+                  durationMs: outcome.durationMs,
+                  aggregated: body,
+                  cwd: run.session.cwd,
+                  outputFile: outputFile ?? undefined,
+                  excludedFromContext: true,
+                },
+              });
+              return;
+            }
+
             resolve({
               content: [
                 {
                   type: "text",
-                  text: `${getWarningText()}${outcome.aggregated || "(no output)"}`,
+                  text: `${warningText}${outcome.aggregated || "(no output)"}`,
                 },
               ],
               details: {

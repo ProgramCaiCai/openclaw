@@ -20,6 +20,24 @@ const CANVAS_ACTIONS = [
 ] as const;
 
 const CANVAS_SNAPSHOT_FORMATS = ["png", "jpg", "jpeg"] as const;
+const CANVAS_EVAL_RESULT_MAX_CHARS = 8_000;
+const CANVAS_EVAL_TRUNCATION_SUFFIX = "\n...(truncated)...";
+
+function truncateCanvasEvalResult(result: string): {
+  text: string;
+  truncated: boolean;
+  rawLength: number;
+} {
+  const rawLength = result.length;
+  if (rawLength <= CANVAS_EVAL_RESULT_MAX_CHARS) {
+    return { text: result, truncated: false, rawLength };
+  }
+  return {
+    text: `${result.slice(0, CANVAS_EVAL_RESULT_MAX_CHARS)}${CANVAS_EVAL_TRUNCATION_SUFFIX}`,
+    truncated: true,
+    rawLength,
+  };
+}
 
 // Flattened schema: runtime validates per-action requirements.
 const CanvasToolSchema = Type.Object({
@@ -118,9 +136,15 @@ export function createCanvasTool(): AnyAgentTool {
           };
           const result = raw?.payload?.result;
           if (result) {
+            const bounded = truncateCanvasEvalResult(result);
             return {
-              content: [{ type: "text", text: result }],
-              details: { result },
+              content: [{ type: "text", text: bounded.text }],
+              details: {
+                result: bounded.text,
+                truncated: bounded.truncated,
+                rawLength: bounded.rawLength,
+                maxChars: CANVAS_EVAL_RESULT_MAX_CHARS,
+              },
             };
           }
           return jsonResult({ ok: true });
