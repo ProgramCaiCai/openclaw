@@ -30,6 +30,7 @@ const log = createSubsystemLogger("memory");
 
 const SNIPPET_HEADER_RE = /@@\s*-([0-9]+),([0-9]+)/;
 const SEARCH_PENDING_UPDATE_WAIT_MS = 500;
+const STARTUP_BOOTSTRAP_WAIT_MS = 100;
 
 type CollectionRoot = {
   path: string;
@@ -80,8 +81,10 @@ export class QmdMemoryManager implements MemorySearchManager {
   private readonly sessionExporter: SessionExporterConfig | null;
   private updateTimer: NodeJS.Timeout | null = null;
   private pendingUpdate: Promise<void> | null = null;
+  private pendingUpdateReason: string | null = null;
   private queuedForcedUpdate: Promise<void> | null = null;
   private queuedForcedRuns = 0;
+  private collectionsReady = false;
   private closed = false;
   private db: SqliteDatabase | null = null;
   private lastUpdateAt: number | null = null;
@@ -133,6 +136,7 @@ export class QmdMemoryManager implements MemorySearchManager {
         },
       ];
     }
+    this.bootstrapCollections();
   }
 
   private async initialize(): Promise<void> {
@@ -148,10 +152,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     // isolated while models are shared.
     await this.symlinkSharedModels();
 
-    this.bootstrapCollections();
-    await this.ensureCollections();
-
-    if (this.qmd.update.onBoot) {
+    const bootstrapAndMaybeBootSync = async () => {
+      await this.ensureCollections();
+      this.collectionsReady = true;
+      if (!this.qmd.update.onBoot) {
+        return;
+      }
       const bootRun = this.runUpdate("boot", true);
       if (this.qmd.update.waitForBootSync) {
         await bootRun.catch((err) => {
@@ -162,7 +168,21 @@ export class QmdMemoryManager implements MemorySearchManager {
           log.warn(`qmd boot update failed: ${String(err)}`);
         });
       }
+    };
+
+    const bootstrap = bootstrapAndMaybeBootSync().catch((err) => {
+      log.warn(`qmd bootstrap failed: ${String(err)}`);
+    });
+
+    if (this.qmd.update.waitForBootSync) {
+      await bootstrap;
+    } else {
+      await Promise.race([
+        bootstrap,
+        new Promise<void>((resolve) => setTimeout(resolve, STARTUP_BOOTSTRAP_WAIT_MS)),
+      ]);
     }
+
     if (this.qmd.update.intervalMs > 0) {
       this.updateTimer = setInterval(() => {
         void this.runUpdate("interval").catch((err) => {
@@ -271,6 +291,7 @@ export class QmdMemoryManager implements MemorySearchManager {
       String(limit),
       ...collectionFilterArgs,
     ];
+    const queryBaseArgsWithoutCollections = ["query", trimmed, "--json", "-n", String(limit)];
 
     const runQuery = async (): Promise<{ stdout: string; stderr: string }> => {
       try {
@@ -299,6 +320,18 @@ export class QmdMemoryManager implements MemorySearchManager {
           QmdMemoryManager.noExpandSupported = false;
           const result = await this.runQmd(queryBaseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
           return result;
+        }
+        if (
+          !this.collectionsReady &&
+          /unknown collection|collection .* does not exist|invalid value.*-c/i.test(msg)
+        ) {
+          log.info(
+            "qmd collections are still bootstrapping, retrying query without collection filters",
+          );
+          const fallbackArgs = QmdMemoryManager.noExpandSupported
+            ? ["query", trimmed, "--json", "--no-expand", "-n", String(limit)]
+            : queryBaseArgsWithoutCollections;
+          return await this.runQmd(fallbackArgs, { timeoutMs: this.qmd.limits.timeoutMs });
         }
         log.warn(`qmd query failed: ${msg}`);
         throw err instanceof Error ? err : new Error(msg);
@@ -503,10 +536,15 @@ export class QmdMemoryManager implements MemorySearchManager {
       this.lastUpdateAt = Date.now();
       this.docPathCache.clear();
     };
-    this.pendingUpdate = run().finally(() => {
-      this.pendingUpdate = null;
+    const pending = run().finally(() => {
+      if (this.pendingUpdate === pending) {
+        this.pendingUpdate = null;
+        this.pendingUpdateReason = null;
+      }
     });
-    await this.pendingUpdate;
+    this.pendingUpdate = pending;
+    this.pendingUpdateReason = reason;
+    await pending;
   }
 
   private enqueueForcedUpdate(reason: string): Promise<void> {
@@ -1034,6 +1072,10 @@ export class QmdMemoryManager implements MemorySearchManager {
   private async waitForPendingUpdateBeforeSearch(): Promise<void> {
     const pending = this.pendingUpdate;
     if (!pending) {
+      return;
+    }
+    // Keep first-query latency low while boot sync refreshes in the background.
+    if (this.pendingUpdateReason === "boot") {
       return;
     }
     await Promise.race([

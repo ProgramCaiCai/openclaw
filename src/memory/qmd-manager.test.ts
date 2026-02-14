@@ -170,6 +170,47 @@ describe("QmdMemoryManager", () => {
     await manager?.close();
   });
 
+  it("does not block create on collection bootstrap when waitForBootSync is false", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: {
+            interval: "0s",
+            debounceMs: 60_000,
+            onBoot: false,
+            commandTimeoutMs: 600,
+          },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    let releaseCollectionList: (() => void) | null = null;
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "collection" && args[1] === "list") {
+        const child = createMockChild({ autoClose: false });
+        releaseCollectionList = () => child.closeWith(0);
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId });
+    const createPromise = QmdMemoryManager.create({ cfg, agentId, resolved });
+    const race = await Promise.race([
+      createPromise.then(() => "created" as const),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 180)),
+    ]);
+    expect(race).toBe("created");
+
+    releaseCollectionList?.();
+    const manager = await createPromise;
+    await manager?.close();
+  });
+
   it("can be configured to block startup on boot update", async () => {
     cfg = {
       ...cfg,
@@ -212,6 +253,63 @@ describe("QmdMemoryManager", () => {
     releaseUpdate();
     const manager = await createPromise;
     await manager?.close();
+  });
+
+  it("does not block search while boot update is in flight", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: {
+            interval: "0s",
+            debounceMs: 60_000,
+            onBoot: true,
+            updateTimeoutMs: 300,
+          },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    let releaseUpdate: (() => void) | null = null;
+    let updateStarted = false;
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "update") {
+        updateStarted = true;
+        const child = createMockChild({ autoClose: false });
+        releaseUpdate = () => child.closeWith(0);
+        return child;
+      }
+      if (args[0] === "query") {
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          child.stdout.emit("data", "[]");
+          child.closeWith(0);
+        }, 0);
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId });
+    const manager = await QmdMemoryManager.create({ cfg, agentId, resolved });
+    expect(manager).toBeTruthy();
+    if (!manager) {
+      throw new Error("manager missing");
+    }
+
+    await waitForCondition(() => updateStarted, 120);
+
+    const race = await Promise.race([
+      manager.search("test", { sessionKey: "agent:main:slack:dm:u123" }).then(() => "search"),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 150)),
+    ]);
+    expect(race).toBe("search");
+
+    releaseUpdate?.();
+    await manager.close();
   });
 
   it("times out collection bootstrap commands", async () => {
