@@ -111,6 +111,7 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.media.image.scope": "Image Understanding Scope",
   "tools.media.models": "Media Understanding Shared Models",
   "tools.media.concurrency": "Media Understanding Concurrency",
+  "tools.media.localRoots": "Media Local File Roots",
   "tools.media.audio.enabled": "Enable Audio Understanding",
   "tools.media.audio.maxBytes": "Audio Understanding Max Bytes",
   "tools.media.audio.maxChars": "Audio Understanding Max Chars",

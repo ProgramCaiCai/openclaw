@@ -131,6 +131,8 @@ export type MediaToolsConfig = {
   models?: MediaUnderstandingModelConfig[];
   /** Max concurrent media understanding runs. */
   concurrency?: number;
+  /** Extra local directories allowed for outbound media file paths. */
+  localRoots?: string[];
   image?: MediaUnderstandingConfig;
   audio?: MediaUnderstandingConfig;
   video?: MediaUnderstandingConfig;

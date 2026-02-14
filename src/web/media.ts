@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
+import { loadConfig } from "../config/config.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
 import { type MediaKind, maxBytesForKind, mediaKindFromMime } from "../media/constants.js";
 import { fetchRemoteMedia } from "../media/fetch.js";
@@ -30,13 +31,30 @@ type WebMediaOptions = {
   localRoots?: string[] | "any";
 };
 
+function getConfiguredLocalRoots(): string[] {
+  try {
+    const configured = loadConfig().tools?.media?.localRoots;
+    if (!Array.isArray(configured)) {
+      return [];
+    }
+    const roots = configured
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => resolveUserPath(entry));
+    return [...new Set(roots)];
+  } catch {
+    return [];
+  }
+}
+
 function getDefaultLocalRoots(): string[] {
   const home = os.homedir();
-  return [
+  const defaults = [
     os.tmpdir(),
     path.join(home, ".openclaw", "media"),
     path.join(home, ".openclaw", "agents"),
   ];
+  const configured = getConfiguredLocalRoots();
+  return [...new Set([...defaults, ...configured])];
 }
 
 async function assertLocalMediaAllowed(
