@@ -2627,17 +2627,21 @@ public struct DevicePairResolvedEvent: Codable, Sendable {
 public struct ChatHistoryParams: Codable, Sendable {
     public let sessionkey: String
     public let limit: Int?
+    public let safelimit: Bool?
 
     public init(
         sessionkey: String,
-        limit: Int?
+        limit: Int?,
+        safelimit: Bool?
     ) {
         self.sessionkey = sessionkey
         self.limit = limit
+        self.safelimit = safelimit
     }
     private enum CodingKeys: String, CodingKey {
         case sessionkey = "sessionKey"
         case limit
+        case safelimit = "safeLimit"
     }
 }
 
