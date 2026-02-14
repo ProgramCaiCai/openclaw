@@ -23,7 +23,11 @@ import {
 import { requireNodeSqlite } from "./sqlite.js";
 
 type SqliteDatabase = import("node:sqlite").DatabaseSync;
-import type { ResolvedMemoryBackendConfig, ResolvedQmdConfig } from "./backend-config.js";
+import type {
+  ResolvedMemoryBackendConfig,
+  ResolvedQmdCollection,
+  ResolvedQmdConfig,
+} from "./backend-config.js";
 import { parseQmdQueryJson } from "./qmd-query-parser.js";
 
 const log = createSubsystemLogger("memory");
@@ -232,33 +236,56 @@ export class QmdMemoryManager implements MemorySearchManager {
       if (existing.has(collection.name)) {
         continue;
       }
-      try {
-        await this.runQmd(
-          [
-            "collection",
-            "add",
-            collection.path,
-            "--name",
-            collection.name,
-            "--mask",
-            collection.pattern,
-          ],
-          {
-            timeoutMs: this.qmd.update.commandTimeoutMs,
-          },
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        // Idempotency: qmd exits non-zero if the collection name already exists.
-        if (message.toLowerCase().includes("already exists")) {
-          continue;
-        }
-        if (message.toLowerCase().includes("exists")) {
-          continue;
-        }
-        log.warn(`qmd collection add failed for ${collection.name}: ${message}`);
-      }
+      await this.addCollection(collection);
     }
+  }
+
+  private async addCollection(collection: ResolvedQmdCollection): Promise<boolean> {
+    try {
+      await this.runQmd(
+        [
+          "collection",
+          "add",
+          collection.path,
+          "--name",
+          collection.name,
+          "--mask",
+          collection.pattern,
+        ],
+        {
+          timeoutMs: this.qmd.update.commandTimeoutMs,
+        },
+      );
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Idempotency: qmd exits non-zero if the collection name already exists.
+      if (message.toLowerCase().includes("already exists")) {
+        return true;
+      }
+      if (message.toLowerCase().includes("exists")) {
+        return true;
+      }
+      log.warn(`qmd collection add failed for ${collection.name}: ${message}`);
+      return false;
+    }
+  }
+
+  private async recoverMissingCollection(name: string): Promise<boolean> {
+    const target = this.qmd.collections.find((collection) => collection.name === name);
+    if (!target) {
+      return false;
+    }
+    const recovered = await this.addCollection(target);
+    if (recovered) {
+      log.info(`qmd recovered missing collection: ${name}`);
+    }
+    return recovered;
+  }
+
+  private extractMissingCollectionName(message: string): string | null {
+    const match = /collection not found:\s*['"]?([a-z0-9._-]+)['"]?/i.exec(message);
+    return match?.[1] ?? null;
   }
 
   async search(
@@ -283,43 +310,66 @@ export class QmdMemoryManager implements MemorySearchManager {
       log.warn("qmd query skipped: no managed collections configured");
       return [];
     }
-    const queryBaseArgs = [
-      "query",
-      trimmed,
-      "--json",
-      "-n",
-      String(limit),
-      ...collectionFilterArgs,
-    ];
     const queryBaseArgsWithoutCollections = ["query", trimmed, "--json", "-n", String(limit)];
+    const excludedCollections = new Set<string>();
 
-    const runQuery = async (): Promise<{ stdout: string; stderr: string }> => {
+    const buildQueryArgs = (params?: { noExpand?: boolean }): string[] => {
+      const filtered = this.buildCollectionFilterArgs(excludedCollections);
+      if (filtered.length === 0) {
+        return [];
+      }
+      const args = ["query", trimmed, "--json"];
+      if (params?.noExpand) {
+        args.push("--no-expand");
+      }
+      args.push("-n", String(limit), ...filtered);
+      return args;
+    };
+
+    const runQuery = async (params?: {
+      retryMissingCollection?: boolean;
+      retryNoExpand?: boolean;
+    }): Promise<{ stdout: string; stderr: string }> => {
+      const retryMissingCollection = params?.retryMissingCollection !== false;
+      const retryNoExpand = params?.retryNoExpand !== false;
+      const args = QmdMemoryManager.noExpandSupported
+        ? buildQueryArgs({ noExpand: true })
+        : buildQueryArgs();
+      if (args.length === 0) {
+        log.warn("qmd query skipped: no managed collections configured");
+        return { stdout: "[]", stderr: "" };
+      }
       try {
-        // Try with --no-expand first (skips slow 1.7B hyde expansion).
-        // Falls back to plain query if qmd doesn't support the flag.
-        const args = QmdMemoryManager.noExpandSupported
-          ? [
-              "query",
-              trimmed,
-              "--json",
-              "--no-expand",
-              "-n",
-              String(limit),
-              ...collectionFilterArgs,
-            ]
-          : queryBaseArgs;
         return await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
       } catch (err) {
         const msg = String(err);
+        if (retryMissingCollection) {
+          const missingCollection = this.extractMissingCollectionName(msg);
+          if (missingCollection && !excludedCollections.has(missingCollection)) {
+            const recovered = await this.recoverMissingCollection(missingCollection);
+            if (!recovered) {
+              excludedCollections.add(missingCollection);
+            }
+            log.warn(
+              recovered
+                ? `qmd query missing collection recovered: ${missingCollection}; retrying`
+                : `qmd query missing collection unresolved: ${missingCollection}; retrying without it`,
+            );
+            return await runQuery({
+              retryMissingCollection: false,
+              retryNoExpand,
+            });
+          }
+        }
         // If --no-expand was rejected (unknown flag), retry without it and remember.
         if (
+          retryNoExpand &&
           QmdMemoryManager.noExpandSupported &&
           /unknown.*no-expand|unrecognized.*no-expand|invalid.*no-expand/i.test(msg)
         ) {
           log.info("qmd does not support --no-expand, falling back to plain query");
           QmdMemoryManager.noExpandSupported = false;
-          const result = await this.runQmd(queryBaseArgs, { timeoutMs: this.qmd.limits.timeoutMs });
-          return result;
+          return await runQuery({ retryMissingCollection, retryNoExpand: false });
         }
         if (
           !this.collectionsReady &&
@@ -1084,8 +1134,10 @@ export class QmdMemoryManager implements MemorySearchManager {
     ]);
   }
 
-  private buildCollectionFilterArgs(): string[] {
-    const names = this.qmd.collections.map((collection) => collection.name).filter(Boolean);
+  private buildCollectionFilterArgs(excludedCollections?: Set<string>): string[] {
+    const names = this.qmd.collections
+      .map((collection) => collection.name)
+      .filter((name): name is string => Boolean(name) && !excludedCollections?.has(name));
     if (names.length === 0) {
       return [];
     }

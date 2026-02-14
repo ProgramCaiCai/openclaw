@@ -132,4 +132,72 @@ describe("nodes run", () => {
       invokeTimeoutMs: 45_000,
     });
   });
+
+  it("truncates oversized run payloads", async () => {
+    callGateway.mockImplementation(async ({ method }) => {
+      if (method === "node.list") {
+        return { nodes: [{ nodeId: "mac-1", commands: ["system.run"] }] };
+      }
+      if (method === "node.invoke") {
+        return {
+          payload: {
+            stdout: "x".repeat(40_000),
+            stderr: "",
+            exitCode: 0,
+            success: true,
+          },
+        };
+      }
+      throw new Error(`unexpected method: ${String(method)}`);
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "nodes");
+    if (!tool) {
+      throw new Error("missing nodes tool");
+    }
+
+    const result = await tool.execute("call2", {
+      action: "run",
+      node: "mac-1",
+      command: ["echo", "hi"],
+    });
+
+    const details = result.details as Record<string, unknown>;
+    expect(details).toMatchObject({ truncated: true, maxChars: 16_000 });
+    expect(typeof details.payloadSummary).toBe("object");
+    const text = result.content?.find((block) => block.type === "text")?.text ?? "";
+    expect(text.includes("...(truncated)...")).toBe(true);
+  });
+
+  it("truncates oversized invoke payloads", async () => {
+    callGateway.mockImplementation(async ({ method }) => {
+      if (method === "node.list") {
+        return { nodes: [{ nodeId: "mac-1" }] };
+      }
+      if (method === "node.invoke") {
+        return {
+          payload: {
+            output: "y".repeat(40_000),
+          },
+        };
+      }
+      throw new Error(`unexpected method: ${String(method)}`);
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "nodes");
+    if (!tool) {
+      throw new Error("missing nodes tool");
+    }
+
+    const result = await tool.execute("call3", {
+      action: "invoke",
+      node: "mac-1",
+      invokeCommand: "custom.command",
+    });
+
+    const details = result.details as Record<string, unknown>;
+    expect(details).toMatchObject({ truncated: true, maxChars: 16_000 });
+    const text = result.content?.find((block) => block.type === "text")?.text ?? "";
+    expect(text.includes("...(truncated)...")).toBe(true);
+  });
 });

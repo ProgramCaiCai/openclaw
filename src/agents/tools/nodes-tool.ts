@@ -44,6 +44,57 @@ const NOTIFY_PRIORITIES = ["passive", "active", "timeSensitive"] as const;
 const NOTIFY_DELIVERIES = ["system", "overlay", "auto"] as const;
 const CAMERA_FACING = ["front", "back", "both"] as const;
 const LOCATION_ACCURACY = ["coarse", "balanced", "precise"] as const;
+const NODES_RESULT_MAX_CHARS = 16_000;
+const NODES_TRUNCATION_SUFFIX = "\n...(truncated)...";
+
+function serializeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizePayloadShape(value: unknown): Record<string, unknown> {
+  if (Array.isArray(value)) {
+    return { kind: "array", length: value.length };
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>);
+    return {
+      kind: "object",
+      keyCount: keys.length,
+      keys: keys.slice(0, 20),
+    };
+  }
+  return { kind: typeof value };
+}
+
+function createBoundedJsonResult(payload: unknown): AgentToolResult<unknown> {
+  const serialized = serializeJson(payload);
+  const rawLength = serialized.length;
+  const truncated = rawLength > NODES_RESULT_MAX_CHARS;
+  const output = truncated
+    ? `${serialized.slice(0, NODES_RESULT_MAX_CHARS)}${NODES_TRUNCATION_SUFFIX}`
+    : serialized;
+
+  return {
+    content: [{ type: "text", text: output }],
+    details: truncated
+      ? {
+          truncated,
+          rawLength,
+          maxChars: NODES_RESULT_MAX_CHARS,
+          payloadSummary: summarizePayloadShape(payload),
+        }
+      : {
+          truncated,
+          rawLength,
+          maxChars: NODES_RESULT_MAX_CHARS,
+          payload,
+        },
+  };
+}
 
 // Flattened schema: runtime validates per-action requirements.
 const NodesToolSchema = Type.Object({
@@ -440,7 +491,7 @@ export function createNodesTool(options?: {
               timeoutMs: invokeTimeoutMs,
               idempotencyKey: crypto.randomUUID(),
             });
-            return jsonResult(raw?.payload ?? {});
+            return createBoundedJsonResult(raw?.payload ?? {});
           }
           case "invoke": {
             const node = readStringParam(params, "node", { required: true });
@@ -467,7 +518,7 @@ export function createNodesTool(options?: {
               timeoutMs: invokeTimeoutMs,
               idempotencyKey: crypto.randomUUID(),
             });
-            return jsonResult(raw ?? {});
+            return createBoundedJsonResult(raw ?? {});
           }
           default:
             throw new Error(`Unknown action: ${action}`);

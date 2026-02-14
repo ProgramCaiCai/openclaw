@@ -191,6 +191,29 @@ describe("sessions tools", () => {
     });
   });
 
+  it("sessions_list clamps oversized limit before sessions.list", async () => {
+    callGatewayMock.mockReset();
+    callGatewayMock.mockResolvedValue({
+      path: "/tmp/sessions.json",
+      sessions: [],
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "sessions_list");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_list tool");
+    }
+
+    await tool.execute("call1c", { limit: 999 });
+
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "sessions.list",
+        params: expect.objectContaining({ limit: 100 }),
+      }),
+    );
+  });
+
   it("sessions_history filters tool messages by default", async () => {
     callGatewayMock.mockReset();
     callGatewayMock.mockImplementation(async (opts: unknown) => {

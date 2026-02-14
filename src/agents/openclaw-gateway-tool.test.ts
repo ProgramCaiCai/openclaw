@@ -162,4 +162,77 @@ describe("gateway tool", () => {
       expect(params).toMatchObject({ timeoutMs: 20 * 60_000 });
     }
   });
+
+  it("returns compact summaries for config.get by default", async () => {
+    const { callGatewayTool } = await import("./tools/gateway.js");
+    vi.mocked(callGatewayTool).mockReset();
+    vi.mocked(callGatewayTool).mockImplementation(async (method: string) => {
+      if (method === "config.get") {
+        return {
+          hash: "hash-compact",
+          agents: { defaults: { model: "x" } },
+          channels: { telegram: { enabled: true } },
+        };
+      }
+      return { ok: true };
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "gateway");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing gateway tool");
+    }
+
+    const result = await tool.execute("call5", { action: "config.get" });
+    const details = result.details as Record<string, unknown>;
+
+    expect(callGatewayTool).toHaveBeenCalledWith("config.get", expect.any(Object), {});
+    expect(details).toMatchObject({
+      ok: true,
+      compact: true,
+      truncated: false,
+      maxChars: 12_000,
+    });
+    expect((details.summary as { hash?: string }).hash).toBe("hash-compact");
+    expect(typeof details.preview).toBe("string");
+    expect(details.result).toBeUndefined();
+  });
+
+  it("caps config.schema output when compact=false", async () => {
+    const { callGatewayTool } = await import("./tools/gateway.js");
+    vi.mocked(callGatewayTool).mockReset();
+    vi.mocked(callGatewayTool).mockImplementation(async (method: string) => {
+      if (method === "config.schema") {
+        return {
+          schema: {
+            giant: "x".repeat(40_000),
+          },
+        };
+      }
+      return { ok: true };
+    });
+
+    const tool = createOpenClawTools().find((candidate) => candidate.name === "gateway");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing gateway tool");
+    }
+
+    const result = await tool.execute("call6", {
+      action: "config.schema",
+      compact: false,
+      maxChars: 100,
+    });
+    const details = result.details as Record<string, unknown>;
+
+    expect(details).toMatchObject({
+      ok: true,
+      compact: false,
+      truncated: true,
+      maxChars: 100,
+    });
+    expect(typeof details.preview).toBe("string");
+    expect((details.preview as string).includes("...(truncated)...")).toBe(true);
+    expect(details.result).toBeUndefined();
+  });
 });

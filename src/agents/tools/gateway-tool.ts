@@ -13,6 +13,9 @@ import { type AnyAgentTool, jsonResult, readStringParam } from "./common.js";
 import { callGatewayTool } from "./gateway.js";
 
 const DEFAULT_UPDATE_TIMEOUT_MS = 20 * 60_000;
+const GATEWAY_CONFIG_DEFAULT_MAX_CHARS = 12_000;
+const GATEWAY_CONFIG_MAX_CHARS_CAP = 20_000;
+const GATEWAY_CONFIG_TRUNCATION_SUFFIX = "\n...(truncated)...";
 
 function resolveBaseHashFromSnapshot(snapshot: unknown): string | undefined {
   if (!snapshot || typeof snapshot !== "object") {
@@ -25,6 +28,81 @@ function resolveBaseHashFromSnapshot(snapshot: unknown): string | undefined {
     raw: typeof rawValue === "string" ? rawValue : undefined,
   });
   return hash ?? undefined;
+}
+
+function resolveConfigMaxChars(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(1, Math.min(GATEWAY_CONFIG_MAX_CHARS_CAP, Math.floor(value)));
+  }
+  return GATEWAY_CONFIG_DEFAULT_MAX_CHARS;
+}
+
+function serializeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizeConfigPayload(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { kind: typeof payload };
+  }
+  const record = payload as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return {
+    kind: "object",
+    topLevelCount: keys.length,
+    keys: keys.slice(0, 50),
+    hash: typeof record.hash === "string" ? record.hash : undefined,
+  };
+}
+
+function createConfigSnapshotResult(params: {
+  result: unknown;
+  compact: boolean;
+  maxChars: number;
+}) {
+  const serialized = serializeJson(params.result);
+  const rawLength = serialized.length;
+  const truncated = rawLength > params.maxChars;
+  const preview = truncated
+    ? `${serialized.slice(0, params.maxChars)}${GATEWAY_CONFIG_TRUNCATION_SUFFIX}`
+    : serialized;
+
+  if (params.compact) {
+    return jsonResult({
+      ok: true,
+      compact: true,
+      truncated,
+      rawLength,
+      maxChars: params.maxChars,
+      summary: summarizeConfigPayload(params.result),
+      preview,
+    });
+  }
+
+  return jsonResult(
+    truncated
+      ? {
+          ok: true,
+          compact: false,
+          truncated,
+          rawLength,
+          maxChars: params.maxChars,
+          summary: summarizeConfigPayload(params.result),
+          preview,
+        }
+      : {
+          ok: true,
+          compact: false,
+          truncated,
+          rawLength,
+          maxChars: params.maxChars,
+          result: params.result,
+        },
+  );
 }
 
 const GATEWAY_ACTIONS = [
@@ -48,6 +126,9 @@ const GatewayToolSchema = Type.Object({
   gatewayUrl: Type.Optional(Type.String()),
   gatewayToken: Type.Optional(Type.String()),
   timeoutMs: Type.Optional(Type.Number()),
+  // config.get, config.schema
+  compact: Type.Optional(Type.Boolean()),
+  maxChars: Type.Optional(Type.Number()),
   // config.apply, config.patch
   raw: Type.Optional(Type.String()),
   baseHash: Type.Optional(Type.String()),
@@ -166,11 +247,19 @@ export function createGatewayTool(opts?: {
 
       if (action === "config.get") {
         const result = await callGatewayTool("config.get", gatewayOpts, {});
-        return jsonResult({ ok: true, result });
+        return createConfigSnapshotResult({
+          result,
+          compact: params.compact !== false,
+          maxChars: resolveConfigMaxChars(params.maxChars),
+        });
       }
       if (action === "config.schema") {
         const result = await callGatewayTool("config.schema", gatewayOpts, {});
-        return jsonResult({ ok: true, result });
+        return createConfigSnapshotResult({
+          result,
+          compact: params.compact !== false,
+          maxChars: resolveConfigMaxChars(params.maxChars),
+        });
       }
       if (action === "config.apply") {
         const raw = readStringParam(params, "raw", { required: true });

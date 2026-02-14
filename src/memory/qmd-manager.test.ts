@@ -670,6 +670,75 @@ describe("QmdMemoryManager", () => {
     await manager.close();
   });
 
+  it("recovers when qmd query reports a missing managed collection", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 60_000, onBoot: false },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "custom-4" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    let addCalls = 0;
+    let queryCalls = 0;
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "collection" && args[1] === "list") {
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          child.stdout.emit("data", "[]");
+          child.closeWith(0);
+        }, 0);
+        return child;
+      }
+      if (args[0] === "collection" && args[1] === "add") {
+        addCalls += 1;
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          if (addCalls === 1) {
+            child.stderr.emit("data", "temporary bootstrap failure");
+            child.closeWith(1);
+            return;
+          }
+          child.closeWith(0);
+        }, 0);
+        return child;
+      }
+      if (args[0] === "query") {
+        queryCalls += 1;
+        const child = createMockChild({ autoClose: false });
+        setTimeout(() => {
+          if (queryCalls === 1) {
+            child.stderr.emit("data", "Collection not found: custom-4");
+            child.closeWith(1);
+            return;
+          }
+          child.stdout.emit("data", "[]");
+          child.closeWith(0);
+        }, 0);
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId });
+    const manager = await QmdMemoryManager.create({ cfg, agentId, resolved });
+    expect(manager).toBeTruthy();
+    if (!manager) {
+      throw new Error("manager missing");
+    }
+
+    const results = await manager.search("test", { sessionKey: "agent:main:slack:dm:u123" });
+    expect(results).toEqual([]);
+    expect(addCalls).toBe(2);
+    expect(queryCalls).toBe(2);
+
+    await manager.close();
+  });
+
   it("falls back to plain query when --no-expand is not supported", async () => {
     cfg = {
       ...cfg,
