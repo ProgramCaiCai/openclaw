@@ -65,13 +65,48 @@ export function createSessionCompactTool(opts?: { agentSessionKey?: string }): A
       }
 
       try {
+        // Set the flag; run.ts will pick it up after this attempt ends.
+        const request = requestSessionCompaction(sessionKey);
+        if (!request.accepted) {
+          if (request.reason === "duplicate") {
+            const msg = "Compaction already queued for this session (duplicate request skipped).";
+            return {
+              content: [{ type: "text", text: msg }],
+              details: {
+                ok: true,
+                status: "skipped",
+                reason: "duplicate",
+                scheduled: false,
+                instructions: instructions ?? null,
+              },
+            };
+          }
+
+          const waitSeconds =
+            typeof request.retryAfterMs === "number"
+              ? Math.max(1, Math.ceil(request.retryAfterMs / 1000))
+              : null;
+          const msg =
+            waitSeconds != null
+              ? `Compaction request skipped (cooldown active, retry in ~${waitSeconds}s).`
+              : "Compaction request skipped (cooldown active).";
+          return {
+            content: [{ type: "text", text: msg }],
+            details: {
+              ok: true,
+              status: "skipped",
+              reason: "cooldown",
+              retryAfterMs: request.retryAfterMs ?? null,
+              scheduled: false,
+              instructions: instructions ?? null,
+            },
+          };
+        }
+
         getToolRequestedCompactionStore().set(sessionKey, {
           instructions,
           requestedAtMs: Date.now(),
         });
-
-        // Set the flag; run.ts will pick it up after this attempt ends.
-        requestSessionCompaction(sessionKey);
 
         const msg = instructions
           ? `Compaction queued (will run after this turn).\nCompaction instructions: ${instructions}`

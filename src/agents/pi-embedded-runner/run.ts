@@ -53,7 +53,7 @@ import { log } from "./logger.js";
 import { resolveModel } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
-import { consumeSessionCompactionRequest } from "./runs.js";
+import { consumeSessionCompactionRequest, markSessionCompactionCompleted } from "./runs.js";
 import {
   truncateOversizedToolResultsInSession,
   sessionLikelyHasOversizedToolResults,
@@ -989,6 +989,7 @@ export async function runEmbeddedPiAgent(
                 extraSystemPrompt: params.extraSystemPrompt,
                 ownerNumbers: params.ownerNumbers,
               });
+              markSessionCompactionCompleted(sessionKeyForCompact);
               if (compactResult.compacted) {
                 autoCompactionCount += 1;
                 log.info(

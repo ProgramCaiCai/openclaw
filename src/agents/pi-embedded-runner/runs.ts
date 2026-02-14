@@ -197,11 +197,44 @@ export function getCompactionBufferSize(sessionId: string): number {
 // Tool-requested compaction flag
 // ---------------------------------------------------------------------------
 const COMPACTION_REQUESTS = new Set<string>();
+const COMPACTION_COOLDOWN_MS = 30_000;
+const LAST_TOOL_COMPACTIONS = new Map<string, number>();
+
+type SessionCompactionRequestResult =
+  | { accepted: true }
+  | { accepted: false; reason: "duplicate" | "cooldown"; retryAfterMs?: number };
 
 /** Signal that a session should compact after the current attempt. */
-export function requestSessionCompaction(sessionKey: string): void {
+export function requestSessionCompaction(
+  sessionKey: string,
+  nowMs = Date.now(),
+): SessionCompactionRequestResult {
+  if (COMPACTION_REQUESTS.has(sessionKey)) {
+    diag.debug(`compaction request skipped: sessionKey=${sessionKey} reason=duplicate`);
+    return { accepted: false, reason: "duplicate" };
+  }
+
+  const lastCompactedAt = LAST_TOOL_COMPACTIONS.get(sessionKey);
+  if (typeof lastCompactedAt === "number") {
+    const elapsedMs = Math.max(0, nowMs - lastCompactedAt);
+    if (elapsedMs < COMPACTION_COOLDOWN_MS) {
+      const retryAfterMs = COMPACTION_COOLDOWN_MS - elapsedMs;
+      diag.debug(
+        `compaction request skipped: sessionKey=${sessionKey} reason=cooldown retryAfterMs=${retryAfterMs}`,
+      );
+      return { accepted: false, reason: "cooldown", retryAfterMs };
+    }
+  }
+
   COMPACTION_REQUESTS.add(sessionKey);
   diag.debug(`compaction requested: sessionKey=${sessionKey}`);
+  return { accepted: true };
+}
+
+/** Record that tool-requested compaction completed, enabling cooldown-based dedupe. */
+export function markSessionCompactionCompleted(sessionKey: string, nowMs = Date.now()): void {
+  LAST_TOOL_COMPACTIONS.set(sessionKey, nowMs);
+  diag.debug(`compaction completion recorded: sessionKey=${sessionKey}`);
 }
 
 /** Consume (and clear) a pending compaction request. Returns true if one existed. */
@@ -213,4 +246,4 @@ export function consumeSessionCompactionRequest(sessionKey: string): boolean {
   return had;
 }
 
-export type { EmbeddedPiQueueHandle };
+export type { EmbeddedPiQueueHandle, SessionCompactionRequestResult };
