@@ -13,8 +13,6 @@ import {
   TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
 } from "./tool-output-hard-cap.js";
 
-type ToolCall = { id: string; name?: string };
-
 type ToolOutputCaps = { maxBytes: number; maxLines: number };
 
 function resolveToolOutputCaps(toolName?: string | null): ToolOutputCaps {
