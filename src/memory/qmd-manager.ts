@@ -960,18 +960,27 @@ export class QmdMemoryManager implements MemorySearchManager {
       return cached;
     }
     const db = this.ensureDb();
+    const managedCollections = [...this.collectionRoots.keys()];
+    if (managedCollections.length === 0) {
+      return null;
+    }
+    const placeholders = managedCollections.map(() => "?").join(", ");
     let row: { collection: string; path: string } | undefined;
     try {
       const exact = db
-        .prepare("SELECT collection, path FROM documents WHERE hash = ? AND active = 1 LIMIT 1")
-        .get(normalized) as { collection: string; path: string } | undefined;
+        .prepare(
+          `SELECT collection, path FROM documents WHERE hash = ? AND active = 1 AND collection IN (${placeholders}) LIMIT 1`,
+        )
+        .get(normalized, ...managedCollections) as { collection: string; path: string } | undefined;
       row = exact;
       if (!row) {
         row = db
           .prepare(
-            "SELECT collection, path FROM documents WHERE hash LIKE ? AND active = 1 LIMIT 1",
+            `SELECT collection, path FROM documents WHERE hash LIKE ? AND active = 1 AND collection IN (${placeholders}) LIMIT 1`,
           )
-          .get(`${normalized}%`) as { collection: string; path: string } | undefined;
+          .get(`${normalized}%`, ...managedCollections) as
+          | { collection: string; path: string }
+          | undefined;
       }
     } catch (err) {
       if (this.isSqliteBusyError(err)) {
