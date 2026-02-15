@@ -68,7 +68,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     return manager;
   }
 
-  /** Cached flag: assume --no-expand is supported until proven otherwise. */
+  /**
+   * Cached flag: assume --no-expand is supported until proven otherwise.
+   * NOTE: Static field shared across all QmdMemoryManager instances. If different
+   * instances target different qmd binary versions, the cached capability may be
+   * incorrect. Acceptable trade-off for now — revisit if multi-binary support lands.
+   */
   private static noExpandSupported = true;
 
   private readonly cfg: OpenClawConfig;
@@ -465,44 +470,33 @@ export class QmdMemoryManager implements MemorySearchManager {
       }
     };
 
-    const runQueryFallback = async (): Promise<{ stdout: string; stderr: string }> => {
+    const runQueryFallbackParsed = async (): Promise<QmdQueryResult[]> => {
       if (collectionNames.length > 1) {
-        const parsed = await this.runSearchAcrossCollections(
-          "query",
-          trimmed,
-          limit,
-          collectionNames,
-        );
-        return { stdout: JSON.stringify(parsed), stderr: "" };
+        return this.runSearchAcrossCollections("query", trimmed, limit, collectionNames);
       }
-      return await runQuery();
+      const result = await runQuery();
+      return parseQmdQueryJson(result.stdout, result.stderr);
     };
 
-    let stdout: string;
-    let stderr: string;
+    let parsed: QmdQueryResult[];
 
     if (this.qmd.searchMode === "search" || this.qmd.searchMode === "vsearch") {
       const mode = this.qmd.searchMode;
       if (collectionNames.length > 1) {
-        const parsed = await this.runSearchAcrossCollections(mode, trimmed, limit, collectionNames);
-        stdout = JSON.stringify(parsed);
-        stderr = "";
+        parsed = await this.runSearchAcrossCollections(mode, trimmed, limit, collectionNames);
       } else {
         const args = this.buildSearchArgs(mode, trimmed, limit);
         args.push(...collectionFilterArgs);
         try {
           const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
-          stdout = result.stdout;
-          stderr = result.stderr;
+          parsed = parseQmdQueryJson(result.stdout, result.stderr);
         } catch (err) {
           const msg = String(err);
           if (this.isUnsupportedQmdOptionError(err)) {
             log.warn(
               `qmd ${mode} does not support configured flags; retrying search with qmd query`,
             );
-            const result = await runQueryFallback();
-            stdout = result.stdout;
-            stderr = result.stderr;
+            parsed = await runQueryFallbackParsed();
           } else {
             log.warn(`qmd ${mode} failed: ${msg}`);
             throw err instanceof Error ? err : new Error(msg);
@@ -510,21 +504,11 @@ export class QmdMemoryManager implements MemorySearchManager {
         }
       }
     } else if (this.qmd.searchMode === "query" && collectionNames.length > 1) {
-      const parsed = await this.runSearchAcrossCollections(
-        "query",
-        trimmed,
-        limit,
-        collectionNames,
-      );
-      stdout = JSON.stringify(parsed);
-      stderr = "";
+      parsed = await this.runSearchAcrossCollections("query", trimmed, limit, collectionNames);
     } else {
       const result = await runQuery();
-      stdout = result.stdout;
-      stderr = result.stderr;
+      parsed = parseQmdQueryJson(result.stdout, result.stderr);
     }
-
-    const parsed = parseQmdQueryJson(stdout, stderr);
     const results: MemorySearchResult[] = [];
     for (const entry of parsed) {
       const doc = await this.resolveDocLocation(entry.docid);
@@ -1333,7 +1317,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     limit: number,
   ): string[] {
     if (command === "query") {
-      return ["query", query, "--json", "-n", String(limit)];
+      const args = ["query", query, "--json"];
+      if (QmdMemoryManager.noExpandSupported) {
+        args.push("--no-expand");
+      }
+      args.push("-n", String(limit));
+      return args;
     }
     return [command, query, "--json", "-n", String(limit)];
   }
