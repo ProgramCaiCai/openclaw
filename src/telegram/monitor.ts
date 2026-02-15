@@ -9,8 +9,11 @@ import { formatDurationPrecise } from "../infra/format-time/format-duration.ts";
 import { registerUnhandledRejectionHandler } from "../infra/unhandled-rejections.js";
 import { resolveTelegramAccount } from "./accounts.js";
 import { resolveTelegramAllowedUpdates } from "./allowed-updates.js";
-import { createTelegramBot } from "./bot.js";
-import { isRecoverableTelegramNetworkError } from "./network-errors.js";
+import { createTelegramBot, type TelegramBotWithFlush } from "./bot.js";
+import {
+  extractTelegramRetryAfterMs,
+  isRecoverableTelegramNetworkError,
+} from "./network-errors.js";
 import { makeProxyFetch } from "./proxy.js";
 import { readTelegramUpdateOffset, writeTelegramUpdateOffset } from "./update-offset-store.js";
 import { startTelegramWebhook } from "./webhook.js";
@@ -25,7 +28,6 @@ export type MonitorTelegramOpts = {
   webhookPath?: string;
   webhookPort?: number;
   webhookSecret?: string;
-  webhookHost?: string;
   proxyFetch?: typeof fetch;
   webhookUrl?: string;
 };
@@ -57,6 +59,9 @@ const TELEGRAM_POLL_RESTART_POLICY = {
   factor: 1.8,
   jitter: 0.25,
 };
+
+const TELEGRAM_POLL_RESTART_STABLE_RESET_MS = 5 * 60_000;
+const TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS = 5;
 
 const isGetUpdatesConflict = (err: unknown) => {
   if (!err || typeof err !== "object") {
@@ -159,7 +164,6 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
         path: opts.webhookPath,
         port: opts.webhookPort,
         secret: opts.webhookSecret,
-        host: opts.webhookHost ?? account.config.webhookHost,
         runtime: opts.runtime as RuntimeEnv,
         fetch: proxyFetch,
         abortSignal: opts.abortSignal,
@@ -168,10 +172,38 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
       return;
     }
 
+    // Ensure polling can take control even if a webhook was previously configured.
+    if (typeof bot.api.deleteWebhook === "function") {
+      for (let attempt = 1; attempt <= TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false }));
+          break;
+        } catch (err) {
+          const retryAfterMs = extractTelegramRetryAfterMs(err);
+          const isRecoverable = isRecoverableTelegramNetworkError(err, { context: "polling" });
+          if (!isRecoverable && typeof retryAfterMs !== "number") {
+            throw err;
+          }
+          if (attempt >= TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS) {
+            throw err;
+          }
+
+          const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, attempt);
+          const cappedDelayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
+          const delayMs = Math.max(cappedDelayMs, retryAfterMs ?? 0);
+          (opts.runtime?.error ?? console.error)(
+            `Telegram deleteWebhook failed (attempt ${attempt}/${TELEGRAM_DELETE_WEBHOOK_MAX_ATTEMPTS}): ${formatErrorMessage(err)}; retrying in ${formatDurationPrecise(delayMs)}.`,
+          );
+          await sleepWithAbort(delayMs, opts.abortSignal);
+        }
+      }
+    }
+
     // Use grammyjs/runner for concurrent update processing
     let restartAttempts = 0;
 
     while (!opts.abortSignal?.aborted) {
+      const runStartedAtMs = Date.now();
       const runner = run(bot, createTelegramRunnerOptions(cfg));
       const stopOnAbort = () => {
         if (opts.abortSignal?.aborted) {
@@ -180,24 +212,77 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
       };
       opts.abortSignal?.addEventListener("abort", stopOnAbort, { once: true });
       try {
-        // runner.task() returns a promise that resolves when the runner stops
+        // runner.task() resolves when the runner stops (normally or unexpectedly).
         await runner.task();
-        return;
+
+        const runDurationMs = Date.now() - runStartedAtMs;
+        if (runDurationMs >= TELEGRAM_POLL_RESTART_STABLE_RESET_MS) {
+          restartAttempts = 0;
+        }
+
+        if (opts.abortSignal?.aborted) {
+          return;
+        }
+
+        // Flush any pending offset commits before restarting the runner to prevent
+        // duplicate delivery of already-processed updates (R1-09).
+        const flushFn = (bot as TelegramBotWithFlush)._flushPendingCommits;
+        if (flushFn) {
+          await flushFn().catch((flushErr) => {
+            (opts.runtime?.error ?? console.error)(
+              `Telegram: failed to flush pending offset commits before restart: ${formatErrorMessage(flushErr)}`,
+            );
+          });
+        }
+
+        restartAttempts += 1;
+        const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        const delayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
+        (opts.runtime?.error ?? console.error)(
+          `Telegram polling stopped unexpectedly (attempt ${restartAttempts}); restarting in ${formatDurationPrecise(delayMs)}.`,
+        );
+        await sleepWithAbort(delayMs, opts.abortSignal);
+        continue;
       } catch (err) {
+        const runDurationMs = Date.now() - runStartedAtMs;
+        if (runDurationMs >= TELEGRAM_POLL_RESTART_STABLE_RESET_MS) {
+          restartAttempts = 0;
+        }
+
         if (opts.abortSignal?.aborted) {
           throw err;
         }
         const isConflict = isGetUpdatesConflict(err);
+        const retryAfterMs = extractTelegramRetryAfterMs(err);
         const isRecoverable = isRecoverableTelegramNetworkError(err, { context: "polling" });
         if (!isConflict && !isRecoverable) {
           throw err;
         }
+
+        if (isConflict) {
+          if (typeof bot.api.deleteWebhook === "function") {
+            await Promise.resolve(bot.api.deleteWebhook({ drop_pending_updates: false })).catch(
+              (deleteErr) => {
+                (opts.runtime?.error ?? console.error)(
+                  `Telegram getUpdates conflict; deleteWebhook attempt failed: ${formatErrorMessage(deleteErr)}`,
+                );
+              },
+            );
+          }
+        }
+
         restartAttempts += 1;
-        const delayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
-        const reason = isConflict ? "getUpdates conflict" : "network error";
+        const baseDelayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, restartAttempts);
+        const cappedDelayMs = Math.min(baseDelayMs, TELEGRAM_POLL_RESTART_POLICY.maxMs);
+        const delayMs = Math.max(cappedDelayMs, retryAfterMs ?? 0);
+        const reason = retryAfterMs
+          ? "rate limited"
+          : isConflict
+            ? "getUpdates conflict"
+            : "network error";
         const errMsg = formatErrorMessage(err);
         (opts.runtime?.error ?? console.error)(
-          `Telegram ${reason}: ${errMsg}; retrying in ${formatDurationPrecise(delayMs)}.`,
+          `Telegram ${reason} (attempt ${restartAttempts}): ${errMsg}; retrying in ${formatDurationPrecise(delayMs)}.`,
         );
         try {
           await sleepWithAbort(delayMs, opts.abortSignal);

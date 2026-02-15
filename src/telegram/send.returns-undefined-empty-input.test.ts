@@ -1,15 +1,50 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  getTelegramSendTestMocks,
-  importTelegramSendModule,
-  installTelegramSendTestHooks,
-} from "./send.test-harness.js";
 
-installTelegramSendTestHooks();
+const { botApi, botCtorSpy } = vi.hoisted(() => ({
+  botApi: {
+    sendMessage: vi.fn(),
+    setMessageReaction: vi.fn(),
+    sendSticker: vi.fn(),
+  },
+  botCtorSpy: vi.fn(),
+}));
 
-const { botApi, botCtorSpy, loadConfig, loadWebMedia } = getTelegramSendTestMocks();
-const { buildInlineKeyboard, sendMessageTelegram, sendStickerTelegram } =
-  await importTelegramSendModule();
+const { loadWebMedia } = vi.hoisted(() => ({
+  loadWebMedia: vi.fn(),
+}));
+
+vi.mock("../web/media.js", () => ({
+  loadWebMedia,
+}));
+
+vi.mock("grammy", () => ({
+  Bot: class {
+    api = botApi;
+    catch = vi.fn();
+    constructor(
+      public token: string,
+      public options?: {
+        client?: { fetch?: typeof fetch; timeoutSeconds?: number };
+      },
+    ) {
+      botCtorSpy(token, options);
+    }
+  },
+  InputFile: class {},
+}));
+
+const { loadConfig } = vi.hoisted(() => ({
+  loadConfig: vi.fn(() => ({})),
+}));
+vi.mock("../config/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config/config.js")>();
+  return {
+    ...actual,
+    loadConfig,
+  };
+});
+
+import { buildInlineKeyboard, sendMessageTelegram, sendStickerTelegram } from "./send.js";
 
 describe("buildInlineKeyboard", () => {
   it("returns undefined for empty input", () => {
@@ -52,6 +87,13 @@ describe("buildInlineKeyboard", () => {
 });
 
 describe("sendMessageTelegram", () => {
+  beforeEach(() => {
+    loadConfig.mockReturnValue({});
+    loadWebMedia.mockReset();
+    botApi.sendMessage.mockReset();
+    botCtorSpy.mockReset();
+  });
+
   it("passes timeoutSeconds to grammY client when configured", async () => {
     loadConfig.mockReturnValue({
       channels: { telegram: { timeoutSeconds: 60 } },
@@ -396,41 +438,6 @@ describe("sendMessageTelegram", () => {
 
     loadWebMedia.mockResolvedValueOnce({
       buffer: Buffer.from("audio"),
-      contentType: "audio/wav",
-      fileName: "clip.wav",
-    });
-
-    await sendMessageTelegram(chatId, "caption", {
-      token: "tok",
-      api,
-      mediaUrl: "https://example.com/clip.wav",
-      asVoice: true,
-    });
-
-    expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
-      caption: "caption",
-      parse_mode: "HTML",
-    });
-    expect(sendVoice).not.toHaveBeenCalled();
-  });
-
-  it("sends MP3 as voice when asVoice is true", async () => {
-    const chatId = "123";
-    const sendAudio = vi.fn().mockResolvedValue({
-      message_id: 16,
-      chat: { id: chatId },
-    });
-    const sendVoice = vi.fn().mockResolvedValue({
-      message_id: 17,
-      chat: { id: chatId },
-    });
-    const api = { sendAudio, sendVoice } as unknown as {
-      sendAudio: typeof sendAudio;
-      sendVoice: typeof sendVoice;
-    };
-
-    loadWebMedia.mockResolvedValueOnce({
-      buffer: Buffer.from("audio"),
       contentType: "audio/mpeg",
       fileName: "clip.mp3",
     });
@@ -442,11 +449,11 @@ describe("sendMessageTelegram", () => {
       asVoice: true,
     });
 
-    expect(sendVoice).toHaveBeenCalledWith(chatId, expect.anything(), {
+    expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
       parse_mode: "HTML",
     });
-    expect(sendAudio).not.toHaveBeenCalled();
+    expect(sendVoice).not.toHaveBeenCalled();
   });
 
   it("includes message_thread_id for forum topic messages", async () => {

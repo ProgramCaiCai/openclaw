@@ -42,7 +42,3 @@ export function resolveTelegramFetch(
   }
   return fetchImpl;
 }
-
-export function resetTelegramFetchStateForTests(): void {
-  appliedAutoSelectFamily = null;
-}

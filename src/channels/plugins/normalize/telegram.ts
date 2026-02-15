@@ -3,6 +3,9 @@ export function normalizeTelegramMessagingTarget(raw: string): string | undefine
   if (!trimmed) {
     return undefined;
   }
+  if (trimmed.length > 256) {
+    return undefined;
+  }
   let normalized = trimmed;
   if (normalized.startsWith("telegram:")) {
     normalized = normalized.slice("telegram:".length).trim();
@@ -35,5 +38,5 @@ export function looksLikeTelegramTargetId(raw: string): boolean {
   if (trimmed.startsWith("@")) {
     return true;
   }
-  return /^-?\d{6,}$/.test(trimmed);
+  return /^-?\d{6,15}$/.test(trimmed);
 }

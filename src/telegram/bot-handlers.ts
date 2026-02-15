@@ -17,13 +17,18 @@ import { loadConfig } from "../config/config.js";
 import { writeConfigFile } from "../config/io.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { danger, logVerbose, warn } from "../globals.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { firstDefined, isSenderAllowed, normalizeAllowFromWithStore } from "./bot-access.js";
 import { RegisterTelegramHandlerParams } from "./bot-native-commands.js";
-import { MEDIA_GROUP_TIMEOUT_MS, type MediaGroupEntry } from "./bot-updates.js";
+import {
+  MEDIA_GROUP_TIMEOUT_MS,
+  resolveTelegramUpdateId,
+  setTelegramUpdateCompletionDefer,
+} from "./bot-updates.js";
 import { resolveMedia } from "./bot/delivery.js";
 import {
   buildTelegramGroupPeerId,
@@ -57,28 +62,39 @@ export const registerTelegramHandlers = ({
   processMessage,
   logger,
 }: RegisterTelegramHandlerParams) => {
-  const DEFAULT_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
   const TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS = 4000;
-  const TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS =
-    typeof opts.testTimings?.textFragmentGapMs === "number" &&
-    Number.isFinite(opts.testTimings.textFragmentGapMs)
-      ? Math.max(10, Math.floor(opts.testTimings.textFragmentGapMs))
-      : DEFAULT_TEXT_FRAGMENT_MAX_GAP_MS;
+  const TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS = 1500;
   const TELEGRAM_TEXT_FRAGMENT_MAX_ID_GAP = 1;
   const TELEGRAM_TEXT_FRAGMENT_MAX_PARTS = 12;
   const TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS = 50_000;
-  const mediaGroupTimeoutMs =
-    typeof opts.testTimings?.mediaGroupFlushMs === "number" &&
-    Number.isFinite(opts.testTimings.mediaGroupFlushMs)
-      ? Math.max(10, Math.floor(opts.testTimings.mediaGroupFlushMs))
-      : MEDIA_GROUP_TIMEOUT_MS;
+
+  type Deferred = {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+  };
+
+  const createDeferred = (): Deferred => {
+    let resolve!: () => void;
+    let reject!: (err: unknown) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  type MediaGroupEntry = {
+    messages: Array<{ msg: Message; ctx: TelegramContext; done: Deferred }>;
+    timer: ReturnType<typeof setTimeout>;
+  };
 
   const mediaGroupBuffer = new Map<string, MediaGroupEntry>();
   let mediaGroupProcessing: Promise<void> = Promise.resolve();
 
   type TextFragmentEntry = {
     key: string;
-    messages: Array<{ msg: Message; ctx: TelegramContext; receivedAtMs: number }>;
+    messages: Array<{ msg: Message; ctx: TelegramContext; receivedAtMs: number; done: Deferred }>;
     timer: ReturnType<typeof setTimeout>;
   };
   const textFragmentBuffer = new Map<string, TextFragmentEntry>();
@@ -92,6 +108,7 @@ export const registerTelegramHandlers = ({
     storeAllowFrom: string[];
     debounceKey: string | null;
     botUsername?: string;
+    done: Deferred;
   };
   const inboundDebouncer = createInboundDebouncer<TelegramDebounceEntry>({
     debounceMs,
@@ -107,42 +124,85 @@ export const registerTelegramHandlers = ({
       return !hasControlCommand(text, cfg, { botUsername: entry.botUsername });
     },
     onFlush: async (entries) => {
-      const last = entries.at(-1);
-      if (!last) {
+      if (entries.length === 0) {
         return;
       }
-      if (entries.length === 1) {
-        await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
-        return;
-      }
-      const combinedText = entries
-        .map((entry) => entry.msg.text ?? entry.msg.caption ?? "")
-        .filter(Boolean)
-        .join("\n");
-      if (!combinedText.trim()) {
-        return;
-      }
-      const first = entries[0];
-      const baseCtx = first.ctx;
-      const getFile =
-        typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
-      const syntheticMessage: Message = {
-        ...first.msg,
-        text: combinedText,
-        caption: undefined,
-        caption_entities: undefined,
-        entities: undefined,
-        date: last.msg.date ?? first.msg.date,
+
+      const resolveAll = () => {
+        for (const entry of entries) {
+          entry.done.resolve();
+        }
       };
-      const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
-      await processMessage(
-        { message: syntheticMessage, me: baseCtx.me, getFile },
-        [],
-        first.storeAllowFrom,
-        messageIdOverride ? { messageIdOverride } : undefined,
-      );
+
+      try {
+        const last = entries.at(-1);
+        if (!last) {
+          resolveAll();
+          return;
+        }
+        if (entries.length === 1) {
+          await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
+          resolveAll();
+          return;
+        }
+
+        const combinedText = entries
+          .map((entry) => entry.msg.text ?? entry.msg.caption ?? "")
+          .filter(Boolean)
+          .join("\n");
+        if (!combinedText.trim()) {
+          resolveAll();
+          return;
+        }
+
+        const first = entries[0];
+        const baseCtx = first.ctx;
+        const getFile =
+          typeof baseCtx.getFile === "function" ? baseCtx.getFile.bind(baseCtx) : async () => ({});
+        const syntheticMessage: Message = {
+          ...first.msg,
+          text: combinedText,
+          caption: undefined,
+          caption_entities: undefined,
+          entities: undefined,
+          date: last.msg.date ?? first.msg.date,
+        };
+        const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
+        await processMessage(
+          { message: syntheticMessage, me: baseCtx.me, getFile },
+          [],
+          first.storeAllowFrom,
+          messageIdOverride ? { messageIdOverride } : undefined,
+        );
+        resolveAll();
+      } catch (err) {
+        runtime.error?.(
+          danger(
+            `telegram debounce flush failed (combined); falling back per-entry: ${formatErrorMessage(err)}` +
+              ` (entries=${entries.length})`,
+          ),
+        );
+
+        for (const entry of entries) {
+          try {
+            await processMessage(entry.ctx, entry.allMedia, entry.storeAllowFrom);
+            entry.done.resolve();
+          } catch (entryErr) {
+            entry.done.reject(entryErr);
+            runtime.error?.(
+              danger(
+                `telegram debounce flush failed (entry=${resolveTelegramUpdateId(entry.ctx) ?? "unknown"}): ` +
+                  formatErrorMessage(entryErr),
+              ),
+            );
+          }
+        }
+      }
     },
-    onError: (err) => {
+    onError: (err, entries) => {
+      for (const entry of entries) {
+        entry.done.reject(err);
+      }
       runtime.error?.(danger(`telegram debounce flush failed: ${String(err)}`));
     },
   });
@@ -208,6 +268,18 @@ export const registerTelegramHandlers = ({
   };
 
   const processMediaGroup = async (entry: MediaGroupEntry) => {
+    const settleOk = () => {
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
+    };
+
+    const settleErr = (err: unknown) => {
+      for (const msg of entry.messages) {
+        msg.done.reject(err);
+      }
+    };
+
     try {
       entry.messages.sort((a, b) => a.msg.message_id - b.msg.message_id);
 
@@ -228,23 +300,50 @@ export const registerTelegramHandlers = ({
 
       const storeAllowFrom = await readChannelAllowFromStore("telegram").catch(() => []);
       await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom);
+      settleOk();
     } catch (err) {
-      runtime.error?.(danger(`media group handler failed: ${String(err)}`));
+      const primary = entry.messages[0];
+      logger.error(
+        {
+          phase: "inbound.media_group",
+          updateId: primary ? resolveTelegramUpdateId(primary.ctx) : undefined,
+          chatId: primary?.msg.chat.id,
+          messageId: primary?.msg.message_id,
+          mediaGroupId: primary?.msg.media_group_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram media group handler failed",
+      );
+      settleErr(err);
     }
   };
 
   const flushTextFragments = async (entry: TextFragmentEntry) => {
+    const settleOk = () => {
+      for (const msg of entry.messages) {
+        msg.done.resolve();
+      }
+    };
+
+    const settleErr = (err: unknown) => {
+      for (const msg of entry.messages) {
+        msg.done.reject(err);
+      }
+    };
+
     try {
       entry.messages.sort((a, b) => a.msg.message_id - b.msg.message_id);
 
       const first = entry.messages[0];
       const last = entry.messages.at(-1);
       if (!first || !last) {
+        settleOk();
         return;
       }
 
       const combinedText = entry.messages.map((m) => m.msg.text ?? "").join("");
       if (!combinedText.trim()) {
+        settleOk();
         return;
       }
 
@@ -268,8 +367,22 @@ export const registerTelegramHandlers = ({
         storeAllowFrom,
         { messageIdOverride: String(last.msg.message_id) },
       );
+      settleOk();
     } catch (err) {
-      runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
+      const primary = entry.messages[0];
+      logger.error(
+        {
+          phase: "inbound.text_fragments",
+          updateId: primary ? resolveTelegramUpdateId(primary.ctx) : undefined,
+          chatId: primary?.msg.chat.id,
+          messageId: primary?.msg.message_id,
+          bufferKey: entry.key,
+          parts: entry.messages.length,
+          error: formatErrorMessage(err),
+        },
+        "telegram text fragment handler failed",
+      );
+      settleErr(err);
     }
   };
 
@@ -281,7 +394,21 @@ export const registerTelegramHandlers = ({
         .then(async () => {
           await flushTextFragments(entry);
         })
-        .catch(() => undefined);
+        .catch((err) => {
+          // R1-06: Log escaped text fragment flush errors instead of silently swallowing.
+          // Individual defers are already settled by flushTextFragments; this catches
+          // only unexpected errors that escape the inner try/catch.
+          logger.error(
+            {
+              phase: "inbound.text_fragments.chain",
+              bufferKey: entry.key,
+              parts: entry.messages.length,
+              updateIds: entry.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+              error: formatErrorMessage(err),
+            },
+            "text fragment processing chain error",
+          );
+        });
       await textFragmentProcessing;
     }, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS);
   };
@@ -294,6 +421,26 @@ export const registerTelegramHandlers = ({
     if (shouldSkipUpdate(ctx)) {
       return;
     }
+    // R1-07: Attach completion defer so offset middleware waits for async processing.
+    const done = createDeferred();
+    setTelegramUpdateCompletionDefer(ctx, done.promise);
+
+    let completionSettled = false;
+    const resolveCompletionOnce = () => {
+      if (completionSettled) {
+        return;
+      }
+      completionSettled = true;
+      done.resolve();
+    };
+    const rejectCompletionOnce = (err: unknown) => {
+      if (completionSettled) {
+        return;
+      }
+      completionSettled = true;
+      done.reject(err);
+    };
+
     // Answer immediately to prevent Telegram from retrying while we process
     await withTelegramApiErrorLogging({
       operation: "answerCallbackQuery",
@@ -628,7 +775,23 @@ export const registerTelegramHandlers = ({
         messageIdOverride: callback.id,
       });
     } catch (err) {
-      runtime.error?.(danger(`callback handler failed: ${String(err)}`));
+      rejectCompletionOnce(err);
+      const callback = ctx.callbackQuery;
+      const msg = callback?.message;
+      logger.error(
+        {
+          phase: "inbound.callback_query",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          callbackId: callback?.id,
+          error: formatErrorMessage(err),
+        },
+        "telegram callback handler failed",
+      );
+      return;
+    } finally {
+      resolveCompletionOnce();
     }
   });
 
@@ -680,7 +843,17 @@ export const registerTelegramHandlers = ({
         );
       }
     } catch (err) {
-      runtime.error?.(danger(`[telegram] Group migration handler failed: ${String(err)}`));
+      const msg = ctx.message;
+      logger.error(
+        {
+          phase: "inbound.group_migration",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram group migration handler failed",
+      );
     }
   });
 
@@ -824,7 +997,9 @@ export const registerTelegramHandlers = ({
               existing.messages.length + 1 <= TELEGRAM_TEXT_FRAGMENT_MAX_PARTS &&
               nextTotalChars <= TELEGRAM_TEXT_FRAGMENT_MAX_TOTAL_CHARS
             ) {
-              existing.messages.push({ msg, ctx, receivedAtMs: nowMs });
+              const fragmentDone = createDeferred();
+              existing.messages.push({ msg, ctx, receivedAtMs: nowMs, done: fragmentDone });
+              setTelegramUpdateCompletionDefer(ctx, fragmentDone.promise);
               scheduleTextFragmentFlush(existing);
               return;
             }
@@ -837,15 +1012,28 @@ export const registerTelegramHandlers = ({
             .then(async () => {
               await flushTextFragments(existing);
             })
-            .catch(() => undefined);
+            .catch((err) => {
+              // R1-06: Log escaped flush errors; defers already settled inside flushTextFragments.
+              logger.error(
+                {
+                  phase: "inbound.text_fragments.chain",
+                  bufferKey: existing.key,
+                  parts: existing.messages.length,
+                  error: formatErrorMessage(err),
+                },
+                "text fragment processing chain error",
+              );
+            });
           await textFragmentProcessing;
         }
 
         const shouldStart = text.length >= TELEGRAM_TEXT_FRAGMENT_START_THRESHOLD_CHARS;
         if (shouldStart) {
+          const fragmentDone = createDeferred();
+          setTelegramUpdateCompletionDefer(ctx, fragmentDone.promise);
           const entry: TextFragmentEntry = {
             key,
-            messages: [{ msg, ctx, receivedAtMs: nowMs }],
+            messages: [{ msg, ctx, receivedAtMs: nowMs, done: fragmentDone }],
             timer: setTimeout(() => {}, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS),
           };
           textFragmentBuffer.set(key, entry);
@@ -860,28 +1048,56 @@ export const registerTelegramHandlers = ({
         const existing = mediaGroupBuffer.get(mediaGroupId);
         if (existing) {
           clearTimeout(existing.timer);
-          existing.messages.push({ msg, ctx });
+          const mediaDone = createDeferred();
+          existing.messages.push({ msg, ctx, done: mediaDone });
+          setTelegramUpdateCompletionDefer(ctx, mediaDone.promise);
           existing.timer = setTimeout(async () => {
             mediaGroupBuffer.delete(mediaGroupId);
             mediaGroupProcessing = mediaGroupProcessing
               .then(async () => {
                 await processMediaGroup(existing);
               })
-              .catch(() => undefined);
+              .catch((err) => {
+                // R1-05: Log escaped media group flush errors; defers already settled inside processMediaGroup.
+                logger.error(
+                  {
+                    phase: "inbound.media_group.chain",
+                    mediaGroupId,
+                    parts: existing.messages.length,
+                    updateIds: existing.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+                    error: formatErrorMessage(err),
+                  },
+                  "media group processing chain error",
+                );
+              });
             await mediaGroupProcessing;
-          }, mediaGroupTimeoutMs);
+          }, MEDIA_GROUP_TIMEOUT_MS);
         } else {
+          const mediaDone = createDeferred();
+          setTelegramUpdateCompletionDefer(ctx, mediaDone.promise);
           const entry: MediaGroupEntry = {
-            messages: [{ msg, ctx }],
+            messages: [{ msg, ctx, done: mediaDone }],
             timer: setTimeout(async () => {
               mediaGroupBuffer.delete(mediaGroupId);
               mediaGroupProcessing = mediaGroupProcessing
                 .then(async () => {
                   await processMediaGroup(entry);
                 })
-                .catch(() => undefined);
+                .catch((err) => {
+                  // R1-05: Log escaped media group flush errors; defers already settled inside processMediaGroup.
+                  logger.error(
+                    {
+                      phase: "inbound.media_group.chain",
+                      mediaGroupId,
+                      parts: entry.messages.length,
+                      updateIds: entry.messages.map((m) => resolveTelegramUpdateId(m.ctx)),
+                      error: formatErrorMessage(err),
+                    },
+                    "media group processing chain error",
+                  );
+                });
               await mediaGroupProcessing;
-            }, mediaGroupTimeoutMs),
+            }, MEDIA_GROUP_TIMEOUT_MS),
           };
           mediaGroupBuffer.set(mediaGroupId, entry);
         }
@@ -932,16 +1148,36 @@ export const registerTelegramHandlers = ({
       const debounceKey = senderId
         ? `telegram:${accountId ?? "default"}:${conversationKey}:${senderId}`
         : null;
-      await inboundDebouncer.enqueue({
-        ctx,
-        msg,
-        allMedia,
-        storeAllowFrom,
-        debounceKey,
-        botUsername: ctx.me?.username,
-      });
+      const done = createDeferred();
+      setTelegramUpdateCompletionDefer(ctx, done.promise);
+      try {
+        await inboundDebouncer.enqueue({
+          ctx,
+          msg,
+          allMedia,
+          storeAllowFrom,
+          debounceKey,
+          botUsername: ctx.me?.username,
+          done,
+        });
+      } catch (err) {
+        done.reject(err);
+        throw err;
+      }
     } catch (err) {
-      runtime.error?.(danger(`handler failed: ${String(err)}`));
+      const msg = ctx.message;
+      logger.error(
+        {
+          phase: "inbound.message",
+          updateId: resolveTelegramUpdateId(ctx),
+          chatId: msg?.chat.id,
+          messageId: msg?.message_id,
+          mediaGroupId: msg?.media_group_id,
+          error: formatErrorMessage(err),
+        },
+        "telegram message handler failed",
+      );
+      runtime.error?.(danger(`handler failed: ${formatErrorMessage(err)}`));
     }
   });
 };

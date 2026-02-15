@@ -22,7 +22,7 @@ import {
 } from "../config/group-policy.js";
 import { loadSessionStore, resolveStorePath } from "../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../globals.js";
-import { formatUncaughtError } from "../infra/errors.js";
+import { formatErrorMessage, formatUncaughtError } from "../infra/errors.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -35,6 +35,7 @@ import { registerTelegramNativeCommands } from "./bot-native-commands.js";
 import {
   buildTelegramUpdateKey,
   createTelegramUpdateDedupe,
+  getTelegramUpdateCompletionDefer,
   resolveTelegramUpdateId,
   type TelegramUpdateKeyContext,
 } from "./bot-updates.js";
@@ -45,6 +46,10 @@ import {
   resolveTelegramStreamMode,
 } from "./bot/helpers.js";
 import { resolveTelegramFetch } from "./fetch.js";
+import {
+  extractTelegramRetryAfterMs,
+  isRecoverableTelegramNetworkError,
+} from "./network-errors.js";
 import { wasSentByBot } from "./sent-message-cache.js";
 
 export type TelegramBotOptions = {
@@ -61,10 +66,6 @@ export type TelegramBotOptions = {
   updateOffset?: {
     lastUpdateId?: number | null;
     onUpdateId?: (updateId: number) => void | Promise<void>;
-  };
-  testTimings?: {
-    mediaGroupFlushMs?: number;
-    textFragmentGapMs?: number;
   };
 };
 
@@ -156,28 +157,106 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   });
 
   const recentUpdates = createTelegramUpdateDedupe();
-  let lastUpdateId =
+  let committedUpdateId =
     typeof opts.updateOffset?.lastUpdateId === "number" ? opts.updateOffset.lastUpdateId : null;
 
-  const recordUpdateId = (ctx: TelegramUpdateKeyContext) => {
-    const updateId = resolveTelegramUpdateId(ctx);
-    if (typeof updateId !== "number") {
+  const pendingUpdates = new Map<number, { done: boolean }>();
+  let commitTask: Promise<void> = Promise.resolve();
+
+  // R1-04: The promise chain via `commitTask = commitTask.then(...)` guarantees
+  // sequential execution in the JS event loop — each `.then` callback runs only
+  // after the previous one resolves. No mutex is needed.
+  const queueCommit = () => {
+    const onUpdateId = opts.updateOffset?.onUpdateId;
+    if (!onUpdateId) {
       return;
     }
-    if (lastUpdateId !== null && updateId <= lastUpdateId) {
+    commitTask = commitTask
+      .then(async () => {
+        const committed = committedUpdateId ?? -1;
+        let minNotDone = Number.POSITIVE_INFINITY;
+        let maxDone = -1;
+
+        for (const [id, entry] of pendingUpdates) {
+          if (entry.done) {
+            if (id > maxDone) {
+              maxDone = id;
+            }
+            continue;
+          }
+          if (id < minNotDone) {
+            minNotDone = id;
+          }
+        }
+
+        const target =
+          minNotDone !== Number.POSITIVE_INFINITY
+            ? minNotDone - 1
+            : // No pending updates: safe to commit the highest finished update we've seen.
+              maxDone;
+
+        if (target <= committed) {
+          return;
+        }
+
+        await onUpdateId(target);
+        committedUpdateId = target;
+
+        const toDelete: number[] = [];
+        for (const id of pendingUpdates.keys()) {
+          if (id <= target) {
+            toDelete.push(id);
+          }
+        }
+        for (const id of toDelete) {
+          pendingUpdates.delete(id);
+        }
+      })
+      .catch((err) => {
+        runtime.error?.(danger(`telegram: update offset commit failed: ${String(err)}`));
+      });
+  };
+
+  // R1-11: Only track pending updates when an offset commit callback exists.
+  // In webhook mode (no onUpdateId), tracking without pruning causes unbounded growth.
+  const hasOffsetCallback = Boolean(opts.updateOffset?.onUpdateId);
+
+  const noteUpdateSeen = (updateId: number) => {
+    if (!hasOffsetCallback) {
       return;
     }
-    lastUpdateId = updateId;
-    void opts.updateOffset?.onUpdateId?.(updateId);
+    if (committedUpdateId !== null && updateId <= committedUpdateId) {
+      return;
+    }
+    if (!pendingUpdates.has(updateId)) {
+      pendingUpdates.set(updateId, { done: false });
+    }
+  };
+
+  const markUpdateDone = (updateId: number) => {
+    if (!hasOffsetCallback) {
+      return;
+    }
+    const entry = pendingUpdates.get(updateId);
+    if (!entry || entry.done) {
+      return;
+    }
+    entry.done = true;
+    queueCommit();
   };
 
   const shouldSkipUpdate = (ctx: TelegramUpdateKeyContext) => {
     const updateId = resolveTelegramUpdateId(ctx);
-    if (typeof updateId === "number" && lastUpdateId !== null) {
-      if (updateId <= lastUpdateId) {
+
+    // Only skip updates we have already *safely committed* (persisted). Avoid at-most-once.
+    if (typeof updateId === "number") {
+      if (committedUpdateId !== null && updateId <= committedUpdateId) {
         return true;
       }
+      return false;
     }
+
+    // Fallback: for updates without update_id, dedupe by derived key.
     const key = buildTelegramUpdateKey(ctx);
     const skipped = recentUpdates.check(key);
     if (skipped && key && shouldLogVerbose()) {
@@ -212,6 +291,26 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     });
   };
 
+  const updateCompletionLogger = createSubsystemLogger(
+    "gateway/channels/telegram/update-completion",
+  );
+
+  type TelegramUpdateFailureDisposition = {
+    retryable: boolean;
+    errorClass: "rate_limit" | "network" | "permanent";
+    retryAfterMs?: number;
+  };
+
+  const classifyTelegramUpdateFailure = (err: unknown): TelegramUpdateFailureDisposition => {
+    const retryAfterMs = extractTelegramRetryAfterMs(err);
+    if (typeof retryAfterMs === "number") {
+      return { retryable: true, errorClass: "rate_limit", retryAfterMs };
+    }
+
+    const retryable = isRecoverableTelegramNetworkError(err, { context: "polling" });
+    return { retryable, errorClass: retryable ? "network" : "permanent" };
+  };
+
   bot.use(async (ctx, next) => {
     if (shouldLogVerbose()) {
       try {
@@ -223,8 +322,90 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
       }
     }
-    await next();
-    recordUpdateId(ctx);
+
+    const updateId = resolveTelegramUpdateId(ctx);
+    if (typeof updateId === "number") {
+      noteUpdateSeen(updateId);
+    }
+
+    let nextError: unknown;
+    try {
+      await next();
+    } catch (err) {
+      nextError = err;
+    }
+
+    if (typeof updateId === "number") {
+      if (nextError) {
+        const disposition = classifyTelegramUpdateFailure(nextError);
+        updateCompletionLogger.error("telegram update middleware failed", {
+          phase: "inbound.middleware",
+          updateId,
+          errorClass: disposition.errorClass,
+          retryable: disposition.retryable,
+          retryAfterMs: disposition.retryAfterMs,
+          error: formatErrorMessage(nextError),
+        });
+
+        if (disposition.retryable) {
+          // Leave update pending; failing updates should not advance offset.
+        } else {
+          // R1-03: Permanent failures advance offset to avoid stalling, but must be
+          // highly visible. Log at error level with CRITICAL prefix and emit system event.
+          updateCompletionLogger.error("CRITICAL: permanent update failure — advancing offset", {
+            phase: "inbound.middleware",
+            updateId,
+            errorClass: disposition.errorClass,
+            error: formatErrorMessage(nextError),
+          });
+          const route = resolveAgentRoute({
+            cfg,
+            channel: "telegram",
+            accountId: account.accountId,
+          });
+          enqueueSystemEvent(
+            `Telegram update ${updateId} permanently failed: ${formatErrorMessage(nextError)}`,
+            {
+              sessionKey: route.sessionKey,
+              contextKey: `telegram:update:permanent:${updateId}:${disposition.errorClass}`,
+            },
+          );
+          markUpdateDone(updateId);
+          nextError = undefined;
+        }
+      } else {
+        const defer = getTelegramUpdateCompletionDefer(ctx);
+        if (defer) {
+          void defer
+            .then(() => {
+              markUpdateDone(updateId);
+            })
+            .catch((err) => {
+              const disposition = classifyTelegramUpdateFailure(err);
+              updateCompletionLogger.error("telegram deferred update processing failed", {
+                phase: "inbound.defer",
+                updateId,
+                errorClass: disposition.errorClass,
+                retryable: disposition.retryable,
+                retryAfterMs: disposition.retryAfterMs,
+                error: formatErrorMessage(err),
+              });
+
+              if (disposition.retryable) {
+                return;
+              }
+              // Permanent deferred failures should not stall the offset indefinitely.
+              markUpdateDone(updateId);
+            });
+        } else {
+          markUpdateDone(updateId);
+        }
+      }
+    }
+
+    if (nextError) {
+      throw nextError;
+    }
   });
 
   const historyLimit = Math.max(
@@ -244,7 +425,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       ? telegramCfg.allowFrom
       : undefined) ??
     (opts.allowFrom && opts.allowFrom.length > 0 ? opts.allowFrom : undefined);
-  const replyToMode = opts.replyToMode ?? telegramCfg.replyToMode ?? "off";
+  const replyToMode = opts.replyToMode ?? telegramCfg.replyToMode ?? "first";
   const nativeEnabled = resolveNativeCommandsEnabled({
     providerId: "telegram",
     providerSetting: telegramCfg.commands?.native,
@@ -494,8 +675,17 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     logger,
   });
 
+  // Expose a method to flush pending offset commits before runner restart.
+  // This prevents duplicate delivery when the polling loop restarts.
+  (bot as TelegramBotWithFlush)._flushPendingCommits = () => commitTask;
+
   return bot;
 }
+
+/** Bot instance augmented with internal flush helper (used by monitor). */
+export type TelegramBotWithFlush = Bot & {
+  _flushPendingCommits?: () => Promise<void>;
+};
 
 export function createTelegramWebhookCallback(bot: Bot, path = "/telegram-webhook") {
   return { path, handler: webhookCallback(bot, "http") };

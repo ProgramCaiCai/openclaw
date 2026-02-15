@@ -69,6 +69,63 @@ function getErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
+function getTelegramApiErrorCode(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") {
+    return undefined;
+  }
+  const typed = err as {
+    error_code?: unknown;
+    errorCode?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown } | null;
+  };
+
+  const candidates = [
+    typed.error_code,
+    typed.errorCode,
+    typed.status,
+    typed.statusCode,
+    typed.response?.status,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+    if (typeof candidate === "string" && candidate.trim()) {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function getTelegramRetryAfterSeconds(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") {
+    return undefined;
+  }
+  const params = (err as { parameters?: unknown }).parameters;
+  if (params && typeof params === "object") {
+    const retryAfter = (params as { retry_after?: unknown }).retry_after;
+    if (typeof retryAfter === "number" && Number.isFinite(retryAfter)) {
+      return retryAfter;
+    }
+  }
+  const direct = (err as { retry_after?: unknown; retryAfter?: unknown }).retry_after;
+  if (typeof direct === "number" && Number.isFinite(direct)) {
+    return direct;
+  }
+  const alt = (err as { retryAfter?: unknown }).retryAfter;
+  if (typeof alt === "number" && Number.isFinite(alt)) {
+    return alt;
+  }
+  return undefined;
+}
+
 function collectErrorCandidates(err: unknown): unknown[] {
   const queue = [err];
   const seen = new Set<unknown>();
@@ -113,7 +170,20 @@ function collectErrorCandidates(err: unknown): unknown[] {
   return candidates;
 }
 
+export function extractTelegramRetryAfterMs(err: unknown): number | undefined {
+  for (const candidate of collectErrorCandidates(err)) {
+    const retryAfterSeconds = getTelegramRetryAfterSeconds(candidate);
+    if (typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds)) {
+      return Math.max(0, Math.trunc(retryAfterSeconds * 1000));
+    }
+  }
+  return undefined;
+}
+
 export type TelegramNetworkErrorContext = "polling" | "send" | "webhook" | "unknown";
+
+/** Telegram API HTTP status codes that are transient server errors (safe to retry in polling/webhook). */
+const RECOVERABLE_TELEGRAM_HTTP_CODES = new Set([500, 502, 503, 504]);
 
 export function isRecoverableTelegramNetworkError(
   err: unknown,
@@ -128,6 +198,19 @@ export function isRecoverableTelegramNetworkError(
       : options.context !== "send";
 
   for (const candidate of collectErrorCandidates(err)) {
+    const telegramErrorCode = getTelegramApiErrorCode(candidate);
+    if (telegramErrorCode === 429) {
+      return true;
+    }
+
+    // Treat transient server errors (5xx) as recoverable in polling/webhook contexts
+    // to prevent the polling loop from terminating on temporary Telegram API outages.
+    if (telegramErrorCode && RECOVERABLE_TELEGRAM_HTTP_CODES.has(telegramErrorCode)) {
+      if (options.context === "polling" || options.context === "webhook") {
+        return true;
+      }
+    }
+
     const code = normalizeCode(getErrorCode(candidate));
     if (code && RECOVERABLE_ERROR_CODES.has(code)) {
       return true;

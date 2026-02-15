@@ -53,4 +53,20 @@ export const createTelegramUpdateDedupe = () =>
     maxSize: RECENT_TELEGRAM_UPDATE_MAX,
   });
 
+const updateCompletionDefers = new WeakMap<object, Promise<void>>();
+
+export const setTelegramUpdateCompletionDefer = (ctx: unknown, defer: Promise<void>) => {
+  if (!ctx || (typeof ctx !== "object" && typeof ctx !== "function")) {
+    return;
+  }
+  updateCompletionDefers.set(ctx, defer);
+};
+
+export const getTelegramUpdateCompletionDefer = (ctx: unknown): Promise<void> | undefined => {
+  if (!ctx || (typeof ctx !== "object" && typeof ctx !== "function")) {
+    return undefined;
+  }
+  return updateCompletionDefers.get(ctx);
+};
+
 export { MEDIA_GROUP_TIMEOUT_MS };
