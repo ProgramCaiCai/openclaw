@@ -769,21 +769,18 @@ describe("QmdMemoryManager", () => {
     const { manager, resolved } = await createManager();
 
     await manager.search("test", { sessionKey: "agent:main:slack:dm:u123" });
-    const searchCall = spawnMock.mock.calls.find((call) => call[1]?.[0] === "search");
+    const searchCalls = spawnMock.mock.calls
+      .filter((call) => call[1]?.[0] === "search")
+      .map((call) => call[1] as string[]);
     const maxResults = resolved.qmd?.limits.maxResults;
     if (!maxResults) {
       throw new Error("qmd maxResults missing");
     }
-    expect(searchCall?.[1]).toEqual([
-      "search",
-      "test",
-      "--json",
-      "-n",
-      String(maxResults),
-      "-c",
-      "workspace",
-      "-c",
-      "notes",
+    // With multiple collections, search runs per-collection to avoid large
+    // collections drowning out smaller ones.
+    expect(searchCalls).toEqual([
+      ["search", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
+      ["search", "test", "--json", "-n", String(maxResults), "-c", "notes"],
     ]);
     await manager.close();
   });
@@ -948,8 +945,10 @@ describe("QmdMemoryManager", () => {
     const searchAndQueryCalls = spawnMock.mock.calls
       .map((call) => call[1] as string[])
       .filter((args) => args[0] === "search" || args[0] === "query");
+    // Per-collection search: first collection fails with unsupported flag,
+    // so it falls back to per-collection query for all collections.
     expect(searchAndQueryCalls).toEqual([
-      ["search", "test", "--json", "-n", String(maxResults), "-c", "workspace", "-c", "notes"],
+      ["search", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
       ["query", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
       ["query", "test", "--json", "-n", String(maxResults), "-c", "notes"],
     ]);

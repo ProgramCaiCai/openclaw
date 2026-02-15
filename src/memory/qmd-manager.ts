@@ -467,7 +467,12 @@ export class QmdMemoryManager implements MemorySearchManager {
 
     const runQueryFallback = async (): Promise<{ stdout: string; stderr: string }> => {
       if (collectionNames.length > 1) {
-        const parsed = await this.runQueryAcrossCollections(trimmed, limit, collectionNames);
+        const parsed = await this.runSearchAcrossCollections(
+          "query",
+          trimmed,
+          limit,
+          collectionNames,
+        );
         return { stdout: JSON.stringify(parsed), stderr: "" };
       }
       return await runQuery();
@@ -478,26 +483,39 @@ export class QmdMemoryManager implements MemorySearchManager {
 
     if (this.qmd.searchMode === "search" || this.qmd.searchMode === "vsearch") {
       const mode = this.qmd.searchMode;
-      const args = this.buildSearchArgs(mode, trimmed, limit);
-      args.push(...collectionFilterArgs);
-      try {
-        const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
-        stdout = result.stdout;
-        stderr = result.stderr;
-      } catch (err) {
-        const msg = String(err);
-        if (this.isUnsupportedQmdOptionError(err)) {
-          log.warn(`qmd ${mode} does not support configured flags; retrying search with qmd query`);
-          const result = await runQueryFallback();
+      if (collectionNames.length > 1) {
+        const parsed = await this.runSearchAcrossCollections(mode, trimmed, limit, collectionNames);
+        stdout = JSON.stringify(parsed);
+        stderr = "";
+      } else {
+        const args = this.buildSearchArgs(mode, trimmed, limit);
+        args.push(...collectionFilterArgs);
+        try {
+          const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
           stdout = result.stdout;
           stderr = result.stderr;
-        } else {
-          log.warn(`qmd ${mode} failed: ${msg}`);
-          throw err instanceof Error ? err : new Error(msg);
+        } catch (err) {
+          const msg = String(err);
+          if (this.isUnsupportedQmdOptionError(err)) {
+            log.warn(
+              `qmd ${mode} does not support configured flags; retrying search with qmd query`,
+            );
+            const result = await runQueryFallback();
+            stdout = result.stdout;
+            stderr = result.stderr;
+          } else {
+            log.warn(`qmd ${mode} failed: ${msg}`);
+            throw err instanceof Error ? err : new Error(msg);
+          }
         }
       }
     } else if (this.qmd.searchMode === "query" && collectionNames.length > 1) {
-      const parsed = await this.runQueryAcrossCollections(trimmed, limit, collectionNames);
+      const parsed = await this.runSearchAcrossCollections(
+        "query",
+        trimmed,
+        limit,
+        collectionNames,
+      );
       stdout = JSON.stringify(parsed);
       stderr = "";
     } else {
@@ -1239,31 +1257,48 @@ export class QmdMemoryManager implements MemorySearchManager {
     ]);
   }
 
-  private async runQueryAcrossCollections(
+  private async runSearchAcrossCollections(
+    command: "query" | "search" | "vsearch",
     query: string,
     limit: number,
     collectionNames: string[],
   ): Promise<QmdQueryResult[]> {
-    log.debug(
-      `qmd query multi-collection workaround active (${collectionNames.length} collections)`,
-    );
+    log.debug(`qmd ${command} multi-collection active (${collectionNames.length} collections)`);
     const bestByDocId = new Map<string, QmdQueryResult>();
+    let unsupportedOptionDetected = false;
     for (const collectionName of collectionNames) {
-      const args = this.buildSearchArgs("query", query, limit);
+      const args = this.buildSearchArgs(command, query, limit);
       args.push("-c", collectionName);
-      const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
-      const parsed = parseQmdQueryJson(result.stdout, result.stderr);
-      for (const entry of parsed) {
-        if (typeof entry.docid !== "string" || !entry.docid.trim()) {
-          continue;
+      try {
+        const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs });
+        const parsed = parseQmdQueryJson(result.stdout, result.stderr);
+        for (const entry of parsed) {
+          if (typeof entry.docid !== "string" || !entry.docid.trim()) {
+            continue;
+          }
+          const prev = bestByDocId.get(entry.docid);
+          const prevScore = typeof prev?.score === "number" ? prev.score : Number.NEGATIVE_INFINITY;
+          const nextScore =
+            typeof entry.score === "number" ? entry.score : Number.NEGATIVE_INFINITY;
+          if (!prev || nextScore > prevScore) {
+            bestByDocId.set(entry.docid, entry);
+          }
         }
-        const prev = bestByDocId.get(entry.docid);
-        const prevScore = typeof prev?.score === "number" ? prev.score : Number.NEGATIVE_INFINITY;
-        const nextScore = typeof entry.score === "number" ? entry.score : Number.NEGATIVE_INFINITY;
-        if (!prev || nextScore > prevScore) {
-          bestByDocId.set(entry.docid, entry);
+      } catch (err) {
+        if (this.isUnsupportedQmdOptionError(err)) {
+          unsupportedOptionDetected = true;
+          break;
         }
+        log.warn(`qmd ${command} failed for collection ${collectionName}: ${String(err)}`);
       }
+    }
+    // If the command itself is unsupported (e.g. older qmd without search --json),
+    // fall back to per-collection query.
+    if (unsupportedOptionDetected && command !== "query") {
+      log.warn(
+        `qmd ${command} does not support configured flags; falling back to per-collection query`,
+      );
+      return this.runSearchAcrossCollections("query", query, limit, collectionNames);
     }
     return [...bestByDocId.values()].toSorted((a, b) => (b.score ?? 0) - (a.score ?? 0));
   }
