@@ -117,6 +117,8 @@ describe("QmdMemoryManager", () => {
   });
 
   beforeEach(async () => {
+    // Reset static capability flag so tests don't leak state to each other.
+    (QmdMemoryManager as unknown as { noExpandSupported: boolean }).noExpandSupported = true;
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => createMockChild());
     logWarnMock.mockReset();
@@ -825,8 +827,8 @@ describe("QmdMemoryManager", () => {
       .map((call) => call[1] as string[])
       .filter((args) => args[0] === "query");
     expect(queryCalls).toEqual([
-      ["query", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
-      ["query", "test", "--json", "-n", String(maxResults), "-c", "notes"],
+      ["query", "test", "--json", "--no-expand", "-n", String(maxResults), "-c", "workspace"],
+      ["query", "test", "--json", "--no-expand", "-n", String(maxResults), "-c", "notes"],
     ]);
     await manager.close();
   });
@@ -949,8 +951,8 @@ describe("QmdMemoryManager", () => {
     // so it falls back to per-collection query for all collections.
     expect(searchAndQueryCalls).toEqual([
       ["search", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
-      ["query", "test", "--json", "-n", String(maxResults), "-c", "workspace"],
-      ["query", "test", "--json", "-n", String(maxResults), "-c", "notes"],
+      ["query", "test", "--json", "--no-expand", "-n", String(maxResults), "-c", "workspace"],
+      ["query", "test", "--json", "--no-expand", "-n", String(maxResults), "-c", "notes"],
     ]);
     await manager.close();
   });
