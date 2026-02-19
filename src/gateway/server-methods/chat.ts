@@ -574,18 +574,21 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const { sessionKey, limit } = params as {
+    const { sessionKey, limit, safeLimit } = params as {
       sessionKey: string;
       limit?: number;
+      safeLimit?: boolean;
     };
     const { cfg, storePath, entry } = loadSessionEntry(sessionKey);
     const sessionId = entry?.sessionId;
     const rawMessages =
       sessionId && storePath ? readSessionMessages(sessionId, storePath, entry?.sessionFile) : [];
-    const hardMax = 1000;
-    const defaultLimit = 200;
+    // sessions_history uses safeLimit=true to enforce conservative server defaults.
+    const hardMax = safeLimit === true ? 50 : 1000;
+    const defaultLimit = safeLimit === true ? 10 : 200;
     const requested = typeof limit === "number" ? limit : defaultLimit;
-    const max = Math.min(hardMax, requested);
+    const normalizedRequested = Math.max(1, Math.floor(requested));
+    const max = Math.min(hardMax, normalizedRequested);
     const sliced = rawMessages.length > max ? rawMessages.slice(-max) : rawMessages;
     const sanitized = stripEnvelopeFromMessages(sliced);
     const normalized = sanitizeChatHistoryMessages(sanitized);
@@ -898,6 +901,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           runId: clientRunId,
           abortSignal: abortController.signal,
           images: parsedImages.length > 0 ? parsedImages : undefined,
+          disableBlockStreaming: true,
           onAgentRunStart: (runId) => {
             agentRunStarted = true;
             const connId = typeof client?.connId === "string" ? client.connId : undefined;

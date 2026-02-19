@@ -18,6 +18,7 @@ import {
 } from "./pi-embedded-subscribe.tools.js";
 import { inferToolMetaFromArgs } from "./pi-embedded-utils.js";
 import { buildToolMutationState, isSameToolMutationAction } from "./tool-mutation.js";
+import { hardCapToolOutput } from "./tool-output-hard-cap.js";
 import { normalizeToolName } from "./tool-policy.js";
 
 /** Track tool execution start times and args for after_tool_call hook */
@@ -230,7 +231,7 @@ export function handleToolExecutionUpdate(
   const toolName = normalizeToolName(String(evt.toolName));
   const toolCallId = String(evt.toolCallId);
   const partial = evt.partialResult;
-  const sanitized = sanitizeToolResult(partial);
+  const sanitized = hardCapToolOutput(sanitizeToolResult(partial));
   emitAgentEvent({
     runId: ctx.params.runId,
     stream: "tool",
@@ -318,8 +319,9 @@ export async function handleToolExecutionEnd(
       ctx.trimMessagingToolSent();
     }
   }
-  const pendingMediaUrls = ctx.state.pendingMessagingMediaUrls.get(toolCallId) ?? [];
-  ctx.state.pendingMessagingMediaUrls.delete(toolCallId);
+  const pendingMediaMap = ctx.state.pendingMessagingMediaUrls;
+  const pendingMediaUrls = pendingMediaMap?.get(toolCallId) ?? [];
+  pendingMediaMap?.delete(toolCallId);
   const startArgs =
     startData?.args && typeof startData.args === "object"
       ? (startData.args as Record<string, unknown>)
@@ -352,7 +354,7 @@ export async function handleToolExecutionEnd(
       toolCallId,
       meta,
       isError: isToolError,
-      result: sanitizedResult,
+      result: hardCapToolOutput(sanitizedResult),
     },
   });
   void ctx.params.onAgentEvent?.({

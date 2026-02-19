@@ -109,18 +109,6 @@ describe("before_tool_call loop detection behavior", () => {
       }
     }
   }
-
-  function createGenericReadRepeatFixture() {
-    const execute = vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: "same output" }],
-      details: { ok: true },
-    });
-    return {
-      tool: createWrappedTool("read", execute),
-      params: { path: "/tmp/file" },
-    };
-  }
-
   it("blocks known poll loops when no progress repeats", async () => {
     const execute = vi.fn().mockResolvedValue({
       content: [{ type: "text", text: "(no new output)\n\nProcess still running." }],
@@ -171,8 +159,37 @@ describe("before_tool_call loop detection behavior", () => {
     }
   });
 
+  it("blocks known poll loops when hook-mutated params still produce no progress", async () => {
+    hookRunner.hasHooks.mockReturnValue(true);
+    hookRunner.runBeforeToolCall.mockImplementation(async ({ params }) => ({
+      params: { ...(params as Record<string, unknown>), forwardedByHook: true },
+    }));
+
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "(no new output)\n\nProcess still running." }],
+      details: { status: "running", aggregated: "steady" },
+    });
+    const tool = createWrappedTool("process", execute);
+    const params = { action: "poll", sessionId: "sess-hook-mutated" };
+
+    for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
+      await expect(
+        tool.execute(`poll-hook-${i}`, params, undefined, undefined),
+      ).resolves.toBeDefined();
+    }
+
+    await expect(
+      tool.execute(`poll-hook-${CRITICAL_THRESHOLD}`, params, undefined, undefined),
+    ).rejects.toThrow("CRITICAL");
+  });
+
   it("keeps generic repeated calls warn-only below global breaker", async () => {
-    const { tool, params } = createGenericReadRepeatFixture();
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "same output" }],
+      details: { ok: true },
+    });
+    const tool = createWrappedTool("read", execute);
+    const params = { path: "/tmp/file" };
 
     for (let i = 0; i < CRITICAL_THRESHOLD + 5; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -180,7 +197,12 @@ describe("before_tool_call loop detection behavior", () => {
   });
 
   it("blocks generic repeated no-progress calls at global breaker threshold", async () => {
-    const { tool, params } = createGenericReadRepeatFixture();
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "same output" }],
+      details: { ok: true },
+    });
+    const tool = createWrappedTool("read", execute);
+    const params = { path: "/tmp/file" };
 
     for (let i = 0; i < GLOBAL_CIRCUIT_BREAKER_THRESHOLD; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -194,7 +216,12 @@ describe("before_tool_call loop detection behavior", () => {
   it("coalesces repeated generic warning events into threshold buckets", async () => {
     await withToolLoopEvents(
       async (emitted) => {
-        const { tool, params } = createGenericReadRepeatFixture();
+        const execute = vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "same output" }],
+          details: { ok: true },
+        });
+        const tool = createWrappedTool("read", execute);
+        const params = { path: "/tmp/file" };
 
         for (let i = 0; i < 21; i += 1) {
           await tool.execute(`read-bucket-${i}`, params, undefined, undefined);
