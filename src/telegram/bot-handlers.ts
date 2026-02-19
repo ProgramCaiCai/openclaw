@@ -22,17 +22,14 @@ import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import {
+  firstDefined,
   isSenderAllowed,
   normalizeAllowFromWithStore,
   type NormalizedAllowFrom,
 } from "./bot-access.js";
 import type { TelegramMediaRef } from "./bot-message-context.js";
 import { RegisterTelegramHandlerParams } from "./bot-native-commands.js";
-import {
-  MEDIA_GROUP_TIMEOUT_MS,
-  type MediaGroupEntry,
-  type TelegramUpdateKeyContext,
-} from "./bot-updates.js";
+import { MEDIA_GROUP_TIMEOUT_MS, type MediaGroupEntry } from "./bot-updates.js";
 import { resolveMedia } from "./bot/delivery.js";
 import {
   buildTelegramGroupPeerId,
@@ -92,9 +89,15 @@ export const registerTelegramHandlers = ({
   const mediaGroupBuffer = new Map<string, MediaGroupEntry>();
   let mediaGroupProcessing: Promise<void> = Promise.resolve();
 
+  type ProcessMessageOptions = {
+    messageIdOverride?: string;
+    forceWasMentioned?: boolean;
+  };
+
   type TextFragmentEntry = {
     key: string;
     messages: Array<{ msg: Message; ctx: TelegramContext; receivedAtMs: number }>;
+    processMessageOptions?: ProcessMessageOptions;
     timer: ReturnType<typeof setTimeout>;
   };
   const textFragmentBuffer = new Map<string, TextFragmentEntry>();
@@ -108,6 +111,7 @@ export const registerTelegramHandlers = ({
     storeAllowFrom: string[];
     debounceKey: string | null;
     botUsername?: string;
+    processMessageOptions?: ProcessMessageOptions;
   };
   const buildSyntheticTextMessage = (params: {
     base: Message;
@@ -152,7 +156,12 @@ export const registerTelegramHandlers = ({
         return;
       }
       if (entries.length === 1) {
-        await processMessage(last.ctx, last.allMedia, last.storeAllowFrom);
+        await processMessage(
+          last.ctx,
+          last.allMedia,
+          last.storeAllowFrom,
+          last.processMessageOptions,
+        );
         return;
       }
       const combinedText = entries
@@ -170,11 +179,15 @@ export const registerTelegramHandlers = ({
         date: last.msg.date ?? first.msg.date,
       });
       const messageIdOverride = last.msg.message_id ? String(last.msg.message_id) : undefined;
+      const flushOptions: ProcessMessageOptions = {
+        ...first.processMessageOptions,
+        ...(messageIdOverride ? { messageIdOverride } : {}),
+      };
       await processMessage(
         buildSyntheticContext(baseCtx, syntheticMessage),
         [],
         first.storeAllowFrom,
-        messageIdOverride ? { messageIdOverride } : undefined,
+        Object.keys(flushOptions).length > 0 ? flushOptions : undefined,
       );
     },
     onError: (err) => {
@@ -248,6 +261,9 @@ export const registerTelegramHandlers = ({
 
       const captionMsg = entry.messages.find((m) => m.msg.caption || m.msg.text);
       const primaryEntry = captionMsg ?? entry.messages[0];
+      if (!primaryEntry) {
+        return;
+      }
 
       const allMedia: TelegramMediaRef[] = [];
       for (const { ctx } of entry.messages) {
@@ -262,7 +278,12 @@ export const registerTelegramHandlers = ({
       }
 
       const storeAllowFrom = await loadStoreAllowFrom();
-      await processMessage(primaryEntry.ctx, allMedia, storeAllowFrom);
+      await processMessage(
+        primaryEntry.ctx,
+        allMedia,
+        storeAllowFrom,
+        primaryEntry.processMessageOptions,
+      );
     } catch (err) {
       runtime.error?.(danger(`media group handler failed: ${String(err)}`));
     }
@@ -291,9 +312,13 @@ export const registerTelegramHandlers = ({
 
       const storeAllowFrom = await loadStoreAllowFrom();
       const baseCtx = first.ctx;
+      const flushOptions: ProcessMessageOptions = {
+        ...entry.processMessageOptions,
+        messageIdOverride: String(last.msg.message_id),
+      };
 
       await processMessage(buildSyntheticContext(baseCtx, syntheticMessage), [], storeAllowFrom, {
-        messageIdOverride: String(last.msg.message_id),
+        ...flushOptions,
       });
     } catch (err) {
       runtime.error?.(danger(`text fragment handler failed: ${String(err)}`));
@@ -492,13 +517,10 @@ export const registerTelegramHandlers = ({
       senderLabel = senderLabel || "unknown";
 
       // Reactions target a specific message_id; the Telegram Bot API does not include
-      // message_thread_id on MessageReactionUpdated, so we route to the chat-level
-      // session (forum topic routing is not available for reactions).
+      // message_thread_id on MessageReactionUpdated, so we route to the parent group
+      // session rather than guessing a topic (which would misroute to General).
       const isGroup = reaction.chat.type === "group" || reaction.chat.type === "supergroup";
-      const isForum = reaction.chat.is_forum === true;
-      const resolvedThreadId = isForum
-        ? resolveTelegramForumThreadId({ isForum, messageThreadId: undefined })
-        : undefined;
+      const resolvedThreadId = undefined;
       const peerId = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : String(chatId);
       const parentPeer = buildTelegramParentPeer({ isGroup, resolvedThreadId, chatId });
       // Fresh config for bindings lookup; other routing inputs are payload-derived.
@@ -533,6 +555,7 @@ export const registerTelegramHandlers = ({
     storeAllowFrom: string[];
     sendOversizeWarning: boolean;
     oversizeLogMessage: string;
+    processMessageOptions?: ProcessMessageOptions;
   }) => {
     const {
       ctx,
@@ -542,6 +565,7 @@ export const registerTelegramHandlers = ({
       storeAllowFrom,
       sendOversizeWarning,
       oversizeLogMessage,
+      processMessageOptions,
     } = params;
 
     // Text fragment handling - Telegram splits long pastes into multiple inbound messages (~4096 chars).
@@ -551,7 +575,8 @@ export const registerTelegramHandlers = ({
     if (text && !isCommandLike) {
       const nowMs = Date.now();
       const senderId = msg.from?.id != null ? String(msg.from.id) : "unknown";
-      const key = `text:${chatId}:${resolvedThreadId ?? "main"}:${senderId}`;
+      const mentionMode = processMessageOptions?.forceWasMentioned === true ? "forced" : "normal";
+      const key = `text:${chatId}:${resolvedThreadId ?? "main"}:${senderId}:${mentionMode}`;
       const existing = textFragmentBuffer.get(key);
 
       if (existing) {
@@ -598,6 +623,7 @@ export const registerTelegramHandlers = ({
         const entry: TextFragmentEntry = {
           key,
           messages: [{ msg, ctx, receivedAtMs: nowMs }],
+          processMessageOptions,
           timer: setTimeout(() => {}, TELEGRAM_TEXT_FRAGMENT_MAX_GAP_MS),
         };
         textFragmentBuffer.set(key, entry);
@@ -612,7 +638,7 @@ export const registerTelegramHandlers = ({
       const existing = mediaGroupBuffer.get(mediaGroupId);
       if (existing) {
         clearTimeout(existing.timer);
-        existing.messages.push({ msg, ctx });
+        existing.messages.push({ msg, ctx, processMessageOptions });
         existing.timer = setTimeout(async () => {
           mediaGroupBuffer.delete(mediaGroupId);
           mediaGroupProcessing = mediaGroupProcessing
@@ -624,7 +650,7 @@ export const registerTelegramHandlers = ({
         }, mediaGroupTimeoutMs);
       } else {
         const entry: MediaGroupEntry = {
-          messages: [{ msg, ctx }],
+          messages: [{ msg, ctx, processMessageOptions }],
           timer: setTimeout(async () => {
             mediaGroupBuffer.delete(mediaGroupId);
             mediaGroupProcessing = mediaGroupProcessing
@@ -693,6 +719,7 @@ export const registerTelegramHandlers = ({
       storeAllowFrom,
       debounceKey,
       botUsername: ctx.me?.username,
+      processMessageOptions,
     });
   };
   bot.on("callback_query", async (ctx) => {
@@ -1038,33 +1065,25 @@ export const registerTelegramHandlers = ({
     }
   });
 
-  type InboundTelegramEvent = {
-    ctxForDedupe: TelegramUpdateKeyContext;
-    ctx: TelegramContext;
-    msg: Message;
-    chatId: number;
-    isGroup: boolean;
-    isForum: boolean;
-    messageThreadId?: number;
-    senderId: string;
-    senderUsername: string;
-    requireConfiguredGroup: boolean;
-    sendOversizeWarning: boolean;
-    oversizeLogMessage: string;
-    errorMessage: string;
-  };
-
-  const handleInboundMessageLike = async (event: InboundTelegramEvent) => {
+  bot.on("message", async (ctx) => {
     try {
-      if (shouldSkipUpdate(event.ctxForDedupe)) {
+      const msg = ctx.message;
+      if (!msg) {
+        return;
+      }
+      if (shouldSkipUpdate(ctx)) {
         return;
       }
 
+      const chatId = msg.chat.id;
+      const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
+      const messageThreadId = msg.message_thread_id;
+      const isForum = msg.chat.is_forum === true;
       const groupAllowContext = await resolveTelegramGroupAllowFromContext({
-        chatId: event.chatId,
+        chatId,
         accountId,
-        isForum: event.isForum,
-        messageThreadId: event.messageThreadId,
+        isForum,
+        messageThreadId,
         groupAllowFrom,
         resolveTelegramGroupConfig,
       });
@@ -1077,19 +1096,16 @@ export const registerTelegramHandlers = ({
         hasGroupAllowOverride,
       } = groupAllowContext;
 
-      if (event.requireConfiguredGroup && (!groupConfig || groupConfig.enabled === false)) {
-        logVerbose(`Blocked telegram channel ${event.chatId} (channel disabled)`);
-        return;
-      }
-
+      const senderId = msg.from?.id != null ? String(msg.from.id) : "";
+      const senderUsername = msg.from?.username ?? "";
       if (
         shouldSkipGroupMessage({
-          isGroup: event.isGroup,
-          chatId: event.chatId,
-          chatTitle: event.msg.chat.title,
+          isGroup,
+          chatId,
+          chatTitle: msg.chat.title,
           resolvedThreadId,
-          senderId: event.senderId,
-          senderUsername: event.senderUsername,
+          senderId,
+          senderUsername,
           effectiveGroupAllow,
           hasGroupAllowOverride,
           groupConfig,
@@ -1100,91 +1116,156 @@ export const registerTelegramHandlers = ({
       }
 
       await processInboundMessage({
-        ctx: event.ctx,
-        msg: event.msg,
-        chatId: event.chatId,
+        ctx,
+        msg,
+        chatId,
         resolvedThreadId,
         storeAllowFrom,
-        sendOversizeWarning: event.sendOversizeWarning,
-        oversizeLogMessage: event.oversizeLogMessage,
+        sendOversizeWarning: true,
+        oversizeLogMessage: "media exceeds size limit",
       });
     } catch (err) {
-      runtime.error?.(danger(`${event.errorMessage}: ${String(err)}`));
+      runtime.error?.(danger(`handler failed: ${String(err)}`));
     }
-  };
-
-  bot.on("message", async (ctx) => {
-    const msg = ctx.message;
-    if (!msg) {
-      return;
-    }
-    await handleInboundMessageLike({
-      ctxForDedupe: ctx,
-      ctx: buildSyntheticContext(ctx, msg),
-      msg,
-      chatId: msg.chat.id,
-      isGroup: msg.chat.type === "group" || msg.chat.type === "supergroup",
-      isForum: msg.chat.is_forum === true,
-      messageThreadId: msg.message_thread_id,
-      senderId: msg.from?.id != null ? String(msg.from.id) : "",
-      senderUsername: msg.from?.username ?? "",
-      requireConfiguredGroup: false,
-      sendOversizeWarning: true,
-      oversizeLogMessage: "media exceeds size limit",
-      errorMessage: "handler failed",
-    });
   });
 
   // Handle channel posts — enables bot-to-bot communication via Telegram channels.
   // Telegram bots cannot see other bot messages in groups, but CAN in channels.
   // This handler normalizes channel_post updates into the standard message pipeline.
   bot.on("channel_post", async (ctx) => {
-    const post = ctx.channelPost;
-    if (!post) {
-      return;
-    }
+    try {
+      const post = ctx.channelPost;
+      if (!post) {
+        return;
+      }
 
-    const chatId = post.chat.id;
-    const syntheticFrom = post.sender_chat
-      ? {
-          id: post.sender_chat.id,
-          is_bot: true as const,
-          first_name: post.sender_chat.title || "Channel",
-          username: post.sender_chat.username,
+      // Deduplication check — same as the regular message handler
+      if (shouldSkipUpdate(ctx)) {
+        return;
+      }
+
+      const chatId = post.chat.id;
+
+      // Use the full group allow-from context for access control (same as message handler)
+      const groupAllowContext = await resolveTelegramGroupAllowFromContext({
+        chatId,
+        accountId,
+        isForum: false,
+        messageThreadId: undefined,
+        groupAllowFrom,
+        resolveTelegramGroupConfig,
+      });
+      const { storeAllowFrom, groupConfig, effectiveGroupAllow, hasGroupAllowOverride } =
+        groupAllowContext;
+
+      // Check group allowlist (channels use the same groups config)
+      const groupAllowlist = resolveGroupPolicy(chatId);
+      if (groupAllowlist.allowlistEnabled && !groupAllowlist.allowed) {
+        return;
+      }
+
+      if (!groupConfig || groupConfig.enabled === false) {
+        logVerbose(`Blocked telegram channel ${chatId} (channel disabled)`);
+        return;
+      }
+
+      // Group policy filtering (same as message handler)
+      const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
+      const groupPolicy = firstDefined(
+        groupConfig?.groupPolicy,
+        telegramCfg.groupPolicy,
+        defaultGroupPolicy,
+        "open",
+      );
+      if (groupPolicy === "disabled") {
+        logVerbose(`Blocked telegram channel message (groupPolicy: disabled)`);
+        return;
+      }
+
+      if (hasGroupAllowOverride) {
+        const senderId = post.sender_chat?.id ?? post.from?.id;
+        const senderUsername = post.sender_chat?.username ?? post.from?.username ?? "";
+        const allowed =
+          senderId != null &&
+          isSenderAllowed({
+            allow: effectiveGroupAllow,
+            senderId: String(senderId),
+            senderUsername,
+          });
+        if (!allowed) {
+          logVerbose(
+            `Blocked telegram channel sender ${senderId ?? "unknown"} (group allowFrom override)`,
+          );
+          return;
         }
-      : {
-          id: chatId,
-          is_bot: true as const,
-          first_name: post.chat.title || "Channel",
-          username: post.chat.username,
-        };
-    const syntheticMsg: Message = {
-      ...post,
-      from: post.from ?? syntheticFrom,
-      chat: {
-        ...post.chat,
-        type: "supergroup" as const,
-      },
-    } as Message;
+      }
 
-    await handleInboundMessageLike({
-      ctxForDedupe: ctx,
-      ctx: buildSyntheticContext(ctx, syntheticMsg),
-      msg: syntheticMsg,
-      chatId,
-      isGroup: true,
-      isForum: false,
-      senderId:
-        post.sender_chat?.id != null
-          ? String(post.sender_chat.id)
-          : post.from?.id != null
-            ? String(post.from.id)
-            : "",
-      senderUsername: post.sender_chat?.username ?? post.from?.username ?? "",
-      requireConfiguredGroup: true,
-      sendOversizeWarning: false,
-      oversizeLogMessage: "channel post media exceeds size limit",
-      errorMessage: "channel_post handler failed",
-    });
+      if (groupPolicy === "allowlist") {
+        const senderId = post.sender_chat?.id ?? post.from?.id;
+        if (senderId == null) {
+          logVerbose(`Blocked telegram channel message (no sender ID, groupPolicy: allowlist)`);
+          return;
+        }
+        if (!effectiveGroupAllow.hasEntries) {
+          logVerbose(
+            "Blocked telegram channel message (groupPolicy: allowlist, no allowlist entries)",
+          );
+          return;
+        }
+        const senderUsername = post.sender_chat?.username ?? post.from?.username ?? "";
+        if (
+          !isSenderAllowed({
+            allow: effectiveGroupAllow,
+            senderId: String(senderId),
+            senderUsername,
+          })
+        ) {
+          logVerbose(`Blocked telegram channel message from ${senderId} (groupPolicy: allowlist)`);
+          return;
+        }
+      }
+
+      // Build a synthetic `from` field since channel posts may not have one.
+      // Use sender_chat (the bot/user that posted) if available.
+      const syntheticFrom = post.sender_chat
+        ? {
+            id: post.sender_chat.id,
+            is_bot: true as const,
+            first_name: post.sender_chat.title || "Channel",
+            username: post.sender_chat.username,
+          }
+        : {
+            id: chatId,
+            is_bot: true as const,
+            first_name: post.chat.title || "Channel",
+            username: post.chat.username,
+          };
+
+      const syntheticMsg: Message = {
+        ...post,
+        from: post.from ?? syntheticFrom,
+        chat: {
+          ...post.chat,
+          type: "supergroup" as const,
+        },
+      } as Message;
+
+      const syntheticCtx = Object.create(ctx, {
+        message: { value: syntheticMsg, writable: true, enumerable: true },
+      });
+
+      await processInboundMessage({
+        ctx: syntheticCtx as TelegramContext,
+        msg: syntheticMsg,
+        chatId,
+        resolvedThreadId: undefined,
+        storeAllowFrom,
+        sendOversizeWarning: false,
+        oversizeLogMessage: "channel post media exceeds size limit",
+        processMessageOptions: { forceWasMentioned: true },
+      });
+    } catch (err) {
+      runtime.error?.(danger(`channel_post handler failed: ${String(err)}`));
+    }
   });
 };

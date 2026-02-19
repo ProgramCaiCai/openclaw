@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
-import { createInternalHookEventPayload } from "../../test-utils/internal-hook-event-payload.js";
 import type { MsgContext } from "../templating.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import type { ReplyDispatcher } from "./reply-dispatcher.js";
@@ -27,7 +26,16 @@ const hookMocks = vi.hoisted(() => ({
   },
 }));
 const internalHookMocks = vi.hoisted(() => ({
-  createInternalHookEvent: vi.fn(),
+  createInternalHookEvent: vi.fn(
+    (type: string, action: string, sessionKey: string, context: Record<string, unknown>) => ({
+      type,
+      action,
+      sessionKey,
+      context,
+      timestamp: new Date(),
+      messages: [],
+    }),
+  ),
   triggerInternalHook: vi.fn(async () => {}),
 }));
 
@@ -113,8 +121,7 @@ describe("dispatchReplyFromConfig", () => {
     hookMocks.runner.hasHooks.mockReset();
     hookMocks.runner.hasHooks.mockReturnValue(false);
     hookMocks.runner.runMessageReceived.mockReset();
-    internalHookMocks.createInternalHookEvent.mockReset();
-    internalHookMocks.createInternalHookEvent.mockImplementation(createInternalHookEventPayload);
+    internalHookMocks.createInternalHookEvent.mockClear();
     internalHookMocks.triggerInternalHook.mockClear();
   });
   it("does not route when Provider matches OriginatingChannel (even if Surface is missing)", async () => {
@@ -508,6 +515,43 @@ describe("dispatchReplyFromConfig", () => {
         channel: "slack",
         outcome: "completed",
         sessionKey: "agent:main:main",
+      }),
+    );
+  });
+
+  it("marks deferred followups as queued instead of completed", async () => {
+    mocks.tryFastAbortFromMessage.mockResolvedValue({
+      handled: false,
+      aborted: false,
+    });
+    const cfg = { diagnostics: { enabled: true } } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "slack",
+      Surface: "slack",
+      SessionKey: "agent:main:main",
+      MessageSid: "msg-followup",
+      To: "slack:C123",
+    });
+
+    const replyResolver = async (
+      _ctx: MsgContext,
+      opts: GetReplyOptions | undefined,
+      _cfg: OpenClawConfig,
+    ) => {
+      opts?.onDeferredDispatch?.({
+        kind: "followup",
+        accepted: true,
+      });
+      return undefined;
+    };
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "slack",
+        outcome: "queued",
+        reason: "accepted_for_followup",
       }),
     );
   });

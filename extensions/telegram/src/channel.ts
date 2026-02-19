@@ -14,8 +14,6 @@ import {
   normalizeAccountId,
   normalizeTelegramMessagingTarget,
   PAIRING_APPROVED_MESSAGE,
-  parseTelegramReplyToMessageId,
-  parseTelegramThreadId,
   resolveDefaultTelegramAccountId,
   resolveTelegramAccount,
   resolveTelegramGroupRequireMention,
@@ -29,6 +27,10 @@ import {
   type ResolvedTelegramAccount,
   type TelegramProbe,
 } from "openclaw/plugin-sdk";
+import {
+  parseTelegramReplyToMessageId,
+  parseTelegramThreadId,
+} from "../../../src/telegram/outbound-params.js";
 import { getTelegramRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("telegram");

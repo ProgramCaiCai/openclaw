@@ -182,12 +182,7 @@ export {
 } from "../infra/http-body.js";
 
 export { fetchWithSsrFGuard } from "../infra/net/fetch-guard.js";
-export {
-  SsrFBlockedError,
-  isBlockedHostname,
-  isBlockedHostnameOrIp,
-  isPrivateIpAddress,
-} from "../infra/net/ssrf.js";
+export { SsrFBlockedError, isBlockedHostname, isPrivateIpAddress } from "../infra/net/ssrf.js";
 export type { LookupFn, SsrFPolicy } from "../infra/net/ssrf.js";
 export { rawDataToString } from "../infra/ws.js";
 export { isWSLSync, isWSL2Sync, isWSLEnv } from "../infra/wsl.js";
@@ -392,10 +387,6 @@ export {
   normalizeTelegramMessagingTarget,
 } from "../channels/plugins/normalize/telegram.js";
 export { collectTelegramStatusIssues } from "../channels/plugins/status-issues/telegram.js";
-export {
-  parseTelegramReplyToMessageId,
-  parseTelegramThreadId,
-} from "../telegram/outbound-params.js";
 export { type TelegramProbe } from "../telegram/probe.js";
 
 // Channel: Signal

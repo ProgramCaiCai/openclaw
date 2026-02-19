@@ -10,6 +10,10 @@ export type MediaGroupEntry = {
   messages: Array<{
     msg: Message;
     ctx: TelegramContext;
+    processMessageOptions?: {
+      messageIdOverride?: string;
+      forceWasMentioned?: boolean;
+    };
   }>;
   timer: ReturnType<typeof setTimeout>;
 };
@@ -19,13 +23,9 @@ export type TelegramUpdateKeyContext = {
     update_id?: number;
     message?: Message;
     edited_message?: Message;
-    channel_post?: Message;
-    edited_channel_post?: Message;
   };
   update_id?: number;
   message?: Message;
-  channelPost?: Message;
-  editedChannelPost?: Message;
   callbackQuery?: { id?: string; message?: Message };
 };
 
@@ -42,14 +42,7 @@ export const buildTelegramUpdateKey = (ctx: TelegramUpdateKeyContext) => {
     return `callback:${callbackId}`;
   }
   const msg =
-    ctx.message ??
-    ctx.channelPost ??
-    ctx.editedChannelPost ??
-    ctx.update?.message ??
-    ctx.update?.edited_message ??
-    ctx.update?.channel_post ??
-    ctx.update?.edited_channel_post ??
-    ctx.callbackQuery?.message;
+    ctx.message ?? ctx.update?.message ?? ctx.update?.edited_message ?? ctx.callbackQuery?.message;
   const chatId = msg?.chat?.id;
   const messageId = msg?.message_id;
   if (typeof chatId !== "undefined" && typeof messageId === "number") {

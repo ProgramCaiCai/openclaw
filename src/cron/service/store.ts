@@ -24,7 +24,7 @@ function buildDeliveryPatchFromLegacyPayload(payload: Record<string, unknown>) {
   if (deliver === false) {
     next.mode = "none";
     hasPatch = true;
-  } else if (deliver === true || toRaw) {
+  } else if (deliver === true) {
     next.mode = "announce";
     hasPatch = true;
   }
@@ -74,6 +74,65 @@ function mergeLegacyDeliveryInto(
   }
 
   return { delivery: next, mutated };
+}
+
+function normalizeDeliveryMode(value: unknown): "none" | "announce" {
+  if (typeof value !== "string") {
+    return "none";
+  }
+  const lowered = value.trim().toLowerCase();
+  if (lowered === "announce" || lowered === "deliver") {
+    return "announce";
+  }
+  return "none";
+}
+
+function normalizeAndHardenDelivery(params: {
+  deliveryRecord: Record<string, unknown>;
+  jobId?: string;
+  log: Pick<CronServiceState["deps"]["log"], "warn">;
+}): boolean {
+  const { deliveryRecord, jobId, log } = params;
+  let mutated = false;
+
+  const normalizedMode = normalizeDeliveryMode(deliveryRecord.mode);
+  if (deliveryRecord.mode !== normalizedMode) {
+    deliveryRecord.mode = normalizedMode;
+    mutated = true;
+  }
+
+  const normalizedChannel =
+    typeof deliveryRecord.channel === "string"
+      ? deliveryRecord.channel.trim().toLowerCase()
+      : undefined;
+  if (normalizedChannel && deliveryRecord.channel !== normalizedChannel) {
+    deliveryRecord.channel = normalizedChannel;
+    mutated = true;
+  }
+
+  const normalizedTo = typeof deliveryRecord.to === "string" ? deliveryRecord.to.trim() : undefined;
+  if (typeof deliveryRecord.to === "string" && deliveryRecord.to !== normalizedTo) {
+    deliveryRecord.to = normalizedTo;
+    mutated = true;
+  }
+
+  const hasUnsafeImplicitTarget =
+    normalizedMode === "announce" &&
+    (!normalizedChannel || normalizedChannel === "last" || !normalizedTo);
+  if (hasUnsafeImplicitTarget) {
+    deliveryRecord.mode = "none";
+    mutated = true;
+    log.warn(
+      {
+        jobId,
+        channel: normalizedChannel,
+        hasTo: Boolean(normalizedTo),
+      },
+      "cron: downgraded unsafe announce delivery to none",
+    );
+  }
+
+  return mutated;
 }
 
 function normalizePayloadKind(payload: Record<string, unknown>) {
@@ -237,8 +296,9 @@ export async function ensureLoaded(
   // Force reload always re-reads the file to avoid missing cross-service
   // edits on filesystems with coarse mtime resolution.
 
-  const fileMtimeMs = await getFileMtimeMs(state.deps.storePath);
-  const loaded = await loadCronStore(state.deps.storePath);
+  const serviceState = state;
+  const fileMtimeMs = await getFileMtimeMs(serviceState.deps.storePath);
+  const loaded = await loadCronStore(serviceState.deps.storePath);
   const jobs = (loaded.jobs ?? []) as unknown as Array<Record<string, unknown>>;
   let mutated = false;
   for (const raw of jobs) {
@@ -405,17 +465,13 @@ export async function ensureLoaded(
 
     const delivery = raw.delivery;
     if (delivery && typeof delivery === "object" && !Array.isArray(delivery)) {
-      const modeRaw = (delivery as { mode?: unknown }).mode;
-      if (typeof modeRaw === "string") {
-        const lowered = modeRaw.trim().toLowerCase();
-        if (lowered === "deliver") {
-          (delivery as { mode?: unknown }).mode = "announce";
-          mutated = true;
-        }
-      } else if (modeRaw === undefined || modeRaw === null) {
-        // Explicitly persist the default so existing jobs don't silently
-        // change behaviour when the runtime default shifts.
-        (delivery as { mode?: unknown }).mode = "announce";
+      if (
+        normalizeAndHardenDelivery({
+          deliveryRecord: delivery as Record<string, unknown>,
+          jobId: typeof raw.id === "string" ? raw.id : undefined,
+          log: serviceState.deps.log,
+        })
+      ) {
         mutated = true;
       }
     }
@@ -440,7 +496,7 @@ export async function ensureLoaded(
         raw.delivery =
           payloadRecord && hasLegacyDelivery
             ? buildDeliveryFromLegacyPayload(payloadRecord)
-            : { mode: "announce" };
+            : { mode: "none" };
         mutated = true;
       }
       if (payloadRecord && hasLegacyDelivery) {
@@ -455,6 +511,20 @@ export async function ensureLoaded(
           }
         }
         stripLegacyDeliveryFields(payloadRecord);
+        mutated = true;
+      }
+
+      const normalizedDelivery = raw.delivery;
+      if (
+        normalizedDelivery &&
+        typeof normalizedDelivery === "object" &&
+        !Array.isArray(normalizedDelivery) &&
+        normalizeAndHardenDelivery({
+          deliveryRecord: normalizedDelivery as Record<string, unknown>,
+          jobId: typeof raw.id === "string" ? raw.id : undefined,
+          log: serviceState.deps.log,
+        })
+      ) {
         mutated = true;
       }
     }

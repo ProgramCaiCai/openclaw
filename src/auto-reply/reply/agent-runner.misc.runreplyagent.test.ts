@@ -61,7 +61,12 @@ vi.mock("./queue.js", async () => {
   const actual = await vi.importActual<typeof import("./queue.js")>("./queue.js");
   return {
     ...actual,
-    enqueueFollowupRun: vi.fn(),
+    enqueueFollowupRunDetailed: vi.fn(() => ({
+      accepted: true,
+      queueDepth: 1,
+      mode: "followup",
+      droppedCount: 0,
+    })),
     scheduleFollowupDrain: vi.fn(),
   };
 });

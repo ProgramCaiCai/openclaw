@@ -99,14 +99,10 @@ describe("runCronIsolatedAgentTurn", () => {
       });
 
       expect(keepRes.status).toBe("ok");
-      expect(runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
-      const keepArgs = vi.mocked(runSubagentAnnounceFlow).mock.calls[0]?.[0] as
-        | { cleanup?: "keep" | "delete" }
-        | undefined;
-      expect(keepArgs?.cleanup).toBe("keep");
+      expect(keepRes.delivered).toBe(true);
+      expect(keepRes.deliveryDecision?.blockedReason).toBe("unsafe-implicit-channel");
+      expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
       expect(deps.sendMessageTelegram).not.toHaveBeenCalled();
-
-      vi.mocked(runSubagentAnnounceFlow).mockClear();
 
       const deleteRes = await runCronIsolatedAgentTurn({
         cfg,
@@ -125,11 +121,9 @@ describe("runCronIsolatedAgentTurn", () => {
       });
 
       expect(deleteRes.status).toBe("ok");
-      expect(runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
-      const deleteArgs = vi.mocked(runSubagentAnnounceFlow).mock.calls[0]?.[0] as
-        | { cleanup?: "keep" | "delete" }
-        | undefined;
-      expect(deleteArgs?.cleanup).toBe("delete");
+      expect(deleteRes.delivered).toBe(true);
+      expect(deleteRes.deliveryDecision?.blockedReason).toBe("unsafe-implicit-channel");
+      expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
       expect(deps.sendMessageTelegram).not.toHaveBeenCalled();
     });
   });

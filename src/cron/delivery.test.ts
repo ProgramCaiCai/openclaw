@@ -20,14 +20,14 @@ function makeJob(overrides: Partial<CronJob>): CronJob {
 }
 
 describe("resolveCronDeliveryPlan", () => {
-  it("defaults to announce when delivery object has no mode", () => {
+  it("defaults to none when delivery object has no mode", () => {
     const plan = resolveCronDeliveryPlan(
       makeJob({
         delivery: { channel: "telegram", to: "123", mode: undefined as never },
       }),
     );
-    expect(plan.mode).toBe("announce");
-    expect(plan.requested).toBe(true);
+    expect(plan.mode).toBe("none");
+    expect(plan.requested).toBe(false);
     expect(plan.channel).toBe("telegram");
     expect(plan.to).toBe("123");
   });

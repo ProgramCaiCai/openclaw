@@ -13,6 +13,16 @@ export type ModelSelectedContext = {
   thinkLevel: string | undefined;
 };
 
+export type DeferredDispatchReason = "duplicate" | "cap_new" | "cap_old" | "cap_summarize";
+
+export type DeferredDispatchEvent = {
+  kind: "steer" | "followup";
+  accepted: boolean;
+  reason?: DeferredDispatchReason;
+  queueDepth?: number;
+  droppedCount?: number;
+};
+
 export type GetReplyOptions = {
   /** Override run id for agent events (defaults to random UUID). */
   runId?: string;
@@ -22,6 +32,8 @@ export type GetReplyOptions = {
   images?: ImageContent[];
   /** Notifies when an agent run actually starts (useful for webchat command handling). */
   onAgentRunStart?: (runId: string) => void;
+  /** Signals when work is deferred to an active run/followup queue instead of returning now. */
+  onDeferredDispatch?: (event: DeferredDispatchEvent) => void;
   onReplyStart?: () => Promise<void> | void;
   /** Called when the typing controller cleans up (e.g., run ended with NO_REPLY). */
   onTypingCleanup?: () => void;

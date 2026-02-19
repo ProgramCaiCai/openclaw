@@ -1,16 +1,54 @@
+import { logFollowupDrained } from "../../../logging/diagnostic.js";
 import { defaultRuntime } from "../../../runtime.js";
 import {
   buildCollectPrompt,
-  clearQueueSummaryState,
-  drainCollectItemIfNeeded,
-  drainNextQueueItem,
+  buildQueueSummaryPrompt,
   hasCrossChannelItems,
-  previewQueueSummaryPrompt,
   waitForQueueDebounce,
 } from "../../../utils/queue-helpers.js";
 import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
 import type { FollowupRun } from "./types.js";
+
+function previewQueueSummaryPrompt(queue: {
+  dropPolicy: "summarize" | "old" | "new";
+  droppedCount: number;
+  summaryLines: string[];
+}): string | undefined {
+  return buildQueueSummaryPrompt({
+    state: {
+      dropPolicy: queue.dropPolicy,
+      droppedCount: queue.droppedCount,
+      summaryLines: [...queue.summaryLines],
+    },
+    noun: "message",
+  });
+}
+
+function clearQueueSummaryState(queue: { droppedCount: number; summaryLines: string[] }): void {
+  queue.droppedCount = 0;
+  queue.summaryLines = [];
+}
+
+function emitFollowupDrained(params: {
+  key: string;
+  mode: string;
+  queueDepth: number;
+  run?: FollowupRun;
+  drainedCount: number;
+  summaryIncluded?: boolean;
+}): void {
+  const sessionKey = params.key.trim() || params.key || "unknown";
+  logFollowupDrained({
+    sessionKey,
+    sessionId: params.run?.run.sessionId,
+    messageId: params.run?.messageId,
+    mode: params.mode,
+    queueDepth: params.queueDepth,
+    drainedCount: params.drainedCount,
+    summaryIncluded: params.summaryIncluded,
+  });
+}
 
 export function scheduleFollowupDrain(
   key: string,
@@ -31,6 +69,23 @@ export function scheduleFollowupDrain(
           // Prevents “collect after shift” collapsing different targets.
           //
           // Debug: `pnpm test src/auto-reply/reply/queue.collect-routing.test.ts`
+          if (forceIndividualCollect) {
+            const next = queue.items[0];
+            if (!next) {
+              break;
+            }
+            await runFollowup(next);
+            queue.items.shift();
+            emitFollowupDrained({
+              key,
+              mode: queue.mode,
+              queueDepth: queue.items.length,
+              run: next,
+              drainedCount: 1,
+            });
+            continue;
+          }
+
           // Check if messages span multiple channels.
           // If so, process individually to preserve per-message routing.
           const isCrossChannel = hasCrossChannelItems(queue.items, (item) => {
@@ -50,24 +105,26 @@ export function scheduleFollowupDrain(
             };
           });
 
-          const collectDrainResult = await drainCollectItemIfNeeded({
-            forceIndividualCollect,
-            isCrossChannel,
-            setForceIndividualCollect: (next) => {
-              forceIndividualCollect = next;
-            },
-            items: queue.items,
-            run: runFollowup,
-          });
-          if (collectDrainResult === "empty") {
-            break;
-          }
-          if (collectDrainResult === "drained") {
+          if (isCrossChannel) {
+            forceIndividualCollect = true;
+            const next = queue.items[0];
+            if (!next) {
+              break;
+            }
+            await runFollowup(next);
+            queue.items.shift();
+            emitFollowupDrained({
+              key,
+              mode: queue.mode,
+              queueDepth: queue.items.length,
+              run: next,
+              drainedCount: 1,
+            });
             continue;
           }
 
           const items = queue.items.slice();
-          const summary = previewQueueSummaryPrompt({ state: queue, noun: "message" });
+          const summary = previewQueueSummaryPrompt(queue);
           const run = items.at(-1)?.run ?? queue.lastRun;
           if (!run) {
             break;
@@ -99,36 +156,61 @@ export function scheduleFollowupDrain(
             originatingThreadId,
           });
           queue.items.splice(0, items.length);
+          emitFollowupDrained({
+            key,
+            mode: queue.mode,
+            queueDepth: queue.items.length,
+            run: items.at(-1),
+            drainedCount: items.length,
+            summaryIncluded: Boolean(summary),
+          });
           if (summary) {
             clearQueueSummaryState(queue);
           }
           continue;
         }
 
-        const summaryPrompt = previewQueueSummaryPrompt({ state: queue, noun: "message" });
+        const summaryPrompt = previewQueueSummaryPrompt(queue);
         if (summaryPrompt) {
           const run = queue.lastRun;
           if (!run) {
             break;
           }
-          if (
-            !(await drainNextQueueItem(queue.items, async () => {
-              await runFollowup({
-                prompt: summaryPrompt,
-                run,
-                enqueuedAt: Date.now(),
-              });
-            }))
-          ) {
+          const next = queue.items[0];
+          if (!next) {
             break;
           }
+          await runFollowup({
+            prompt: summaryPrompt,
+            run,
+            enqueuedAt: Date.now(),
+          });
+          queue.items.shift();
+          emitFollowupDrained({
+            key,
+            mode: queue.mode,
+            queueDepth: queue.items.length,
+            run: next,
+            drainedCount: 1,
+            summaryIncluded: true,
+          });
           clearQueueSummaryState(queue);
           continue;
         }
 
-        if (!(await drainNextQueueItem(queue.items, runFollowup))) {
+        const next = queue.items[0];
+        if (!next) {
           break;
         }
+        await runFollowup(next);
+        queue.items.shift();
+        emitFollowupDrained({
+          key,
+          mode: queue.mode,
+          queueDepth: queue.items.length,
+          run: next,
+          drainedCount: 1,
+        });
       }
     } catch (err) {
       queue.lastEnqueuedAt = Date.now();

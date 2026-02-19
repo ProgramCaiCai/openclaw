@@ -4,7 +4,7 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
-import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
+import { isEmbeddedPiRunActive, queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
 import {
   resolveAgentIdFromSessionKey,
@@ -16,7 +16,7 @@ import {
 } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
-import { enqueueSystemEvent } from "../../infra/system-events.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { defaultRuntime } from "../../runtime.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
@@ -37,57 +37,43 @@ import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-repl
 import { resolveBlockStreamingCoalescing } from "./block-streaming.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import {
-  auditPostCompactionReads,
-  extractReadPaths,
-  formatAuditWarning,
-  readSessionMessages,
-} from "./post-compaction-audit.js";
-import { readPostCompactionContext } from "./post-compaction-context.js";
-import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
+  enqueueFollowupRunDetailed,
+  type FollowupEnqueueResult,
+  type FollowupRun,
+  type QueueSettings,
+} from "./queue.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
-const UNSCHEDULED_REMINDER_NOTE =
+const REMINDER_COMMITMENT_GUARD_NOTE =
   "Note: I did not schedule a reminder in this turn, so this will not trigger automatically.";
-const REMINDER_COMMITMENT_PATTERNS: RegExp[] = [
-  /\b(?:i\s*['’]?ll|i will)\s+(?:make sure to\s+)?(?:remember|remind|ping|follow up|follow-up|check back|circle back)\b/i,
-  /\b(?:i\s*['’]?ll|i will)\s+(?:set|create|schedule)\s+(?:a\s+)?reminder\b/i,
-];
+const REMINDER_COMMITMENT_RE = /\b(i(?:'|’)ll|i will)\s+remind\b/i;
+const queueLog = createSubsystemLogger("auto-reply/reply-queue");
 
-function hasUnbackedReminderCommitment(text: string): boolean {
-  const normalized = text.toLowerCase();
-  if (!normalized.trim()) {
-    return false;
+function applyReminderCommitmentGuard(params: {
+  payloads: ReplyPayload[];
+  successfulCronAdds?: number;
+}): ReplyPayload[] {
+  if (params.successfulCronAdds !== 0) {
+    return params.payloads;
   }
-  if (normalized.includes(UNSCHEDULED_REMINDER_NOTE.toLowerCase())) {
-    return false;
-  }
-  return REMINDER_COMMITMENT_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function appendUnscheduledReminderNote(payloads: ReplyPayload[]): ReplyPayload[] {
-  let appended = false;
-  return payloads.map((payload) => {
-    if (appended || payload.isError || typeof payload.text !== "string") {
+  return params.payloads.map((payload) => {
+    const text = payload.text?.trim();
+    if (!text || !REMINDER_COMMITMENT_RE.test(text)) {
       return payload;
     }
-    if (!hasUnbackedReminderCommitment(payload.text)) {
+    if (text.includes(REMINDER_COMMITMENT_GUARD_NOTE)) {
       return payload;
     }
-    appended = true;
-    const trimmed = payload.text.trimEnd();
     return {
       ...payload,
-      text: `${trimmed}\n\n${UNSCHEDULED_REMINDER_NOTE}`,
+      text: `${text}\n\n${REMINDER_COMMITMENT_GUARD_NOTE}`,
     };
   });
 }
-
-// Track sessions pending post-compaction read audit (Layer 3)
-const pendingPostCompactionAudits = new Map<string, boolean>();
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -203,6 +189,17 @@ export async function runReplyAgent(params: {
           buffer: createAudioAsVoiceBuffer({ isAudioPayload }),
         })
       : null;
+
+  const reportDeferredDispatch = (event: {
+    kind: "steer" | "followup";
+    accepted: boolean;
+    reason?: FollowupEnqueueResult["rejectedReason"] | FollowupEnqueueResult["droppedReason"];
+    queueDepth?: number;
+    droppedCount?: number;
+  }) => {
+    opts?.onDeferredDispatch?.(event);
+  };
+
   const touchActiveSessionEntry = async () => {
     if (!activeSessionEntry || !activeSessionStore || !sessionKey) {
       return;
@@ -219,17 +216,75 @@ export async function runReplyAgent(params: {
     }
   };
 
+  let steerAccepted = false;
+  let steerRejected = false;
+  let isActiveForQueue = isActive;
   if (shouldSteer && isStreaming) {
-    const steered = queueEmbeddedPiMessage(followupRun.run.sessionId, followupRun.prompt);
-    if (steered && !shouldFollowup) {
+    steerAccepted = await queueEmbeddedPiMessage(followupRun.run.sessionId, followupRun.prompt);
+    steerRejected = !steerAccepted;
+    if (steerRejected) {
+      // Refresh active state after a steer rejection to avoid queueing against a run that just ended.
+      isActiveForQueue = isEmbeddedPiRunActive(followupRun.run.sessionId);
+    }
+    const fallbackPath =
+      steerAccepted && !shouldFollowup
+        ? "none"
+        : isActiveForQueue && (shouldFollowup || resolvedQueue.mode === "steer")
+          ? "enqueueFollowupRun"
+          : "directRun";
+    queueLog.debug(
+      `runReplyAgent steer result: sessionId=${followupRun.run.sessionId} queueMode=${resolvedQueue.mode} steerAccepted=${steerAccepted} steerRejected=${steerRejected} fallbackPath=${fallbackPath}`,
+    );
+    if (steerAccepted && !shouldFollowup) {
+      reportDeferredDispatch({
+        kind: "steer",
+        accepted: true,
+      });
       await touchActiveSessionEntry();
       typing.cleanup();
       return undefined;
     }
+  } else if (shouldSteer) {
+    isActiveForQueue = isEmbeddedPiRunActive(followupRun.run.sessionId);
+    queueLog.debug(
+      `runReplyAgent steer skipped: sessionId=${followupRun.run.sessionId} queueMode=${resolvedQueue.mode} steerAccepted=false steerRejected=false fallbackPath=${
+        isActiveForQueue && (shouldFollowup || resolvedQueue.mode === "steer")
+          ? "enqueueFollowupRun"
+          : "directRun"
+      } reason=not_streaming`,
+    );
   }
 
-  if (isActive && (shouldFollowup || resolvedQueue.mode === "steer")) {
-    enqueueFollowupRun(queueKey, followupRun, resolvedQueue);
+  if (isActiveForQueue && (shouldFollowup || resolvedQueue.mode === "steer")) {
+    queueLog.debug(
+      `runReplyAgent followup enqueue: sessionId=${followupRun.run.sessionId} queueMode=${resolvedQueue.mode} steerAccepted=${steerAccepted} steerRejected=${steerRejected} fallbackPath=enqueueFollowupRun`,
+    );
+    const enqueueResult = enqueueFollowupRunDetailed(queueKey, followupRun, resolvedQueue);
+
+    if (!enqueueResult.accepted) {
+      const rejectedReason = enqueueResult.rejectedReason ?? "unknown";
+      queueLog.warn(
+        `runReplyAgent followup dropped: sessionId=${followupRun.run.sessionId} queueMode=${resolvedQueue.mode} reason=${rejectedReason} queueDepth=${enqueueResult.queueDepth}`,
+      );
+      reportDeferredDispatch({
+        kind: "followup",
+        accepted: false,
+        reason: enqueueResult.rejectedReason,
+        queueDepth: enqueueResult.queueDepth,
+        droppedCount: enqueueResult.droppedCount,
+      });
+      await touchActiveSessionEntry();
+      typing.cleanup();
+      return undefined;
+    }
+
+    reportDeferredDispatch({
+      kind: "followup",
+      accepted: true,
+      reason: enqueueResult.droppedReason,
+      queueDepth: enqueueResult.queueDepth,
+      droppedCount: enqueueResult.droppedCount,
+    });
     await touchActiveSessionEntry();
     typing.cleanup();
     return undefined;
@@ -409,13 +464,13 @@ export async function runReplyAgent(params: {
       await Promise.allSettled(pendingToolTasks);
     }
 
-    const usage = runResult.meta?.agentMeta?.usage;
-    const promptTokens = runResult.meta?.agentMeta?.promptTokens;
-    const modelUsed = runResult.meta?.agentMeta?.model ?? fallbackModel ?? defaultModel;
+    const usage = runResult.meta.agentMeta?.usage;
+    const promptTokens = runResult.meta.agentMeta?.promptTokens;
+    const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? defaultModel;
     const providerUsed =
-      runResult.meta?.agentMeta?.provider ?? fallbackProvider ?? followupRun.run.provider;
+      runResult.meta.agentMeta?.provider ?? fallbackProvider ?? followupRun.run.provider;
     const cliSessionId = isCliProvider(providerUsed, cfg)
-      ? runResult.meta?.agentMeta?.sessionId?.trim()
+      ? runResult.meta.agentMeta?.sessionId?.trim()
       : undefined;
     const contextTokensUsed =
       agentCfgContextTokens ??
@@ -427,12 +482,12 @@ export async function runReplyAgent(params: {
       storePath,
       sessionKey,
       usage,
-      lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
+      lastCallUsage: runResult.meta.agentMeta?.lastCallUsage,
       promptTokens,
       modelUsed,
       providerUsed,
       contextTokensUsed,
-      systemPromptReport: runResult.meta?.systemPromptReport,
+      systemPromptReport: runResult.meta.systemPromptReport,
       cliSessionId,
     });
 
@@ -455,31 +510,21 @@ export async function runReplyAgent(params: {
       currentMessageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
       messageProvider: followupRun.run.messageProvider,
       messagingToolSentTexts: runResult.messagingToolSentTexts,
-      messagingToolSentMediaUrls: runResult.messagingToolSentMediaUrls,
       messagingToolSentTargets: runResult.messagingToolSentTargets,
       originatingTo: sessionCtx.OriginatingTo ?? sessionCtx.To,
       accountId: sessionCtx.AccountId,
     });
-    const { replyPayloads } = payloadResult;
+    const replyPayloads = applyReminderCommitmentGuard({
+      payloads: payloadResult.replyPayloads,
+      successfulCronAdds: runResult.successfulCronAdds,
+    });
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     if (replyPayloads.length === 0) {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
-    const successfulCronAdds = runResult.successfulCronAdds ?? 0;
-    const hasReminderCommitment = replyPayloads.some(
-      (payload) =>
-        !payload.isError &&
-        typeof payload.text === "string" &&
-        hasUnbackedReminderCommitment(payload.text),
-    );
-    const guardedReplyPayloads =
-      hasReminderCommitment && successfulCronAdds === 0
-        ? appendUnscheduledReminderNote(replyPayloads)
-        : replyPayloads;
-
-    await signalTypingIfNeeded(guardedReplyPayloads, typingSignals);
+    await signalTypingIfNeeded(replyPayloads, typingSignals);
 
     if (isDiagnosticsEnabled(cfg) && hasNonzeroUsage(usage)) {
       const input = usage.input ?? 0;
@@ -509,7 +554,7 @@ export async function runReplyAgent(params: {
           promptTokens,
           total: totalTokens,
         },
-        lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
+        lastCallUsage: runResult.meta.agentMeta?.lastCallUsage,
         context: {
           limit: contextTokensUsed,
           used: totalTokens,
@@ -547,7 +592,7 @@ export async function runReplyAgent(params: {
     }
 
     // If verbose is enabled and this is a new session, prepend a session hint.
-    let finalPayloads = guardedReplyPayloads;
+    let finalPayloads = replyPayloads;
     const verboseEnabled = resolvedVerboseLevel !== "off";
     if (autoCompactionCompleted) {
       const count = await incrementRunCompactionCount({
@@ -555,27 +600,9 @@ export async function runReplyAgent(params: {
         sessionStore: activeSessionStore,
         sessionKey,
         storePath,
-        lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
+        lastCallUsage: runResult.meta.agentMeta?.lastCallUsage,
         contextTokensUsed,
       });
-
-      // Inject post-compaction workspace context for the next agent turn
-      if (sessionKey) {
-        const workspaceDir = process.cwd();
-        readPostCompactionContext(workspaceDir)
-          .then((contextContent) => {
-            if (contextContent) {
-              enqueueSystemEvent(contextContent, { sessionKey });
-            }
-          })
-          .catch(() => {
-            // Silent failure — post-compaction context is best-effort
-          });
-
-        // Set pending audit flag for Layer 3 (post-compaction read audit)
-        pendingPostCompactionAudits.set(sessionKey, true);
-      }
-
       if (verboseEnabled) {
         const suffix = typeof count === "number" ? ` (count ${count})` : "";
         finalPayloads = [{ text: `🧹 Auto-compaction complete${suffix}.` }, ...finalPayloads];
@@ -586,25 +613,6 @@ export async function runReplyAgent(params: {
     }
     if (responseUsageLine) {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
-    }
-
-    // Post-compaction read audit (Layer 3)
-    if (sessionKey && pendingPostCompactionAudits.get(sessionKey)) {
-      pendingPostCompactionAudits.delete(sessionKey); // Delete FIRST — one-shot only
-      try {
-        const sessionFile = activeSessionEntry?.sessionFile;
-        if (sessionFile) {
-          const messages = readSessionMessages(sessionFile);
-          const readPaths = extractReadPaths(messages);
-          const workspaceDir = process.cwd();
-          const audit = auditPostCompactionReads(readPaths, workspaceDir);
-          if (!audit.passed) {
-            enqueueSystemEvent(formatAuditWarning(audit.missingPatterns), { sessionKey });
-          }
-        }
-      } catch {
-        // Silent failure — audit is best-effort
-      }
     }
 
     return finalizeWithFollowup(

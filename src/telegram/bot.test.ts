@@ -1040,7 +1040,7 @@ describe("createTelegramBot", () => {
     ]);
   });
 
-  it("routes forum group reactions to the general topic (thread id not available on reactions)", async () => {
+  it("routes forum group reactions to the parent group (thread id not available on reactions)", async () => {
     onSpy.mockReset();
     enqueueSystemEventSpy.mockReset();
 
@@ -1056,7 +1056,7 @@ describe("createTelegramBot", () => {
     ) => Promise<void>;
 
     // MessageReactionUpdated does not include message_thread_id in the Bot API,
-    // so forum reactions always route to the general topic (1).
+    // so forum reactions route to the parent group session rather than guessing a topic.
     await handler({
       update: { update_id: 505 },
       messageReaction: {
@@ -1073,13 +1073,13 @@ describe("createTelegramBot", () => {
     expect(enqueueSystemEventSpy).toHaveBeenCalledWith(
       "Telegram reaction added: 🔥 by Bob (@bob_user) on msg 100",
       expect.objectContaining({
-        sessionKey: expect.stringContaining("telegram:group:5678:topic:1"),
+        sessionKey: expect.stringContaining("telegram:group:5678"),
         contextKey: expect.stringContaining("telegram:reaction:add:5678:100:10"),
       }),
     );
   });
 
-  it("uses correct session key for forum group reactions in general topic", async () => {
+  it("uses correct session key for forum group reactions without topic", async () => {
     onSpy.mockReset();
     enqueueSystemEventSpy.mockReset();
 
@@ -1099,7 +1099,7 @@ describe("createTelegramBot", () => {
       messageReaction: {
         chat: { id: 5678, type: "supergroup", is_forum: true },
         message_id: 101,
-        // No message_thread_id - should default to general topic (1)
+        // No message_thread_id - routes to parent group (not topic:1)
         user: { id: 10, first_name: "Bob" },
         date: 1736380800,
         old_reaction: [],
@@ -1111,7 +1111,7 @@ describe("createTelegramBot", () => {
     expect(enqueueSystemEventSpy).toHaveBeenCalledWith(
       "Telegram reaction added: 👀 by Bob on msg 101",
       expect.objectContaining({
-        sessionKey: expect.stringContaining("telegram:group:5678:topic:1"),
+        sessionKey: expect.stringContaining("telegram:group:5678"),
         contextKey: expect.stringContaining("telegram:reaction:add:5678:101:10"),
       }),
     );

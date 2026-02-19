@@ -13,7 +13,7 @@ import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { maybeApplyTtsToPayload, normalizeTtsAutoMode, resolveTtsConfig } from "../../tts/tts.js";
 import { getReplyFromConfig } from "../reply.js";
 import type { FinalizedMsgContext } from "../templating.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type { DeferredDispatchEvent, GetReplyOptions, ReplyPayload } from "../types.js";
 import { formatAbortReplyText, tryFastAbortFromMessage } from "./abort.js";
 import { shouldSkipDuplicateInbound } from "./inbound-dedupe.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
@@ -97,7 +97,7 @@ export async function dispatchReplyFromConfig(params: {
   const canTrackSession = diagnosticsEnabled && Boolean(sessionKey);
 
   const recordProcessed = (
-    outcome: "completed" | "skipped" | "error",
+    outcome: "completed" | "queued" | "skipped" | "error",
     opts?: {
       reason?: string;
       error?: string;
@@ -141,6 +141,39 @@ export async function dispatchReplyFromConfig(params: {
     });
   };
 
+  let deferredDispatch: DeferredDispatchEvent | undefined;
+
+  const resolveDeferredSkippedReason = (event: DeferredDispatchEvent): string => {
+    if (!event.reason) {
+      return "deferred_rejected";
+    }
+    return `deferred_${event.reason}`;
+  };
+
+  const recordCompletion = (counts: Record<ReplyDispatchKind, number>, queuedFinal: boolean) => {
+    const hasImmediateReply =
+      queuedFinal || counts.final > 0 || counts.block > 0 || counts.tool > 0;
+    if (hasImmediateReply) {
+      recordProcessed("completed");
+      markIdle("message_completed");
+      return;
+    }
+    if (deferredDispatch?.accepted) {
+      const reason =
+        deferredDispatch.kind === "steer" ? "accepted_for_steer" : "accepted_for_followup";
+      recordProcessed("queued", { reason });
+      markIdle("message_queued_for_followup");
+      return;
+    }
+    if (deferredDispatch && !deferredDispatch.accepted) {
+      recordProcessed("skipped", { reason: resolveDeferredSkippedReason(deferredDispatch) });
+      markIdle("message_dropped_before_followup");
+      return;
+    }
+    recordProcessed("completed");
+    markIdle("message_completed_without_payload");
+  };
+
   if (shouldSkipDuplicateInbound(ctx)) {
     recordProcessed("skipped", { reason: "duplicate" });
     return { queuedFinal: false, counts: dispatcher.getQueuedCounts() };
@@ -149,8 +182,6 @@ export async function dispatchReplyFromConfig(params: {
   const inboundAudio = isInboundAudioContext(ctx);
   const sessionTtsAuto = resolveSessionTtsAuto(ctx, cfg);
   const hookRunner = getGlobalHookRunner();
-
-  // Extract message context for hooks (plugin and internal)
   const timestamp =
     typeof ctx.Timestamp === "number" && Number.isFinite(ctx.Timestamp) ? ctx.Timestamp : undefined;
   const messageIdForHook =
@@ -166,7 +197,6 @@ export async function dispatchReplyFromConfig(params: {
   const channelId = (ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase();
   const conversationId = ctx.OriginatingTo ?? ctx.To ?? ctx.From ?? undefined;
 
-  // Trigger plugin hooks (fire-and-forget)
   if (hookRunner?.hasHooks("message_received")) {
     void hookRunner
       .runMessageReceived(
@@ -195,11 +225,9 @@ export async function dispatchReplyFromConfig(params: {
         },
       )
       .catch((err) => {
-        logVerbose(`dispatch-from-config: message_received plugin hook failed: ${String(err)}`);
+        logVerbose(`dispatch-from-config: message_received hook failed: ${String(err)}`);
       });
   }
-
-  // Bridge to internal hooks (HOOK.md discovery system) - refs #8807
   if (sessionKey) {
     void triggerInternalHook(
       createInternalHookEvent("message", "received", sessionKey, {
@@ -321,13 +349,12 @@ export async function dispatchReplyFromConfig(params: {
     let blockCount = 0;
 
     const shouldSendToolSummaries = ctx.ChatType !== "group" && ctx.CommandSource !== "native";
-
     const resolveToolDeliveryPayload = (payload: ReplyPayload): ReplyPayload | null => {
       if (shouldSendToolSummaries) {
         return payload;
       }
-      // Group/native flows intentionally suppress tool summary text, but media-only
-      // tool results (for example TTS audio) must still be delivered.
+      // Group/native flows suppress tool summary text, but media-only tool
+      // results (for example TTS audio) must still be delivered.
       const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
       if (!hasMedia) {
         return null;
@@ -339,6 +366,10 @@ export async function dispatchReplyFromConfig(params: {
       ctx,
       {
         ...params.replyOptions,
+        onDeferredDispatch: (event) => {
+          deferredDispatch = event;
+          params.replyOptions?.onDeferredDispatch?.(event);
+        },
         onToolResult: (payload: ReplyPayload) => {
           const run = async () => {
             const ttsPayload = await maybeApplyTtsToPayload({
@@ -488,8 +519,7 @@ export async function dispatchReplyFromConfig(params: {
 
     const counts = dispatcher.getQueuedCounts();
     counts.final += routedFinalCount;
-    recordProcessed("completed");
-    markIdle("message_completed");
+    recordCompletion(counts, queuedFinal);
     return { queuedFinal, counts };
   } catch (err) {
     recordProcessed("error", { error: String(err) });

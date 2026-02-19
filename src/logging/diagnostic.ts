@@ -130,7 +130,7 @@ export function logMessageProcessed(params: {
   sessionId?: string;
   sessionKey?: string;
   durationMs?: number;
-  outcome: "completed" | "skipped" | "error";
+  outcome: "completed" | "queued" | "skipped" | "error";
   reason?: string;
   error?: string;
 }) {
@@ -256,38 +256,81 @@ export function logRunAttempt(params: SessionRef & { runId: string; attempt: num
   markActivity();
 }
 
-export function logToolLoopAction(
-  params: SessionRef & {
-    toolName: string;
-    level: "warning" | "critical";
-    action: "warn" | "block";
-    detector: "generic_repeat" | "known_poll_no_progress" | "global_circuit_breaker" | "ping_pong";
-    count: number;
-    message: string;
-    pairedToolName?: string;
-  },
-) {
-  const payload = `tool loop: sessionId=${params.sessionId ?? "unknown"} sessionKey=${
-    params.sessionKey ?? "unknown"
-  } tool=${params.toolName} level=${params.level} action=${params.action} detector=${
-    params.detector
-  } count=${params.count}${params.pairedToolName ? ` pairedTool=${params.pairedToolName}` : ""} message="${params.message}"`;
-  if (params.level === "critical") {
-    diag.error(payload);
-  } else {
-    diag.warn(payload);
+export function logFollowupEnqueued(params: {
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  droppedCount?: number;
+}) {
+  if (diag.isEnabled("debug")) {
+    diag.debug(
+      `followup enqueued: sessionKey=${params.sessionKey} sessionId=${params.sessionId ?? "unknown"} messageId=${params.messageId ?? "unknown"} mode=${params.mode} queueDepth=${params.queueDepth} droppedCount=${params.droppedCount ?? 0}`,
+    );
   }
   emitDiagnosticEvent({
-    type: "tool.loop",
-    sessionId: params.sessionId,
+    type: "followup.enqueued",
     sessionKey: params.sessionKey,
-    toolName: params.toolName,
-    level: params.level,
-    action: params.action,
-    detector: params.detector,
-    count: params.count,
-    message: params.message,
-    pairedToolName: params.pairedToolName,
+    sessionId: params.sessionId,
+    messageId: params.messageId,
+    mode: params.mode,
+    queueDepth: params.queueDepth,
+    droppedCount: params.droppedCount,
+  });
+  markActivity();
+}
+
+export function logFollowupDrained(params: {
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  drainedCount: number;
+  summaryIncluded?: boolean;
+}) {
+  if (diag.isEnabled("debug")) {
+    diag.debug(
+      `followup drained: sessionKey=${params.sessionKey} sessionId=${params.sessionId ?? "unknown"} messageId=${params.messageId ?? "unknown"} mode=${params.mode} drainedCount=${params.drainedCount} queueDepth=${params.queueDepth} summaryIncluded=${params.summaryIncluded === true}`,
+    );
+  }
+  emitDiagnosticEvent({
+    type: "followup.drained",
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    messageId: params.messageId,
+    mode: params.mode,
+    queueDepth: params.queueDepth,
+    drainedCount: params.drainedCount,
+    summaryIncluded: params.summaryIncluded,
+  });
+  markActivity();
+}
+
+export function logFollowupDropped(params: {
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  droppedCount: number;
+  reason: "duplicate" | "cap_new" | "cap_old" | "cap_summarize";
+}) {
+  if (diag.isEnabled("debug")) {
+    diag.debug(
+      `followup dropped: sessionKey=${params.sessionKey} sessionId=${params.sessionId ?? "unknown"} messageId=${params.messageId ?? "unknown"} mode=${params.mode} reason=${params.reason} droppedCount=${params.droppedCount} queueDepth=${params.queueDepth}`,
+    );
+  }
+  emitDiagnosticEvent({
+    type: "followup.dropped",
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    messageId: params.messageId,
+    mode: params.mode,
+    queueDepth: params.queueDepth,
+    droppedCount: params.droppedCount,
+    reason: params.reason,
   });
   markActivity();
 }
@@ -349,16 +392,6 @@ export function startDiagnosticHeartbeat() {
       waiting: waitingCount,
       queued: totalQueued,
     });
-
-    import("../agents/command-poll-backoff.js")
-      .then(({ pruneStaleCommandPolls }) => {
-        for (const [, state] of diagnosticSessionStates) {
-          pruneStaleCommandPolls(state);
-        }
-      })
-      .catch((err) => {
-        diag.debug(`command-poll-backoff prune failed: ${String(err)}`);
-      });
 
     for (const [, state] of diagnosticSessionStates) {
       const ageMs = now - state.lastActivity;

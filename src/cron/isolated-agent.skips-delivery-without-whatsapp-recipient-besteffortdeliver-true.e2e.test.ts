@@ -184,7 +184,7 @@ describe("runCronIsolatedAgentTurn", () => {
     });
   });
 
-  it("passes resolved threadId into shared subagent announce flow", async () => {
+  it("blocks unsafe announce delivery when channel=last has no explicit target", async () => {
     await withTempCronHome(async (home) => {
       const storePath = await writeSessionStore(home, { lastProvider: "webchat", lastTo: "" });
       await fs.writeFile(
@@ -214,13 +214,10 @@ describe("runCronIsolatedAgentTurn", () => {
       });
 
       expect(res.status).toBe("ok");
-      expect(runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
-      const announceArgs = vi.mocked(runSubagentAnnounceFlow).mock.calls[0]?.[0] as
-        | { requesterOrigin?: { threadId?: string | number; channel?: string; to?: string } }
-        | undefined;
-      expect(announceArgs?.requesterOrigin?.channel).toBe("telegram");
-      expect(announceArgs?.requesterOrigin?.to).toBe("123");
-      expect(announceArgs?.requesterOrigin?.threadId).toBe(42);
+      expect(res.delivered).toBe(true);
+      expect(res.deliveryDecision?.blockedReason).toBe("unsafe-implicit-channel");
+      expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
+      expect(deps.sendMessageTelegram).not.toHaveBeenCalled();
     });
   });
 

@@ -44,7 +44,6 @@ import type { AgentDefaultsConfig } from "../../config/types.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
 import { resolveAgentOutboundIdentity } from "../../infra/outbound/identity.js";
-import { resolveOutboundSessionRoute } from "../../infra/outbound/outbound-session.js";
 import { logWarn } from "../../logger.js";
 import { buildAgentMainSessionKey, normalizeAgentId } from "../../routing/session-key.js";
 import {
@@ -54,7 +53,7 @@ import {
   isExternalHookSession,
 } from "../../security/external-content.js";
 import { resolveCronDeliveryPlan } from "../delivery.js";
-import type { CronJob, CronRunOutcome, CronRunTelemetry } from "../types.js";
+import type { CronJob } from "../types.js";
 import { resolveDeliveryTarget } from "./delivery-target.js";
 import {
   isHeartbeatOnlyResponse,
@@ -101,53 +100,46 @@ function resolveCronDeliveryBestEffort(job: CronJob): boolean {
   return false;
 }
 
-async function resolveCronAnnounceSessionKey(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  fallbackSessionKey: string;
-  delivery: {
-    channel: Parameters<typeof resolveOutboundSessionRoute>[0]["channel"];
-    to?: string;
-    accountId?: string;
-    threadId?: string | number;
-  };
-}): Promise<string> {
-  const to = params.delivery.to?.trim();
-  if (!to) {
-    return params.fallbackSessionKey;
+function resolveAnnounceDeliveryBlockReason(params: {
+  mode: "none" | "announce";
+  requested: boolean;
+  channel: string;
+  to?: string;
+}): string | undefined {
+  if (!params.requested || params.mode !== "announce") {
+    return undefined;
   }
-  try {
-    const route = await resolveOutboundSessionRoute({
-      cfg: params.cfg,
-      channel: params.delivery.channel,
-      agentId: params.agentId,
-      accountId: params.delivery.accountId,
-      target: to,
-      threadId: params.delivery.threadId,
-    });
-    const resolved = route?.sessionKey?.trim();
-    if (resolved) {
-      return resolved;
-    }
-  } catch {
-    // Fall back to main session routing if announce session resolution fails.
+  if (params.channel === "last") {
+    return "unsafe-implicit-channel";
   }
-  return params.fallbackSessionKey;
+  if (!params.to?.trim()) {
+    return "unsafe-missing-explicit-target";
+  }
+  return undefined;
 }
 
 export type RunCronAgentTurnResult = {
+  status: "ok" | "error" | "skipped";
+  summary?: string;
   /** Last non-empty agent text output (not truncated). */
   outputText?: string;
+  error?: string;
+  sessionId?: string;
+  sessionKey?: string;
   /**
    * `true` when the isolated run already delivered its output to the target
    * channel (via outbound payloads, the subagent announce flow, or a matching
-   * messaging-tool send). Callers should skip posting a summary to the main
-   * session to avoid duplicate
-   * messages.  See: https://github.com/openclaw/openclaw/issues/15692
+   * messaging-tool send), or intentionally suppressed an unsafe implicit
+   * announce delivery.
    */
   delivered?: boolean;
-} & CronRunOutcome &
-  CronRunTelemetry;
+  deliveryDecision?: {
+    requested: boolean;
+    blockedReason?: string;
+    resolvedChannel?: string;
+    resolvedTo?: string;
+  };
+};
 
 export async function runCronIsolatedAgentTurn(params: {
   cfg: OpenClawConfig;
@@ -180,14 +172,22 @@ export async function runCronIsolatedAgentTurn(params: {
     params.cfg.agents?.defaults,
     agentOverrideRest as Partial<AgentDefaultsConfig>,
   );
-  // Merge agent model override with defaults instead of replacing, so that
-  // `fallbacks` from `agents.defaults.model` are preserved when the agent
-  // (or its per-cron model pin) only specifies `primary`.
-  const existingModel = agentCfg.model && typeof agentCfg.model === "object" ? agentCfg.model : {};
+  const defaultModelConfig =
+    params.cfg.agents?.defaults?.model && typeof params.cfg.agents.defaults.model === "object"
+      ? params.cfg.agents.defaults.model
+      : undefined;
   if (typeof overrideModel === "string") {
-    agentCfg.model = { ...existingModel, primary: overrideModel };
+    agentCfg.model = {
+      ...defaultModelConfig,
+      primary: overrideModel,
+      fallbacks: defaultModelConfig?.fallbacks,
+    };
   } else if (overrideModel) {
-    agentCfg.model = { ...existingModel, ...overrideModel };
+    agentCfg.model = {
+      ...defaultModelConfig,
+      ...overrideModel,
+      fallbacks: overrideModel.fallbacks ?? defaultModelConfig?.fallbacks,
+    };
   }
   const cfgWithAgentDefaults: OpenClawConfig = {
     ...params.cfg,
@@ -288,12 +288,14 @@ export async function runCronIsolatedAgentTurn(params: {
       }
     });
   };
+  let deliveryDecision: RunCronAgentTurnResult["deliveryDecision"];
   const withRunSession = (
-    result: Omit<RunCronAgentTurnResult, "sessionId" | "sessionKey">,
+    result: Omit<RunCronAgentTurnResult, "sessionId" | "sessionKey" | "deliveryDecision">,
   ): RunCronAgentTurnResult => ({
     ...result,
     sessionId: runSessionId,
     sessionKey: runSessionKey,
+    deliveryDecision,
   });
   if (!cronSession.sessionEntry.label?.trim() && baseSessionKey.startsWith("cron:")) {
     const labelSuffix =
@@ -363,8 +365,25 @@ export async function runCronIsolatedAgentTurn(params: {
   const resolvedDelivery = await resolveDeliveryTarget(cfgWithAgentDefaults, agentId, {
     channel: deliveryPlan.channel ?? "last",
     to: deliveryPlan.to,
-    sessionKey: params.job.sessionKey,
   });
+  const deliveryBlockedReason = resolveAnnounceDeliveryBlockReason({
+    mode: deliveryPlan.mode,
+    requested: deliveryRequested,
+    channel: deliveryPlan.channel,
+    to: deliveryPlan.to,
+  });
+  const deliveryEnabled = deliveryRequested && !deliveryBlockedReason;
+  deliveryDecision = {
+    requested: deliveryRequested,
+    blockedReason: deliveryBlockedReason,
+    resolvedChannel: resolvedDelivery.channel,
+    resolvedTo: resolvedDelivery.to,
+  };
+  if (deliveryBlockedReason) {
+    logWarn(
+      `[cron:${params.job.id}] delivery blocked: reason=${deliveryBlockedReason} channel=${deliveryPlan.channel} to=${deliveryPlan.to ?? ""}`,
+    );
+  }
 
   const { formattedTime, timeLine } = resolveCronStyleNow(params.cfg, now);
   const base = `[cron:${params.job.id} ${params.job.name}] ${params.message}`.trim();
@@ -405,7 +424,7 @@ export async function runCronIsolatedAgentTurn(params: {
     // Internal/trusted source - use original format
     commandBody = `${base}\n${timeLine}`.trim();
   }
-  if (deliveryRequested) {
+  if (deliveryEnabled) {
     commandBody =
       `${commandBody}\n\nReturn your summary as plain text; it will be delivered automatically. If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
   }
@@ -506,13 +525,11 @@ export async function runCronIsolatedAgentTurn(params: {
   const payloads = runResult.payloads ?? [];
 
   // Update token+model fields in the session store.
-  // Also collect best-effort telemetry for the cron run log.
-  let telemetry: CronRunTelemetry | undefined;
   {
-    const usage = runResult.meta?.agentMeta?.usage;
-    const promptTokens = runResult.meta?.agentMeta?.promptTokens;
-    const modelUsed = runResult.meta?.agentMeta?.model ?? fallbackModel ?? model;
-    const providerUsed = runResult.meta?.agentMeta?.provider ?? fallbackProvider ?? provider;
+    const usage = runResult.meta.agentMeta?.usage;
+    const promptTokens = runResult.meta.agentMeta?.promptTokens;
+    const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? model;
+    const providerUsed = runResult.meta.agentMeta?.provider ?? fallbackProvider ?? provider;
     const contextTokens =
       agentCfg?.contextTokens ?? lookupContextTokens(modelUsed) ?? DEFAULT_CONTEXT_TOKENS;
 
@@ -520,7 +537,7 @@ export async function runCronIsolatedAgentTurn(params: {
     cronSession.sessionEntry.model = modelUsed;
     cronSession.sessionEntry.contextTokens = contextTokens;
     if (isCliProvider(providerUsed, cfgWithAgentDefaults)) {
-      const cliSessionId = runResult.meta?.agentMeta?.sessionId?.trim();
+      const cliSessionId = runResult.meta.agentMeta?.sessionId?.trim();
       if (cliSessionId) {
         setCliSessionId(cronSession.sessionEntry, providerUsed, cliSessionId);
       }
@@ -538,21 +555,6 @@ export async function runCronIsolatedAgentTurn(params: {
       cronSession.sessionEntry.outputTokens = output;
       cronSession.sessionEntry.totalTokens = totalTokens;
       cronSession.sessionEntry.totalTokensFresh = true;
-
-      telemetry = {
-        model: modelUsed,
-        provider: providerUsed,
-        usage: {
-          input_tokens: input,
-          output_tokens: output,
-          total_tokens: totalTokens,
-        },
-      };
-    } else {
-      telemetry = {
-        model: modelUsed,
-        provider: providerUsed,
-      };
     }
     await persistSessionEntry();
   }
@@ -575,9 +577,9 @@ export async function runCronIsolatedAgentTurn(params: {
 
   // Skip delivery for heartbeat-only responses (HEARTBEAT_OK with no real content).
   const ackMaxChars = resolveHeartbeatAckMaxChars(agentCfg);
-  const skipHeartbeatDelivery = deliveryRequested && isHeartbeatOnlyResponse(payloads, ackMaxChars);
+  const skipHeartbeatDelivery = deliveryEnabled && isHeartbeatOnlyResponse(payloads, ackMaxChars);
   const skipMessagingToolDelivery =
-    deliveryRequested &&
+    deliveryEnabled &&
     runResult.didSendViaMessagingTool === true &&
     (runResult.messagingToolSentTargets ?? []).some((target) =>
       matchesMessagingToolDeliveryTarget(target, {
@@ -588,9 +590,10 @@ export async function runCronIsolatedAgentTurn(params: {
     );
 
   // `true` means we confirmed at least one outbound send reached the target.
-  // Keep this strict so timer fallback can safely decide whether to wake main.
-  let delivered = skipMessagingToolDelivery;
-  if (deliveryRequested && !skipHeartbeatDelivery && !skipMessagingToolDelivery) {
+  // Unsafe implicit announce delivery is treated as handled to suppress timer
+  // fallback that would otherwise wake main and re-forward the summary.
+  let delivered = skipMessagingToolDelivery || Boolean(deliveryBlockedReason);
+  if (deliveryEnabled && !skipHeartbeatDelivery && !skipMessagingToolDelivery) {
     if (resolvedDelivery.error) {
       if (!deliveryBestEffort) {
         return withRunSession({
@@ -598,11 +601,10 @@ export async function runCronIsolatedAgentTurn(params: {
           error: resolvedDelivery.error.message,
           summary,
           outputText,
-          ...telemetry,
         });
       }
       logWarn(`[cron:${params.job.id}] ${resolvedDelivery.error.message}`);
-      return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+      return withRunSession({ status: "ok", summary, outputText });
     }
     if (!resolvedDelivery.to) {
       const message = "cron delivery target is missing";
@@ -612,22 +614,22 @@ export async function runCronIsolatedAgentTurn(params: {
           error: message,
           summary,
           outputText,
-          ...telemetry,
         });
       }
       logWarn(`[cron:${params.job.id}] ${message}`);
-      return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+      return withRunSession({ status: "ok", summary, outputText });
     }
     const identity = resolveAgentOutboundIdentity(cfgWithAgentDefaults, agentId);
 
-    // Route text-only cron announce output back through the main session so it
-    // follows the same system-message injection path as subagent completions.
-    // Keep direct outbound delivery only for structured payloads (media/channel
-    // data), which cannot be represented by the shared announce flow.
-    if (deliveryPayloadHasStructuredContent) {
+    // Shared subagent announce flow is text-based and prompts the main agent to
+    // summarize. When we have an explicit delivery target (delivery.to), sender
+    // identity, or structured content, prefer direct outbound delivery to send
+    // the actual cron output without summarization.
+    const hasExplicitDeliveryTarget = Boolean(deliveryPlan.to);
+    if (deliveryPayloadHasStructuredContent || identity || hasExplicitDeliveryTarget) {
       try {
         const payloadsForDelivery =
-          deliveryPayloads.length > 0
+          deliveryPayloadHasStructuredContent && deliveryPayloads.length > 0
             ? deliveryPayloads
             : synthesizedText
               ? [{ text: synthesizedText }]
@@ -649,30 +651,13 @@ export async function runCronIsolatedAgentTurn(params: {
         }
       } catch (err) {
         if (!deliveryBestEffort) {
-          return withRunSession({
-            status: "error",
-            summary,
-            outputText,
-            error: String(err),
-            ...telemetry,
-          });
+          return withRunSession({ status: "error", summary, outputText, error: String(err) });
         }
       }
     } else if (synthesizedText) {
-      const announceMainSessionKey = resolveAgentMainSessionKey({
+      const announceSessionKey = resolveAgentMainSessionKey({
         cfg: params.cfg,
         agentId,
-      });
-      const announceSessionKey = await resolveCronAnnounceSessionKey({
-        cfg: cfgWithAgentDefaults,
-        agentId,
-        fallbackSessionKey: announceMainSessionKey,
-        delivery: {
-          channel: resolvedDelivery.channel,
-          to: resolvedDelivery.to,
-          accountId: resolvedDelivery.accountId,
-          threadId: resolvedDelivery.threadId,
-        },
       });
       const taskLabel =
         typeof params.job.name === "string" && params.job.name.trim()
@@ -710,7 +695,7 @@ export async function runCronIsolatedAgentTurn(params: {
       if (activeSubagentRuns > 0) {
         // Parent orchestration is still in progress; avoid announcing a partial
         // update to the main requester.
-        return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+        return withRunSession({ status: "ok", summary, outputText });
       }
       if (
         (hadActiveDescendants || expectedSubagentFollowup) &&
@@ -720,10 +705,10 @@ export async function runCronIsolatedAgentTurn(params: {
       ) {
         // Descendants existed but no post-orchestration synthesis arrived, so
         // suppress stale parent text like "on it, pulling everything together".
-        return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+        return withRunSession({ status: "ok", summary, outputText });
       }
       if (synthesizedText.toUpperCase() === SILENT_REPLY_TOKEN.toUpperCase()) {
-        return withRunSession({ status: "ok", summary, outputText, ...telemetry });
+        return withRunSession({ status: "ok", summary, outputText });
       }
       try {
         const didAnnounce = await runSubagentAnnounceFlow({
@@ -757,25 +742,18 @@ export async function runCronIsolatedAgentTurn(params: {
               summary,
               outputText,
               error: message,
-              ...telemetry,
             });
           }
           logWarn(`[cron:${params.job.id}] ${message}`);
         }
       } catch (err) {
         if (!deliveryBestEffort) {
-          return withRunSession({
-            status: "error",
-            summary,
-            outputText,
-            error: String(err),
-            ...telemetry,
-          });
+          return withRunSession({ status: "error", summary, outputText, error: String(err) });
         }
         logWarn(`[cron:${params.job.id}] ${String(err)}`);
       }
     }
   }
 
-  return withRunSession({ status: "ok", summary, outputText, delivered, ...telemetry });
+  return withRunSession({ status: "ok", summary, outputText, delivered });
 }
