@@ -1,3 +1,4 @@
+import type { AuditEventV1Input } from "../../audit/schema-v1.js";
 import type { ExecApprovalForwarder } from "../../infra/exec-approval-forwarder.js";
 import {
   DEFAULT_EXEC_APPROVAL_TIMEOUT_MS,
@@ -13,10 +14,148 @@ import {
 } from "../protocol/index.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
+type ExecApprovalAuditSink = (event: AuditEventV1Input) => void;
+
+type ExecApprovalHandlersOptions = {
+  forwarder?: ExecApprovalForwarder;
+  auditSink?: ExecApprovalAuditSink;
+};
+
+function mapRequestActor(client: { connect?: { client?: { id?: string } } } | null | undefined): {
+  type: "system" | "client";
+  id: string;
+} {
+  const clientId = client?.connect?.client?.id;
+  if (typeof clientId === "string" && clientId.length > 0) {
+    return { type: "client", id: clientId };
+  }
+  return { type: "system", id: "openclaw" };
+}
+
+function commandPreview(command: string): string {
+  const max = 256;
+  return command.length > max ? `${command.slice(0, max)}...` : command;
+}
+
+function safeEmitAuditEvent(
+  sink: ExecApprovalAuditSink | undefined,
+  event: AuditEventV1Input,
+): void {
+  if (!sink) {
+    return;
+  }
+  try {
+    sink(event);
+  } catch {
+    // Audit logging is best-effort and must not block approval flow.
+  }
+}
+
+function emitRequestedAuditEvent(
+  sink: ExecApprovalAuditSink | undefined,
+  record: {
+    id: string;
+    request: {
+      command: string;
+      cwd?: string | null;
+      host?: string | null;
+      security?: string | null;
+      ask?: string | null;
+      sessionKey?: string | null;
+    };
+    createdAtMs: number;
+    expiresAtMs: number;
+  },
+  client: { connect?: { client?: { id?: string } } } | null | undefined,
+): void {
+  safeEmitAuditEvent(sink, {
+    eventType: "exec.approval.requested",
+    action: "requested",
+    outcome: "success",
+    actor: mapRequestActor(client),
+    subject: { type: "approval", id: record.id },
+    correlation: {
+      approvalId: record.id,
+      sessionKey: record.request.sessionKey ?? undefined,
+    },
+    source: { component: "gateway", subsystem: "exec-approval" },
+    payload: {
+      command: commandPreview(record.request.command),
+      cwd: record.request.cwd,
+      host: record.request.host,
+      security: record.request.security,
+      ask: record.request.ask,
+      createdAtMs: record.createdAtMs,
+      expiresAtMs: record.expiresAtMs,
+    },
+  });
+}
+
+function emitResolvedAuditEvent(
+  sink: ExecApprovalAuditSink | undefined,
+  args: {
+    approvalId: string;
+    decision: ExecApprovalDecision;
+    resolvedBy?: string | null;
+    sessionKey?: string | null;
+  },
+): void {
+  safeEmitAuditEvent(sink, {
+    eventType: "exec.approval.resolved",
+    action: "resolved",
+    outcome: "success",
+    actor: {
+      type: "user",
+      id: args.resolvedBy ?? "unknown",
+    },
+    subject: { type: "approval", id: args.approvalId },
+    correlation: {
+      approvalId: args.approvalId,
+      sessionKey: args.sessionKey ?? undefined,
+    },
+    source: { component: "gateway", subsystem: "exec-approval" },
+    payload: {
+      decision: args.decision,
+      resolvedBy: args.resolvedBy ?? null,
+    },
+  });
+}
+
+function emitCompletedAuditEvent(
+  sink: ExecApprovalAuditSink | undefined,
+  args: {
+    approvalId: string;
+    decision: ExecApprovalDecision | null;
+    sessionKey?: string | null;
+    createdAtMs: number;
+    expiresAtMs: number;
+  },
+): void {
+  safeEmitAuditEvent(sink, {
+    eventType: args.decision ? "exec.approval.completed" : "exec.approval.timeout",
+    action: args.decision ? "completed" : "timed_out",
+    outcome: args.decision ? "success" : "timeout",
+    actor: { type: "system", id: "openclaw" },
+    subject: { type: "approval", id: args.approvalId },
+    correlation: {
+      approvalId: args.approvalId,
+      sessionKey: args.sessionKey ?? undefined,
+    },
+    source: { component: "gateway", subsystem: "exec-approval" },
+    payload: {
+      decision: args.decision,
+      createdAtMs: args.createdAtMs,
+      expiresAtMs: args.expiresAtMs,
+    },
+  });
+}
+
 export function createExecApprovalHandlers(
   manager: ExecApprovalManager,
-  opts?: { forwarder?: ExecApprovalForwarder },
+  opts?: ExecApprovalHandlersOptions,
 ): GatewayRequestHandlers {
+  const auditSink = opts?.auditSink;
+
   return {
     "exec.approval.request": async ({ params, respond, context, client }) => {
       if (!validateExecApprovalRequestParams(params)) {
@@ -96,6 +235,7 @@ export function createExecApprovalHandlers(
         },
         { dropIfSlow: true },
       );
+      emitRequestedAuditEvent(auditSink, record, client);
       void opts?.forwarder
         ?.handleRequested({
           id: record.id,
@@ -123,6 +263,13 @@ export function createExecApprovalHandlers(
       }
 
       const decision = await decisionPromise;
+      emitCompletedAuditEvent(auditSink, {
+        approvalId: record.id,
+        decision,
+        sessionKey: record.request.sessionKey,
+        createdAtMs: record.createdAtMs,
+        expiresAtMs: record.expiresAtMs,
+      });
       // Send final response with decision for callers using expectFinal:true.
       respond(
         true,
@@ -187,6 +334,7 @@ export function createExecApprovalHandlers(
         return;
       }
       const resolvedBy = client?.connect?.client?.displayName ?? client?.connect?.client?.id;
+      const snapshot = manager.getSnapshot(p.id);
       const ok = manager.resolve(p.id, decision, resolvedBy ?? null);
       if (!ok) {
         respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown approval id"));
@@ -197,6 +345,12 @@ export function createExecApprovalHandlers(
         { id: p.id, decision, resolvedBy, ts: Date.now() },
         { dropIfSlow: true },
       );
+      emitResolvedAuditEvent(auditSink, {
+        approvalId: p.id,
+        decision,
+        resolvedBy,
+        sessionKey: snapshot?.request.sessionKey,
+      });
       void opts?.forwarder
         ?.handleResolved({ id: p.id, decision, resolvedBy, ts: Date.now() })
         .catch((err) => {

@@ -92,6 +92,23 @@ describe("logger helpers", () => {
 
     cleanup(todayPath);
   });
+
+  it("keeps legacy log line format unchanged", () => {
+    const logPath = pathForTest();
+    cleanup(logPath);
+    setLoggerOverride({ level: "info", file: logPath });
+
+    logInfo("legacy-format-check");
+
+    const line = fs.readFileSync(logPath, "utf-8").trim().split("\n").find(Boolean);
+    expect(line).toBeTruthy();
+    const parsed = JSON.parse(line ?? "{}") as Record<string, unknown>;
+    expect(parsed.schema).toBeUndefined();
+    expect(parsed.version).toBeUndefined();
+    expect(parsed.evidence).toBeUndefined();
+
+    cleanup(logPath);
+  });
 });
 
 describe("globals", () => {
@@ -122,23 +139,24 @@ describe("globals", () => {
 });
 
 describe("stripRedundantSubsystemPrefixForConsole", () => {
-  it("drops known subsystem prefixes", () => {
-    const cases = [
-      { input: "discord: hello", subsystem: "discord", expected: "hello" },
-      { input: "WhatsApp: hello", subsystem: "whatsapp", expected: "hello" },
-      { input: "discord gateway: closed", subsystem: "discord", expected: "gateway: closed" },
-      {
-        input: "[discord] connection stalled",
-        subsystem: "discord",
-        expected: "connection stalled",
-      },
-    ];
+  it("drops '<subsystem>:' prefix", () => {
+    expect(stripRedundantSubsystemPrefixForConsole("discord: hello", "discord")).toBe("hello");
+  });
 
-    for (const testCase of cases) {
-      expect(stripRedundantSubsystemPrefixForConsole(testCase.input, testCase.subsystem)).toBe(
-        testCase.expected,
-      );
-    }
+  it("drops '<Subsystem>:' prefix case-insensitively", () => {
+    expect(stripRedundantSubsystemPrefixForConsole("WhatsApp: hello", "whatsapp")).toBe("hello");
+  });
+
+  it("drops '<subsystem> ' prefix", () => {
+    expect(stripRedundantSubsystemPrefixForConsole("discord gateway: closed", "discord")).toBe(
+      "gateway: closed",
+    );
+  });
+
+  it("drops '[subsystem]' prefix", () => {
+    expect(stripRedundantSubsystemPrefixForConsole("[discord] connection stalled", "discord")).toBe(
+      "connection stalled",
+    );
   });
 
   it("keeps messages that do not start with the subsystem", () => {

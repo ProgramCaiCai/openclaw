@@ -3,12 +3,16 @@ import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent
 import { getActiveEmbeddedRunCount } from "../agents/pi-embedded-runner/runs.js";
 import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
 import { initSubagentRegistry } from "../agents/subagent-registry.js";
+import {
+  startDiagnosticAuditBridge,
+  stopDiagnosticAuditBridge,
+} from "../audit/diagnostic-bridge.js";
+import { appendAuditEvent } from "../audit/writer.js";
 import { getTotalPendingReplies } from "../auto-reply/reply/dispatcher-registry.js";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { createDefaultDeps } from "../cli/deps.js";
-import { isRestartEnabled } from "../config/commands.js";
 import {
   CONFIG_PATH,
   isNixMode,
@@ -50,10 +54,6 @@ import { createAuthRateLimiter, type AuthRateLimiter } from "./auth-rate-limit.j
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
 import { startGatewayConfigReloader } from "./config-reload.js";
 import type { ControlUiRootState } from "./control-ui.js";
-import {
-  GATEWAY_EVENT_UPDATE_AVAILABLE,
-  type GatewayUpdateAvailableEventPayload,
-} from "./events.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import { NodeRegistry } from "./node-registry.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
@@ -89,7 +89,6 @@ import {
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
-import { ensureGatewayStartupAuth } from "./startup-auth.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -233,31 +232,14 @@ export async function startGatewayServer(
     }
   }
 
-  let cfgAtStart = loadConfig();
-  const authBootstrap = await ensureGatewayStartupAuth({
-    cfg: cfgAtStart,
-    env: process.env,
-    authOverride: opts.auth,
-    tailscaleOverride: opts.tailscale,
-    persist: true,
-  });
-  cfgAtStart = authBootstrap.cfg;
-  if (authBootstrap.generatedToken) {
-    if (authBootstrap.persistedGeneratedToken) {
-      log.info(
-        "Gateway auth token was missing. Generated a new token and saved it to config (gateway.auth.token).",
-      );
-    } else {
-      log.warn(
-        "Gateway auth token was missing. Generated a runtime token for this startup without changing config; restart will generate a different token. Persist one with `openclaw config set gateway.auth.mode token` and `openclaw config set gateway.auth.token <token>`.",
-      );
-    }
-  }
+  const cfgAtStart = loadConfig();
   const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
   if (diagnosticsEnabled) {
     startDiagnosticHeartbeat();
+    // Keep legacy logs untouched and mirror key diagnostic events into audit v1.
+    startDiagnosticAuditBridge();
   }
-  setGatewaySigusr1RestartPolicy({ allowExternal: isRestartEnabled(cfgAtStart) });
+  setGatewaySigusr1RestartPolicy({ allowExternal: cfgAtStart.commands?.restart === true });
   setPreRestartDeferralCheck(
     () => getTotalQueueSize() + getTotalPendingReplies() + getActiveEmbeddedRunCount(),
   );
@@ -559,6 +541,7 @@ export async function startGatewayServer(
   const execApprovalForwarder = createExecApprovalForwarder();
   const execApprovalHandlers = createExecApprovalHandlers(execApprovalManager, {
     forwarder: execApprovalForwarder,
+    auditSink: diagnosticsEnabled ? appendAuditEvent : undefined,
   });
 
   const canvasHostServerPort = (canvasHostServer as CanvasHostServer | null)?.port;
@@ -633,15 +616,7 @@ export async function startGatewayServer(
     isNixMode,
   });
   if (!minimalTestGateway) {
-    scheduleGatewayUpdateCheck({
-      cfg: cfgAtStart,
-      log,
-      isNixMode,
-      onUpdateAvailableChange: (updateAvailable) => {
-        const payload: GatewayUpdateAvailableEventPayload = { updateAvailable };
-        broadcast(GATEWAY_EVENT_UPDATE_AVAILABLE, payload, { dropIfSlow: true });
-      },
-    });
+    scheduleGatewayUpdateCheck({ cfg: cfgAtStart, log, isNixMode });
   }
   const tailscaleCleanup = minimalTestGateway
     ? null
@@ -756,6 +731,7 @@ export async function startGatewayServer(
       });
       if (diagnosticsEnabled) {
         stopDiagnosticHeartbeat();
+        stopDiagnosticAuditBridge();
       }
       if (skillsRefreshTimer) {
         clearTimeout(skillsRefreshTimer);
