@@ -60,9 +60,7 @@ const ANNOUNCE_EXPIRY_MS = 5 * 60_000; // 5 minutes
 
 function resolveAnnounceRetryDelayMs(retryCount: number) {
   const boundedRetryCount = Math.max(0, Math.min(retryCount, 10));
-  // retryCount is "attempts already made", so retry #1 waits 1s, then 2s, 4s...
-  const backoffExponent = Math.max(0, boundedRetryCount - 1);
-  const baseDelay = MIN_ANNOUNCE_RETRY_DELAY_MS * 2 ** backoffExponent;
+  const baseDelay = MIN_ANNOUNCE_RETRY_DELAY_MS * 2 ** boundedRetryCount;
   return Math.min(baseDelay, MAX_ANNOUNCE_RETRY_DELAY_MS);
 }
 
@@ -142,7 +140,10 @@ function resumeSubagentRun(runId: string) {
   }
 
   const now = Date.now();
-  const delayMs = resolveAnnounceRetryDelayMs(entry.announceRetryCount ?? 0);
+  const retryCount = entry.announceRetryCount ?? 0;
+  // `announceRetryCount` is 1-based (#failures). Backoff starts at 1s for the
+  // first retry attempt, then doubles (1s, 2s, 4s, ...).
+  const delayMs = resolveAnnounceRetryDelayMs(Math.max(0, retryCount - 1));
   const earliestRetryAt = (entry.lastAnnounceRetryAt ?? 0) + delayMs;
   if (
     entry.expectsCompletionMessage === true &&
@@ -151,6 +152,7 @@ function resumeSubagentRun(runId: string) {
   ) {
     const waitMs = Math.max(1, earliestRetryAt - now);
     setTimeout(() => {
+      resumedRuns.delete(runId);
       resumeSubagentRun(runId);
     }, waitMs).unref?.();
     resumedRuns.add(runId);
@@ -192,6 +194,14 @@ function restoreSubagentRunsOnce() {
       }
       // Keep any newer in-memory entries.
       if (!subagentRuns.has(runId)) {
+        // Clear stale archiveAtMs on runs that are still active (no endedAt).
+        // Old code set archiveAtMs at spawn time; if the process restarts before
+        // the sweeper guard was deployed, these entries would carry a past
+        // archiveAtMs that the sweeper must ignore. Clearing it here removes the
+        // hazard at the source.
+        if (typeof entry.endedAt !== "number" && entry.archiveAtMs) {
+          entry.archiveAtMs = undefined;
+        }
         subagentRuns.set(runId, entry);
       }
     }
@@ -247,6 +257,15 @@ async function sweepSubagentRuns() {
   const now = Date.now();
   let mutated = false;
   for (const [runId, entry] of subagentRuns.entries()) {
+    // Never archive runs that are still active or whose completion announce has
+    // not been delivered yet. Otherwise long-running jobs can be deleted while
+    // still executing and lose terminal-state callbacks.
+    if (typeof entry.endedAt !== "number") {
+      continue;
+    }
+    if (typeof entry.cleanupCompletedAt !== "number") {
+      continue;
+    }
     if (!entry.archiveAtMs || entry.archiveAtMs > now) {
       continue;
     }
@@ -350,7 +369,7 @@ function finalizeSubagentCleanup(runId: string, cleanup: "delete" | "keep", didA
       () => {
         resumeSubagentRun(runId);
       },
-      resolveAnnounceRetryDelayMs(entry.announceRetryCount ?? 0),
+      resolveAnnounceRetryDelayMs(Math.max(0, retryCount - 1)),
     ).unref?.();
     return;
   }
@@ -360,8 +379,14 @@ function finalizeSubagentCleanup(runId: string, cleanup: "delete" | "keep", didA
     retryDeferredCompletedAnnounces(runId);
     return;
   }
-  entry.cleanupCompletedAt = Date.now();
+  const now = Date.now();
+  const archiveAfterMs = resolveArchiveAfterMs();
+  entry.cleanupCompletedAt = now;
+  entry.archiveAtMs = archiveAfterMs ? now + archiveAfterMs : undefined;
   persistSubagentRuns();
+  if (entry.archiveAtMs) {
+    startSweeper();
+  }
   retryDeferredCompletedAnnounces(runId);
 }
 
@@ -474,8 +499,6 @@ export function replaceSubagentRunAfterSteer(params: {
 
   const now = Date.now();
   const cfg = loadConfig();
-  const archiveAfterMs = resolveArchiveAfterMs(cfg);
-  const archiveAtMs = archiveAfterMs ? now + archiveAfterMs : undefined;
   const runTimeoutSeconds = params.runTimeoutSeconds ?? source.runTimeoutSeconds ?? 0;
   const waitTimeoutMs = resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
 
@@ -490,16 +513,13 @@ export function replaceSubagentRunAfterSteer(params: {
     suppressAnnounceReason: undefined,
     announceRetryCount: undefined,
     lastAnnounceRetryAt: undefined,
-    archiveAtMs,
+    archiveAtMs: undefined,
     runTimeoutSeconds,
   };
 
   subagentRuns.set(nextRunId, next);
   ensureListener();
   persistSubagentRuns();
-  if (archiveAtMs) {
-    startSweeper();
-  }
   void waitForSubagentCompletion(nextRunId, waitTimeoutMs);
   return true;
 }
@@ -519,8 +539,6 @@ export function registerSubagentRun(params: {
 }) {
   const now = Date.now();
   const cfg = loadConfig();
-  const archiveAfterMs = resolveArchiveAfterMs(cfg);
-  const archiveAtMs = archiveAfterMs ? now + archiveAfterMs : undefined;
   const runTimeoutSeconds = params.runTimeoutSeconds ?? 0;
   const waitTimeoutMs = resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
   const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
@@ -538,14 +556,10 @@ export function registerSubagentRun(params: {
     runTimeoutSeconds,
     createdAt: now,
     startedAt: now,
-    archiveAtMs,
     cleanupHandled: false,
   });
   ensureListener();
   persistSubagentRuns();
-  if (archiveAfterMs) {
-    startSweeper();
-  }
   // Wait for subagent completion via gateway RPC (cross-process).
   // The in-process lifecycle listener is a fallback for embedded runs.
   void waitForSubagentCompletion(params.runId, waitTimeoutMs);
@@ -733,6 +747,7 @@ export function markSubagentRunTerminated(params: {
 
   const now = Date.now();
   const reason = params.reason?.trim() || "killed";
+  const archiveAfterMs = resolveArchiveAfterMs();
   let updated = 0;
   for (const runId of runIds) {
     const entry = subagentRuns.get(runId);
@@ -746,11 +761,15 @@ export function markSubagentRunTerminated(params: {
     entry.outcome = { status: "error", error: reason };
     entry.cleanupHandled = true;
     entry.cleanupCompletedAt = now;
+    entry.archiveAtMs = archiveAfterMs ? now + archiveAfterMs : undefined;
     entry.suppressAnnounceReason = "killed";
     updated += 1;
   }
   if (updated > 0) {
     persistSubagentRuns();
+    if (archiveAfterMs) {
+      startSweeper();
+    }
   }
   return updated;
 }

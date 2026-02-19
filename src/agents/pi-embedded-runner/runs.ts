@@ -18,22 +18,39 @@ type EmbeddedRunWaiter = {
 };
 const EMBEDDED_RUN_WAITERS = new Map<string, Set<EmbeddedRunWaiter>>();
 
-export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean {
+export async function queueEmbeddedPiMessage(sessionId: string, text: string): Promise<boolean> {
+  const fallbackPath = "caller_durable_queue";
   const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
   if (!handle) {
-    diag.debug(`queue message failed: sessionId=${sessionId} reason=no_active_run`);
+    diag.debug(
+      `queue message failed: sessionId=${sessionId} reason=no_active_run steerAccepted=false steerRejected=true fallbackPath=${fallbackPath}`,
+    );
     return false;
   }
   if (!handle.isStreaming()) {
-    diag.debug(`queue message failed: sessionId=${sessionId} reason=not_streaming`);
+    diag.debug(
+      `queue message failed: sessionId=${sessionId} reason=not_streaming steerAccepted=false steerRejected=true fallbackPath=${fallbackPath}`,
+    );
     return false;
   }
   if (handle.isCompacting()) {
-    diag.debug(`queue message failed: sessionId=${sessionId} reason=compacting`);
+    diag.debug(
+      `queue message failed: sessionId=${sessionId} reason=compacting steerAccepted=false steerRejected=true fallbackPath=${fallbackPath}`,
+    );
+    return false;
+  }
+  try {
+    await handle.queueMessage(text);
+  } catch (err) {
+    diag.warn(
+      `queue message rejected: sessionId=${sessionId} reason=queue_rejected steerAccepted=false steerRejected=true fallbackPath=${fallbackPath} error="${String(err)}"`,
+    );
     return false;
   }
   logMessageQueued({ sessionId, source: "pi-embedded-runner" });
-  void handle.queueMessage(text);
+  diag.debug(
+    `queue message accepted: sessionId=${sessionId} reason=enqueued steerAccepted=true steerRejected=false fallbackPath=none`,
+  );
   return true;
 }
 

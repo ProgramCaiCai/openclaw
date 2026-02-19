@@ -126,6 +126,78 @@ describe("before_tool_call hook integration", () => {
   });
 });
 
+describe("subagent context guard defaults", () => {
+  let hookRunner: {
+    hasHooks: ReturnType<typeof vi.fn>;
+    runBeforeToolCall: ReturnType<typeof vi.fn>;
+  };
+
+  beforeEach(() => {
+    hookRunner = {
+      hasHooks: vi.fn(() => false),
+      runBeforeToolCall: vi.fn(),
+    };
+    // oxlint-disable-next-line typescript/no-explicit-any
+    mockGetGlobalHookRunner.mockReturnValue(hookRunner as any);
+  });
+
+  it("adds default pagination for read in subagent sessions", async () => {
+    const execute = vi.fn().mockResolvedValue({ content: [], details: { ok: true } });
+    // oxlint-disable-next-line typescript/no-explicit-any
+    const tool = wrapToolWithBeforeToolCallHook({ name: "read", execute } as any, {
+      agentId: "main",
+      sessionKey: "agent:main:subagent:abc123",
+    });
+
+    await tool.execute("call-read-1", { path: "/tmp/file.txt" }, undefined, undefined);
+
+    expect(execute).toHaveBeenCalledWith(
+      "call-read-1",
+      { path: "/tmp/file.txt", limit: 200, offset: 1 },
+      undefined,
+      undefined,
+    );
+  });
+
+  it("defaults exec to excludeFromContext in subagent sessions", async () => {
+    const execute = vi.fn().mockResolvedValue({ content: [], details: { ok: true } });
+    // oxlint-disable-next-line typescript/no-explicit-any
+    const tool = wrapToolWithBeforeToolCallHook({ name: "exec", execute } as any, {
+      agentId: "main",
+      sessionKey: "agent:main:subagent:abc123",
+    });
+
+    await tool.execute("call-exec-1", { command: "pwd && ls -la" }, undefined, undefined);
+
+    expect(execute).toHaveBeenCalledWith(
+      "call-exec-1",
+      { command: "pwd && ls -la", excludeFromContext: true },
+      undefined,
+      undefined,
+    );
+  });
+
+  it("treats undefined exec excludeFromContext as missing in subagent sessions", async () => {
+    hookRunner.hasHooks.mockReturnValue(true);
+    hookRunner.runBeforeToolCall.mockResolvedValue({ params: { excludeFromContext: undefined } });
+    const execute = vi.fn().mockResolvedValue({ content: [], details: { ok: true } });
+    // oxlint-disable-next-line typescript/no-explicit-any
+    const tool = wrapToolWithBeforeToolCallHook({ name: "exec", execute } as any, {
+      agentId: "main",
+      sessionKey: "agent:main:subagent:abc123",
+    });
+
+    await tool.execute("call-exec-2", { command: "pwd && ls -la" }, undefined, undefined);
+
+    expect(execute).toHaveBeenCalledWith(
+      "call-exec-2",
+      { command: "pwd && ls -la", excludeFromContext: true },
+      undefined,
+      undefined,
+    );
+  });
+});
+
 describe("before_tool_call hook deduplication (#15502)", () => {
   let hookRunner: {
     hasHooks: ReturnType<typeof vi.fn>;

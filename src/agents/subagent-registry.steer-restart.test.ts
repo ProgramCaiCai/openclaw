@@ -290,7 +290,7 @@ describe("subagent registry steer restarts", () => {
       expect(announceSpy).toHaveBeenCalledTimes(3);
       expect(mod.listSubagentRunsForRequester("agent:main:main")[0]?.announceRetryCount).toBe(3);
 
-      await vi.advanceTimersByTimeAsync(4_001);
+      await vi.advanceTimersByTimeAsync(10_000);
       expect(announceSpy).toHaveBeenCalledTimes(3);
       expect(mod.listSubagentRunsForRequester("agent:main:main")[0]?.cleanupCompletedAt).toBeTypeOf(
         "number",
@@ -299,6 +299,49 @@ describe("subagent registry steer restarts", () => {
       if (originalCallGateway) {
         callGateway.mockImplementation(originalCallGateway);
       }
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries resumed completion announce after the remaining backoff delay", async () => {
+    const storeMod = await import("./subagent-registry.store.js");
+    const loadFromDisk = vi.mocked(storeMod.loadSubagentRegistryFromDisk);
+
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      loadFromDisk.mockReturnValueOnce(
+        new Map([
+          [
+            "run-resume-delay",
+            {
+              runId: "run-resume-delay",
+              childSessionKey: "agent:main:subagent:resume-delay",
+              requesterSessionKey: "agent:main:main",
+              requesterDisplayKey: "main",
+              task: "resume delayed retry",
+              cleanup: "keep",
+              createdAt: now - 30_000,
+              startedAt: now - 25_000,
+              endedAt: now - 20_000,
+              outcome: { status: "ok" },
+              expectsCompletionMessage: true,
+              announceRetryCount: 1,
+              lastAnnounceRetryAt: now - 500,
+            },
+          ],
+        ]),
+      );
+
+      mod.initSubagentRegistry();
+      await vi.advanceTimersByTimeAsync(499);
+      expect(announceSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(announceSpy).toHaveBeenCalledTimes(1);
+      const announce = (announceSpy.mock.calls[0]?.[0] ?? {}) as { childRunId?: string };
+      expect(announce.childRunId).toBe("run-resume-delay");
+    } finally {
       vi.useRealTimers();
     }
   });

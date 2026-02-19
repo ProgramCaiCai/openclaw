@@ -151,4 +151,38 @@ describe("announce loop guard (#18264)", () => {
     const stored = runs.find((run) => run.runId === entry.runId);
     expect(stored?.cleanupCompletedAt).toBeDefined();
   });
+
+  test("delayed completion retries resume after backoff window", async () => {
+    const registry = await import("./subagent-registry.js");
+    const { runSubagentAnnounceFlow } = await import("./subagent-announce.js");
+    const announceFn = vi.mocked(runSubagentAnnounceFlow);
+    announceFn.mockClear();
+    announceFn.mockResolvedValue(true);
+
+    registry.resetSubagentRegistryForTests();
+
+    const now = Date.now();
+    const entry = {
+      runId: "test-delayed-resume",
+      childSessionKey: "agent:main:subagent:retry-delayed",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "agent:main:main",
+      task: "delayed retry",
+      cleanup: "keep",
+      createdAt: now - 60_000,
+      startedAt: now - 55_000,
+      endedAt: now - 1_000,
+      expectsCompletionMessage: true,
+      announceRetryCount: 0,
+      lastAnnounceRetryAt: now,
+    };
+
+    loadSubagentRegistryFromDisk.mockReturnValue(new Map([[entry.runId, entry]]));
+
+    registry.initSubagentRegistry();
+    expect(announceFn).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(announceFn).toHaveBeenCalledTimes(1);
+  });
 });
