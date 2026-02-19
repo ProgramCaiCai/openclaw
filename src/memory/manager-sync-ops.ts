@@ -618,12 +618,6 @@ export abstract class MemoryManagerSyncOps {
     needsFullReindex: boolean;
     progress?: MemorySyncProgressState;
   }) {
-    // FTS-only mode: skip embedding sync (no provider)
-    if (!this.provider) {
-      log.debug("Skipping memory file sync in FTS-only mode (no embedding provider)");
-      return;
-    }
-
     const files = await listMemoryFiles(this.workspaceDir, this.settings.extraPaths);
     const fileEntries = await Promise.all(
       files.map(async (file) => buildFileEntry(file, this.workspaceDir)),
@@ -669,6 +663,7 @@ export abstract class MemoryManagerSyncOps {
     });
     await runWithConcurrency(tasks, this.getIndexConcurrency());
 
+    const providerModel = this.provider?.model ?? "fts-only";
     const staleRows = this.db
       .prepare(`SELECT path FROM files WHERE source = ?`)
       .all("memory") as Array<{ path: string }>;
@@ -689,7 +684,7 @@ export abstract class MemoryManagerSyncOps {
         try {
           this.db
             .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
-            .run(stale.path, "memory", this.provider.model);
+            .run(stale.path, "memory", providerModel);
         } catch {}
       }
     }
@@ -699,12 +694,6 @@ export abstract class MemoryManagerSyncOps {
     needsFullReindex: boolean;
     progress?: MemorySyncProgressState;
   }) {
-    // FTS-only mode: skip embedding sync (no provider)
-    if (!this.provider) {
-      log.debug("Skipping session file sync in FTS-only mode (no embedding provider)");
-      return;
-    }
-
     const files = await listSessionFilesForAgent(this.agentId);
     const activePaths = new Set(files.map((file) => sessionPathForFile(file)));
     const indexAll = params.needsFullReindex || this.sessionsDirtyFiles.size === 0;
@@ -772,6 +761,7 @@ export abstract class MemoryManagerSyncOps {
     });
     await runWithConcurrency(tasks, this.getIndexConcurrency());
 
+    const providerModel = this.provider?.model ?? "fts-only";
     const staleRows = this.db
       .prepare(`SELECT path FROM files WHERE source = ?`)
       .all("sessions") as Array<{ path: string }>;
@@ -796,7 +786,7 @@ export abstract class MemoryManagerSyncOps {
         try {
           this.db
             .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
-            .run(stale.path, "sessions", this.provider.model);
+            .run(stale.path, "sessions", providerModel);
         } catch {}
       }
     }
@@ -842,7 +832,7 @@ export abstract class MemoryManagerSyncOps {
     }
     const vectorReady = await this.ensureVectorReady();
     const meta = this.readMeta();
-    const needsFullReindex =
+    const needsFullReindex = !!(
       params?.force ||
       !meta ||
       (this.provider && meta.model !== this.provider.model) ||
@@ -850,7 +840,8 @@ export abstract class MemoryManagerSyncOps {
       meta.providerKey !== this.providerKey ||
       meta.chunkTokens !== this.settings.chunking.tokens ||
       meta.chunkOverlap !== this.settings.chunking.overlap ||
-      (vectorReady && !meta?.vectorDims);
+      (this.provider && vectorReady && !meta?.vectorDims)
+    );
     try {
       if (needsFullReindex) {
         if (
@@ -1050,16 +1041,13 @@ export abstract class MemoryManagerSyncOps {
         chunkTokens: this.settings.chunking.tokens,
         chunkOverlap: this.settings.chunking.overlap,
       };
-      if (!nextMeta) {
-        throw new Error("Failed to compute memory index metadata for reindexing.");
-      }
 
       if (this.vector.available && this.vector.dims) {
         nextMeta.vectorDims = this.vector.dims;
       }
 
       this.writeMeta(nextMeta);
-      this.pruneEmbeddingCacheIfNeeded?.();
+      this.pruneEmbeddingCacheIfNeeded();
 
       this.db.close();
       originalDb.close();
@@ -1125,7 +1113,7 @@ export abstract class MemoryManagerSyncOps {
     }
 
     this.writeMeta(nextMeta);
-    this.pruneEmbeddingCacheIfNeeded?.();
+    this.pruneEmbeddingCacheIfNeeded();
   }
 
   private resetIndex() {
