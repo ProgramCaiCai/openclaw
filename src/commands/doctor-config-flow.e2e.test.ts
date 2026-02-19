@@ -23,19 +23,6 @@ async function runDoctorConfigWithInput(params: {
   });
 }
 
-function expectGoogleChatDmAllowFromRepaired(cfg: unknown) {
-  const typed = cfg as {
-    channels: {
-      googlechat: {
-        dm: { allowFrom: string[] };
-        allowFrom?: string[];
-      };
-    };
-  };
-  expect(typed.channels.googlechat.dm.allowFrom).toEqual(["*"]);
-  expect(typed.channels.googlechat.allowFrom).toBeUndefined();
-}
-
 describe("doctor config flow", () => {
   it("preserves invalid config for doctor repairs", async () => {
     const result = await runDoctorConfigWithInput({
@@ -243,6 +230,40 @@ describe("doctor config flow", () => {
     });
   });
 
+  it("does not stringify unsafe discord numeric ids during repair", async () => {
+    await withTempHome(async (home) => {
+      const configDir = path.join(home, ".openclaw");
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        path.join(configDir, "openclaw.json"),
+        `{
+  "channels": {
+    "discord": {
+      "allowFrom": [123, 273512430271856640]
+    }
+  }
+}\n`,
+        "utf-8",
+      );
+
+      const result = await loadAndMaybeMigrateDoctorConfig({
+        options: { nonInteractive: true, repair: true },
+        confirm: async () => false,
+      });
+
+      const cfg = result.cfg as unknown as {
+        channels: {
+          discord: {
+            allowFrom: Array<string | number>;
+          };
+        };
+      };
+
+      expect(cfg.channels.discord.allowFrom[0]).toBe("123");
+      expect(typeof cfg.channels.discord.allowFrom[1]).toBe("number");
+    });
+  });
+
   it('adds allowFrom ["*"] when dmPolicy="open" and allowFrom is missing on repair', async () => {
     const result = await runDoctorConfigWithInput({
       repair: true,
@@ -374,7 +395,20 @@ describe("doctor config flow", () => {
       },
     });
 
-    expectGoogleChatDmAllowFromRepaired(result.cfg);
+    const cfg = result.cfg as unknown as {
+      channels: {
+        googlechat: {
+          dm: {
+            policy: string;
+            allowFrom: string[];
+          };
+          allowFrom?: string[];
+        };
+      };
+    };
+
+    expect(cfg.channels.googlechat.dm.allowFrom).toEqual(["*"]);
+    expect(cfg.channels.googlechat.allowFrom).toBeUndefined();
   });
 
   it("repairs googlechat account dm.policy open by setting dm.allowFrom on repair", async () => {
@@ -430,6 +464,19 @@ describe("doctor config flow", () => {
       },
     });
 
-    expectGoogleChatDmAllowFromRepaired(result.cfg);
+    const cfg = result.cfg as unknown as {
+      channels: {
+        googlechat: {
+          dm: {
+            policy: string;
+            allowFrom: string[];
+          };
+          allowFrom?: string[];
+        };
+      };
+    };
+
+    expect(cfg.channels.googlechat.dm.allowFrom).toEqual(["*"]);
+    expect(cfg.channels.googlechat.allowFrom).toBeUndefined();
   });
 });

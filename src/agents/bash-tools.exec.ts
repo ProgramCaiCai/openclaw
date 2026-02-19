@@ -43,6 +43,14 @@ import {
   truncateMiddle,
 } from "./bash-tools.shared.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
+import {
+  EXCLUDED_CONTEXT_PREVIEW_CHARS,
+  formatExcludedFromContextHeader,
+  tailText,
+  writeToolOutputArtifact,
+} from "./tool-output-artifacts.js";
+import { callGatewayTool } from "./tools/gateway.js";
+import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
 
 export type { BashSandboxConfig } from "./bash-tools.shared.js";
 export type {
@@ -74,6 +82,34 @@ function extractScriptTargetFromCommand(
   }
 
   return null;
+}
+
+function maskNonNewlineChars(value: string): string {
+  return value.replace(/[^\n]/g, " ");
+}
+
+function maskMatches(value: string, regex: RegExp): string {
+  return value.replace(regex, (match) => maskNonNewlineChars(match));
+}
+
+function maskStringAndCommentContent(content: string, kind: "python" | "node"): string {
+  if (kind === "node") {
+    let masked = content;
+    masked = maskMatches(masked, /`(?:\\.|[^`\\])*`/g);
+    masked = maskMatches(masked, /"(?:\\.|[^"\\])*"/g);
+    masked = maskMatches(masked, /'(?:\\.|[^'\\])*'/g);
+    masked = maskMatches(masked, /\/\*[\s\S]*?\*\//g);
+    masked = maskMatches(masked, /\/\/.*$/gm);
+    return masked;
+  }
+
+  let masked = content;
+  masked = maskMatches(masked, /'''[\s\S]*?'''/g);
+  masked = maskMatches(masked, /"""[\s\S]*?"""/g);
+  masked = maskMatches(masked, /"(?:\\.|[^"\\])*"/g);
+  masked = maskMatches(masked, /'(?:\\.|[^'\\])*'/g);
+  masked = maskMatches(masked, /#.*$/gm);
+  return masked;
 }
 
 async function validateScriptFileForShellBleed(params: {
@@ -109,27 +145,28 @@ async function validateScriptFileForShellBleed(params: {
   }
 
   const content = await fs.readFile(absPath, "utf-8");
+  const codeOnlyContent = maskStringAndCommentContent(content, target.kind);
 
-  // Common failure mode: shell env var syntax leaking into Python/JS.
-  // We deliberately match all-caps/underscore vars to avoid false positives with `$` as a JS identifier.
-  const envVarRegex = /\$[A-Z_][A-Z0-9_]{1,}/g;
-  const first = envVarRegex.exec(content);
-  if (first) {
-    const idx = first.index;
-    const before = content.slice(0, idx);
-    const line = before.split("\n").length;
-    const token = first[0];
-    throw new Error(
-      [
-        `exec preflight: detected likely shell variable injection (${token}) in ${target.kind} script: ${path.basename(
-          absPath,
-        )}:${line}.`,
-        target.kind === "python"
-          ? `In Python, use os.environ.get(${JSON.stringify(token.slice(1))}) instead of raw ${token}.`
-          : `In Node.js, use process.env[${JSON.stringify(token.slice(1))}] instead of raw ${token}.`,
-        "(If this is inside a string literal on purpose, escape it or restructure the code.)",
-      ].join("\n"),
-    );
+  // Common failure mode: shell env var syntax leaking into Python source.
+  // We intentionally skip this check for Node because `$NAME` can be a valid JS identifier.
+  if (target.kind === "python") {
+    const envVarRegex = /\$[A-Z_][A-Z0-9_]{1,}/g;
+    const first = envVarRegex.exec(codeOnlyContent);
+    if (first) {
+      const idx = first.index;
+      const before = content.slice(0, idx);
+      const line = before.split("\n").length;
+      const token = first[0];
+      throw new Error(
+        [
+          `exec preflight: detected likely shell variable injection (${token}) in ${target.kind} script: ${path.basename(
+            absPath,
+          )}:${line}.`,
+          `In Python, use os.environ.get(${JSON.stringify(token.slice(1))}) instead of raw ${token}.`,
+          "(If this is inside a string literal on purpose, escape it or restructure the code.)",
+        ].join("\n"),
+      );
+    }
   }
 
   // Another recurring pattern from the issue: shell commands accidentally emitted as JS.
@@ -181,7 +218,7 @@ export function createExecTool(
     description:
       "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents).",
     parameters: execSchema,
-    execute: async (_toolCallId, args, signal, onUpdate) => {
+    execute: async (toolCallId, args, signal, onUpdate) => {
       const params = args as {
         command: string;
         workdir?: string;
@@ -190,6 +227,7 @@ export function createExecTool(
         background?: boolean;
         timeout?: number;
         pty?: boolean;
+        excludeFromContext?: boolean;
         elevated?: boolean;
         host?: string;
         security?: string;
@@ -501,7 +539,7 @@ export function createExecTool(
         }
 
         run.promise
-          .then((outcome) => {
+          .then(async (outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
@@ -512,11 +550,46 @@ export function createExecTool(
               reject(new Error(outcome.reason ?? "Command failed."));
               return;
             }
+            const warningText = getWarningText();
+
+            if (params.excludeFromContext) {
+              const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
+              const outputFile = await writeToolOutputArtifact({
+                preferredCwd: defaults?.cwd ?? run.session.cwd,
+                toolName: "exec",
+                toolCallId: artifactId,
+                output: outcome.aggregated ?? "",
+                extension: "log",
+              });
+              const preview = tailText(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
+              const header = formatExcludedFromContextHeader({ toolName: "exec", outputFile });
+              const body = preview || "(no output)";
+
+              resolve({
+                content: [
+                  {
+                    type: "text",
+                    text: `${warningText}${header}\n\n${body}`,
+                  },
+                ],
+                details: {
+                  status: "completed",
+                  exitCode: outcome.exitCode ?? 0,
+                  durationMs: outcome.durationMs,
+                  aggregated: body,
+                  cwd: run.session.cwd,
+                  outputFile: outputFile ?? undefined,
+                  excludedFromContext: true,
+                },
+              });
+              return;
+            }
+
             resolve({
               content: [
                 {
                   type: "text",
-                  text: `${getWarningText()}${outcome.aggregated || "(no output)"}`,
+                  text: `${warningText}${outcome.aggregated || "(no output)"}`,
                 },
               ],
               details: {

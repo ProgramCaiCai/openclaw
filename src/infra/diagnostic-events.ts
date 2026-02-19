@@ -77,7 +77,7 @@ export type DiagnosticMessageProcessedEvent = DiagnosticBaseEvent & {
   sessionKey?: string;
   sessionId?: string;
   durationMs?: number;
-  outcome: "completed" | "skipped" | "error";
+  outcome: "completed" | "queued" | "skipped" | "error";
   reason?: string;
   error?: string;
 };
@@ -101,6 +101,19 @@ export type DiagnosticSessionStuckEvent = DiagnosticBaseEvent & {
   queueDepth?: number;
 };
 
+export type DiagnosticToolLoopEvent = DiagnosticBaseEvent & {
+  type: "tool.loop";
+  sessionKey?: string;
+  sessionId?: string;
+  level: "warning" | "critical";
+  action: "warn" | "block";
+  detector: "generic_repeat" | "known_poll_no_progress" | "global_circuit_breaker" | "ping_pong";
+  count: number;
+  toolName: string;
+  pairedToolName?: string;
+  message: string;
+};
+
 export type DiagnosticLaneEnqueueEvent = DiagnosticBaseEvent & {
   type: "queue.lane.enqueue";
   lane: string;
@@ -122,6 +135,38 @@ export type DiagnosticRunAttemptEvent = DiagnosticBaseEvent & {
   attempt: number;
 };
 
+export type DiagnosticFollowupEnqueuedEvent = DiagnosticBaseEvent & {
+  type: "followup.enqueued";
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  droppedCount?: number;
+};
+
+export type DiagnosticFollowupDrainedEvent = DiagnosticBaseEvent & {
+  type: "followup.drained";
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  drainedCount: number;
+  summaryIncluded?: boolean;
+};
+
+export type DiagnosticFollowupDroppedEvent = DiagnosticBaseEvent & {
+  type: "followup.dropped";
+  sessionKey: string;
+  sessionId?: string;
+  messageId?: string;
+  mode: string;
+  queueDepth: number;
+  droppedCount: number;
+  reason: "duplicate" | "cap_new" | "cap_old" | "cap_summarize";
+};
+
 export type DiagnosticHeartbeatEvent = DiagnosticBaseEvent & {
   type: "diagnostic.heartbeat";
   webhooks: {
@@ -134,19 +179,6 @@ export type DiagnosticHeartbeatEvent = DiagnosticBaseEvent & {
   queued: number;
 };
 
-export type DiagnosticToolLoopEvent = DiagnosticBaseEvent & {
-  type: "tool.loop";
-  sessionKey?: string;
-  sessionId?: string;
-  toolName: string;
-  level: "warning" | "critical";
-  action: "warn" | "block";
-  detector: "generic_repeat" | "known_poll_no_progress" | "global_circuit_breaker" | "ping_pong";
-  count: number;
-  message: string;
-  pairedToolName?: string;
-};
-
 export type DiagnosticEventPayload =
   | DiagnosticUsageEvent
   | DiagnosticWebhookReceivedEvent
@@ -156,87 +188,48 @@ export type DiagnosticEventPayload =
   | DiagnosticMessageProcessedEvent
   | DiagnosticSessionStateEvent
   | DiagnosticSessionStuckEvent
+  | DiagnosticToolLoopEvent
   | DiagnosticLaneEnqueueEvent
   | DiagnosticLaneDequeueEvent
   | DiagnosticRunAttemptEvent
-  | DiagnosticHeartbeatEvent
-  | DiagnosticToolLoopEvent;
+  | DiagnosticFollowupEnqueuedEvent
+  | DiagnosticFollowupDrainedEvent
+  | DiagnosticFollowupDroppedEvent
+  | DiagnosticHeartbeatEvent;
 
 export type DiagnosticEventInput = DiagnosticEventPayload extends infer Event
   ? Event extends DiagnosticEventPayload
     ? Omit<Event, "seq" | "ts">
     : never
   : never;
-
-type DiagnosticEventsGlobalState = {
-  seq: number;
-  listeners: Set<(evt: DiagnosticEventPayload) => void>;
-  dispatchDepth: number;
-};
-
-function getDiagnosticEventsState(): DiagnosticEventsGlobalState {
-  const globalStore = globalThis as typeof globalThis & {
-    __openclawDiagnosticEventsState?: DiagnosticEventsGlobalState;
-  };
-  if (!globalStore.__openclawDiagnosticEventsState) {
-    globalStore.__openclawDiagnosticEventsState = {
-      seq: 0,
-      listeners: new Set<(evt: DiagnosticEventPayload) => void>(),
-      dispatchDepth: 0,
-    };
-  }
-  return globalStore.__openclawDiagnosticEventsState;
-}
+let seq = 0;
+const listeners = new Set<(evt: DiagnosticEventPayload) => void>();
 
 export function isDiagnosticsEnabled(config?: OpenClawConfig): boolean {
   return config?.diagnostics?.enabled === true;
 }
 
 export function emitDiagnosticEvent(event: DiagnosticEventInput) {
-  const state = getDiagnosticEventsState();
-  if (state.dispatchDepth > 100) {
-    console.error(
-      `[diagnostic-events] recursion guard tripped at depth=${state.dispatchDepth}, dropping type=${event.type}`,
-    );
-    return;
-  }
-
   const enriched = {
     ...event,
-    seq: (state.seq += 1),
+    seq: (seq += 1),
     ts: Date.now(),
   } satisfies DiagnosticEventPayload;
-  state.dispatchDepth += 1;
-  for (const listener of state.listeners) {
+  for (const listener of listeners) {
     try {
       listener(enriched);
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error
-          ? (err.stack ?? err.message)
-          : typeof err === "string"
-            ? err
-            : String(err);
-      console.error(
-        `[diagnostic-events] listener error type=${enriched.type} seq=${enriched.seq}: ${errorMessage}`,
-      );
+    } catch {
       // Ignore listener failures.
     }
   }
-  state.dispatchDepth -= 1;
 }
 
 export function onDiagnosticEvent(listener: (evt: DiagnosticEventPayload) => void): () => void {
-  const state = getDiagnosticEventsState();
-  state.listeners.add(listener);
-  return () => {
-    state.listeners.delete(listener);
-  };
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 export function resetDiagnosticEventsForTest(): void {
-  const state = getDiagnosticEventsState();
-  state.seq = 0;
-  state.listeners.clear();
-  state.dispatchDepth = 0;
+  seq = 0;
+  listeners.clear();
 }

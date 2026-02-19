@@ -34,6 +34,11 @@ function normalizeLogTimestamp(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
+function formatLocalDateKey(timestamp: number): string {
+  const d = new Date(timestamp);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** Filter session logs by a timestamp range. */
 function filterLogsByRange(
   logs: SessionLogEntry[],
@@ -89,8 +94,8 @@ function renderSessionSummary(
     const toolCounts = new Map<string, number>();
     for (const log of filteredLogs) {
       const { tools } = parseToolSummary(log.content);
-      for (const [name] of tools) {
-        toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+      for (const [name, count] of tools) {
+        toolCounts.set(name, (toolCounts.get(name) || 0) + count);
       }
     }
     // Keep the same tool order as the full session, just update counts
@@ -148,12 +153,16 @@ function renderSessionSummary(
   `;
 }
 
-/** Aggregate usage stats from time series points within a timestamp range. */
+/** Aggregate usage stats from time series points within a timestamp range.
+ *  When logs are provided, message counts are derived from log entries
+ *  (accurate) instead of from bucketed time-series points (undercount). */
 function computeFilteredUsage(
   baseUsage: NonNullable<UsageSessionEntry["usage"]>,
   points: TimeSeriesPoint[],
   rangeStart: number,
   rangeEnd: number,
+  logs?: SessionLogEntry[],
+  selectedDays?: string[],
 ): UsageSessionEntry["usage"] | undefined {
   const lo = Math.min(rangeStart, rangeEnd);
   const hi = Math.max(rangeStart, rangeEnd);
@@ -186,6 +195,47 @@ function computeFilteredUsage(
     }
   }
 
+  // Derive message counts from logs when available (accurate);
+  // fall back to point-based heuristic (may undercount in aggregated buckets).
+  let messageCounts: NonNullable<UsageSessionEntry["usage"]>["messageCounts"];
+  if (logs) {
+    const selectedDaySet =
+      selectedDays && selectedDays.length > 0
+        ? new Set(selectedDays.map((day) => day.trim()))
+        : null;
+    const filteredLogs = filterLogsByRange(logs, rangeStart, rangeEnd).filter((log) => {
+      if (!selectedDaySet) {
+        return true;
+      }
+      if (log.timestamp <= 0) {
+        return false;
+      }
+      return selectedDaySet.has(formatLocalDateKey(normalizeLogTimestamp(log.timestamp)));
+    });
+    let logUser = 0;
+    let logAssistant = 0;
+    for (const log of filteredLogs) {
+      if (log.role === "user") {
+        logUser++;
+      } else if (log.role === "assistant") {
+        logAssistant++;
+      }
+    }
+    messageCounts = {
+      ...baseUsage.messageCounts,
+      total: filteredLogs.length,
+      user: logUser,
+      assistant: logAssistant,
+    };
+  } else {
+    messageCounts = {
+      ...baseUsage.messageCounts,
+      total: filtered.length,
+      user: userMessages,
+      assistant: assistantMessages,
+    };
+  }
+
   return {
     ...baseUsage,
     totalTokens,
@@ -197,15 +247,31 @@ function computeFilteredUsage(
     durationMs: filtered[filtered.length - 1].timestamp - filtered[0].timestamp,
     firstActivity: filtered[0].timestamp,
     lastActivity: filtered[filtered.length - 1].timestamp,
-    messageCounts: {
-      total: filtered.length,
-      user: userMessages,
-      assistant: assistantMessages,
-      toolCalls: 0,
-      toolResults: 0,
-      errors: 0,
-    },
+    messageCounts,
   };
+}
+
+/** Filter time-series points by date range and selected days. */
+function filterPointsByDateRange(
+  points: TimeSeriesPoint[],
+  startDate?: string,
+  endDate?: string,
+  selectedDays?: string[],
+): TimeSeriesPoint[] {
+  if (!startDate && !endDate && (!selectedDays || selectedDays.length === 0)) {
+    return points;
+  }
+  const startTs = startDate ? new Date(startDate + "T00:00:00").getTime() : 0;
+  const endTs = endDate ? new Date(endDate + "T23:59:59").getTime() : Infinity;
+  return points.filter((p) => {
+    if (p.timestamp < startTs || p.timestamp > endTs) {
+      return false;
+    }
+    if (selectedDays && selectedDays.length > 0) {
+      return selectedDays.includes(formatLocalDateKey(p.timestamp));
+    }
+    return true;
+  });
 }
 
 function renderSessionDetailPanel(
@@ -246,9 +312,20 @@ function renderSessionDetailPanel(
   const usage = session.usage;
 
   const hasRange = timeSeriesCursorStart !== null && timeSeriesCursorEnd !== null;
+  // Use the same day/date-filtered points the chart renders so cursor stats match visible bars.
+  const visiblePoints = timeSeries?.points
+    ? filterPointsByDateRange(timeSeries.points, startDate, endDate, selectedDays)
+    : undefined;
   const filteredUsage =
-    timeSeriesCursorStart !== null && timeSeriesCursorEnd !== null && timeSeries?.points && usage
-      ? computeFilteredUsage(usage, timeSeries.points, timeSeriesCursorStart, timeSeriesCursorEnd)
+    timeSeriesCursorStart !== null && timeSeriesCursorEnd !== null && visiblePoints && usage
+      ? computeFilteredUsage(
+          usage,
+          visiblePoints,
+          timeSeriesCursorStart,
+          timeSeriesCursorEnd,
+          sessionLogs ?? undefined,
+          selectedDays,
+        )
       : undefined;
   const headerStats = filteredUsage
     ? { totalTokens: filteredUsage.totalTokens, totalCost: filteredUsage.totalCost }
@@ -351,23 +428,8 @@ function renderTimeSeriesCompact(
     `;
   }
 
-  // Filter and recalculate (same logic as main function)
-  let points = timeSeries.points;
-  if (startDate || endDate || (selectedDays && selectedDays.length > 0)) {
-    const startTs = startDate ? new Date(startDate + "T00:00:00").getTime() : 0;
-    const endTs = endDate ? new Date(endDate + "T23:59:59").getTime() : Infinity;
-    points = timeSeries.points.filter((p) => {
-      if (p.timestamp < startTs || p.timestamp > endTs) {
-        return false;
-      }
-      if (selectedDays && selectedDays.length > 0) {
-        const d = new Date(p.timestamp);
-        const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-        return selectedDays.includes(dateStr);
-      }
-      return true;
-    });
-  }
+  // Filter by date range / selected days
+  let points = filterPointsByDateRange(timeSeries.points, startDate, endDate, selectedDays);
   if (points.length < 2) {
     return html`
       <div class="session-timeseries-compact">
@@ -1072,6 +1134,7 @@ function renderSessionLogsCompact(
 
 export {
   computeFilteredUsage,
+  filterPointsByDateRange,
   renderContextPanel,
   renderEmptyDetailState,
   renderSessionDetailPanel,

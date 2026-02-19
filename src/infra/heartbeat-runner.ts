@@ -38,7 +38,11 @@ import type { AgentDefaultsConfig } from "../config/types.agent-defaults.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getQueueSize } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
-import { normalizeAgentId, toAgentStoreSessionKey } from "../routing/session-key.js";
+import {
+  normalizeAgentId,
+  parseAgentSessionKey,
+  toAgentStoreSessionKey,
+} from "../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { escapeRegExp } from "../utils.js";
 import { formatErrorMessage } from "./errors.js";
@@ -49,7 +53,6 @@ import {
   isExecCompletionEvent,
 } from "./heartbeat-events-filter.js";
 import { emitHeartbeatEvent, resolveIndicatorType } from "./heartbeat-events.js";
-import { resolveHeartbeatReasonKind } from "./heartbeat-reason.js";
 import { resolveHeartbeatVisibility } from "./heartbeat-visibility.js";
 import {
   type HeartbeatRunResult,
@@ -384,19 +387,179 @@ async function restoreHeartbeatUpdatedAt(params: {
  * This removes the user+assistant turns that were written during a HEARTBEAT_OK run,
  * preventing context pollution from zero-information exchanges.
  */
+const HEARTBEAT_TRANSCRIPT_PRUNE_MAX_APPEND_BYTES = 256 * 1024;
+
+type TranscriptMessageLine = {
+  role: string;
+  text: string;
+};
+
+function normalizeTranscriptTextForMatch(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function extractTranscriptMessageText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+      if (
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
+        (part as { type?: unknown }).type === "text" &&
+        "text" in part &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        return (part as { text: string }).text;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function parseTranscriptMessageLine(line: string): TranscriptMessageLine | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return undefined;
+  }
+  if ((parsed as { type?: unknown }).type !== "message") {
+    return undefined;
+  }
+  const message = (parsed as { message?: unknown }).message;
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const role = (message as { role?: unknown }).role;
+  if (typeof role !== "string" || !role.trim()) {
+    return undefined;
+  }
+  const text = extractTranscriptMessageText((message as { content?: unknown }).content);
+  return { role, text };
+}
+
+async function readTranscriptAppendedLines(params: {
+  transcriptPath: string;
+  offset: number;
+  bytesToRead: number;
+}): Promise<string[] | undefined> {
+  const { transcriptPath, offset, bytesToRead } = params;
+  if (bytesToRead <= 0) {
+    return [];
+  }
+  const file = await fs.open(transcriptPath, "r");
+  try {
+    const chunk = Buffer.allocUnsafe(bytesToRead);
+    const { bytesRead } = await file.read(chunk, 0, bytesToRead, offset);
+    if (bytesRead <= 0) {
+      return [];
+    }
+    const appendedText = chunk.subarray(0, bytesRead).toString("utf-8");
+    return appendedText.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  } finally {
+    await file.close();
+  }
+}
+
+function isHeartbeatPromptMessage(line: TranscriptMessageLine, heartbeatPrompt?: string): boolean {
+  if (line.role !== "user") {
+    return false;
+  }
+  const normalizedText = normalizeTranscriptTextForMatch(line.text);
+  if (!normalizedText) {
+    return false;
+  }
+  const normalizedPrompt = normalizeTranscriptTextForMatch(heartbeatPrompt ?? "");
+  if (normalizedPrompt && normalizedText.includes(normalizedPrompt)) {
+    return true;
+  }
+  return normalizedText.includes("heartbeat");
+}
+
 async function pruneHeartbeatTranscript(params: {
   transcriptPath?: string;
   preHeartbeatSize?: number;
+  heartbeatPrompt?: string;
 }) {
-  const { transcriptPath, preHeartbeatSize } = params;
+  const { transcriptPath, preHeartbeatSize, heartbeatPrompt } = params;
   if (!transcriptPath || typeof preHeartbeatSize !== "number" || preHeartbeatSize < 0) {
     return;
   }
   try {
     const stat = await fs.stat(transcriptPath);
-    // Only truncate if the file has grown during the heartbeat run
-    if (stat.size > preHeartbeatSize) {
-      await fs.truncate(transcriptPath, preHeartbeatSize);
+    if (stat.size <= preHeartbeatSize) {
+      return;
+    }
+    const appendedBytes = stat.size - preHeartbeatSize;
+    if (appendedBytes > HEARTBEAT_TRANSCRIPT_PRUNE_MAX_APPEND_BYTES) {
+      return;
+    }
+    const appendedLines = await readTranscriptAppendedLines({
+      transcriptPath,
+      offset: preHeartbeatSize,
+      bytesToRead: appendedBytes,
+    });
+    if (!appendedLines || appendedLines.length === 0) {
+      return;
+    }
+    const parsedLines = appendedLines.map(parseTranscriptMessageLine);
+    if (parsedLines.some((line) => !line)) {
+      return;
+    }
+    const heartbeatLines = parsedLines as TranscriptMessageLine[];
+    const firstLine = heartbeatLines[0];
+    if (!firstLine || !isHeartbeatPromptMessage(firstLine, heartbeatPrompt)) {
+      return;
+    }
+
+    // Prune only the leading heartbeat turn (user + assistant pair).
+    // Stop at any non-assistant line to avoid consuming toolResult/system entries.
+    let pruneCount = 1;
+    let sawAssistant = false;
+    for (let i = 1; i < heartbeatLines.length; i += 1) {
+      const line = heartbeatLines[i];
+      if (!line || line.role !== "assistant") {
+        break;
+      }
+      pruneCount = i + 1;
+      sawAssistant = true;
+    }
+    if (!sawAssistant) {
+      return;
+    }
+
+    const retainedLines = appendedLines.slice(pruneCount);
+
+    // Use a single file handle for the size guard and write to close the TOCTOU window.
+    const file = await fs.open(transcriptPath, "r+");
+    try {
+      const latestStat = await file.stat();
+      if (latestStat.size !== stat.size) {
+        return;
+      }
+      if (retainedLines.length === 0) {
+        await file.truncate(preHeartbeatSize);
+        return;
+      }
+      const retainedText = `${retainedLines.join("\n")}\n`;
+      const retainedBuffer = Buffer.from(retainedText, "utf-8");
+      await file.write(retainedBuffer, 0, retainedBuffer.length, preHeartbeatSize);
+      await file.truncate(preHeartbeatSize + retainedBuffer.length);
+    } finally {
+      await file.close();
     }
   } catch {
     // File may not exist or may have been removed - ignore errors
@@ -475,94 +638,6 @@ function normalizeHeartbeatReply(
   return { shouldSkip: false, text: finalText, hasMedia };
 }
 
-type HeartbeatReasonFlags = {
-  isExecEventReason: boolean;
-  isCronEventReason: boolean;
-  isWakeReason: boolean;
-};
-
-type HeartbeatSkipReason = "empty-heartbeat-file" | "no-heartbeat-file";
-
-type HeartbeatPreflight = HeartbeatReasonFlags & {
-  session: ReturnType<typeof resolveHeartbeatSession>;
-  pendingEventEntries: ReturnType<typeof peekSystemEventEntries>;
-  hasTaggedCronEvents: boolean;
-  shouldInspectPendingEvents: boolean;
-  skipReason?: HeartbeatSkipReason;
-};
-
-function resolveHeartbeatReasonFlags(reason?: string): HeartbeatReasonFlags {
-  const reasonKind = resolveHeartbeatReasonKind(reason);
-  return {
-    isExecEventReason: reasonKind === "exec-event",
-    isCronEventReason: reasonKind === "cron",
-    isWakeReason: reasonKind === "wake" || reasonKind === "hook",
-  };
-}
-
-async function resolveHeartbeatPreflight(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  heartbeat?: HeartbeatConfig;
-  forcedSessionKey?: string;
-  reason?: string;
-}): Promise<HeartbeatPreflight> {
-  const reasonFlags = resolveHeartbeatReasonFlags(params.reason);
-  const session = resolveHeartbeatSession(
-    params.cfg,
-    params.agentId,
-    params.heartbeat,
-    params.forcedSessionKey,
-  );
-  const pendingEventEntries = peekSystemEventEntries(session.sessionKey);
-  const hasTaggedCronEvents = pendingEventEntries.some((event) =>
-    event.contextKey?.startsWith("cron:"),
-  );
-  const shouldInspectPendingEvents =
-    reasonFlags.isExecEventReason || reasonFlags.isCronEventReason || hasTaggedCronEvents;
-  const shouldBypassFileGates =
-    reasonFlags.isExecEventReason ||
-    reasonFlags.isCronEventReason ||
-    reasonFlags.isWakeReason ||
-    hasTaggedCronEvents;
-
-  const workspaceDir = resolveAgentWorkspaceDir(params.cfg, params.agentId);
-  const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
-  try {
-    const heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
-    if (isHeartbeatContentEffectivelyEmpty(heartbeatFileContent) && !shouldBypassFileGates) {
-      return {
-        ...reasonFlags,
-        session,
-        pendingEventEntries,
-        hasTaggedCronEvents,
-        shouldInspectPendingEvents,
-        skipReason: "empty-heartbeat-file",
-      };
-    }
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT" && !shouldBypassFileGates) {
-      return {
-        ...reasonFlags,
-        session,
-        pendingEventEntries,
-        hasTaggedCronEvents,
-        shouldInspectPendingEvents,
-        skipReason: "no-heartbeat-file",
-      };
-    }
-    // For other read errors, proceed with heartbeat as before.
-  }
-
-  return {
-    ...reasonFlags,
-    session,
-    pendingEventEntries,
-    hasTaggedCronEvents,
-    shouldInspectPendingEvents,
-  };
-}
-
 export async function runHeartbeatOnce(opts: {
   cfg?: OpenClawConfig;
   agentId?: string;
@@ -594,24 +669,41 @@ export async function runHeartbeatOnce(opts: {
     return { status: "skipped", reason: "requests-in-flight" };
   }
 
-  // Preflight centralizes trigger classification, event inspection, and HEARTBEAT.md gating.
-  const preflight = await resolveHeartbeatPreflight({
+  // Skip heartbeat if HEARTBEAT.md exists but has no actionable content.
+  // This saves API calls/costs when the file is effectively empty (only comments/headers).
+  // EXCEPTION: Don't skip for exec events, cron events, or explicit wake requests -
+  // they have pending system events to process regardless of HEARTBEAT.md content.
+  const isExecEventReason = opts.reason === "exec-event";
+  const isCronEventReason = Boolean(opts.reason?.startsWith("cron:"));
+  const isWakeReason = opts.reason === "wake" || Boolean(opts.reason?.startsWith("hook:"));
+  const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
+  const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
+  try {
+    const heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
+    if (
+      isHeartbeatContentEffectivelyEmpty(heartbeatFileContent) &&
+      !isExecEventReason &&
+      !isCronEventReason &&
+      !isWakeReason
+    ) {
+      emitHeartbeatEvent({
+        status: "skipped",
+        reason: "empty-heartbeat-file",
+        durationMs: Date.now() - startedAt,
+      });
+      return { status: "skipped", reason: "empty-heartbeat-file" };
+    }
+  } catch {
+    // File doesn't exist or can't be read - proceed with heartbeat.
+    // The LLM prompt says "if it exists" so this is expected behavior.
+  }
+
+  const { entry, sessionKey, storePath } = resolveHeartbeatSession(
     cfg,
     agentId,
     heartbeat,
-    forcedSessionKey: opts.sessionKey,
-    reason: opts.reason,
-  });
-  if (preflight.skipReason) {
-    emitHeartbeatEvent({
-      status: "skipped",
-      reason: preflight.skipReason,
-      durationMs: Date.now() - startedAt,
-    });
-    return { status: "skipped", reason: preflight.skipReason };
-  }
-  const { entry, sessionKey, storePath } = preflight.session;
-  const { isCronEventReason, pendingEventEntries } = preflight;
+    opts.sessionKey,
+  );
   const previousUpdatedAt = entry?.updatedAt;
   const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });
   const heartbeatAccountId = heartbeat?.accountId?.trim();
@@ -644,7 +736,12 @@ export async function runHeartbeatOnce(opts: {
   // Check if this is an exec event or cron event with pending system events.
   // If so, use a specialized prompt that instructs the model to relay the result
   // instead of the standard heartbeat prompt with "reply HEARTBEAT_OK".
-  const shouldInspectPendingEvents = preflight.shouldInspectPendingEvents;
+  const isExecEvent = opts.reason === "exec-event";
+  const pendingEventEntries = peekSystemEventEntries(sessionKey);
+  const hasTaggedCronEvents = pendingEventEntries.some((event) =>
+    event.contextKey?.startsWith("cron:"),
+  );
+  const shouldInspectPendingEvents = isExecEvent || isCronEventReason || hasTaggedCronEvents;
   const pendingEvents = shouldInspectPendingEvents
     ? pendingEventEntries.map((event) => event.text)
     : [];
@@ -704,7 +801,6 @@ export async function runHeartbeatOnce(opts: {
       channel: delivery.channel,
       to: delivery.to,
       accountId: delivery.accountId,
-      threadId: delivery.threadId,
       payloads: [{ text: heartbeatOkText }],
       agentId,
       deps: opts.deps,
@@ -742,7 +838,7 @@ export async function runHeartbeatOnce(opts: {
         updatedAt: previousUpdatedAt,
       });
       // Prune the transcript to remove HEARTBEAT_OK turns
-      await pruneHeartbeatTranscript(transcriptState);
+      await pruneHeartbeatTranscript({ ...transcriptState, heartbeatPrompt: ctx.Body });
       const okSent = await maybeSendHeartbeatOk();
       emitHeartbeatEvent({
         status: "ok-empty",
@@ -778,7 +874,7 @@ export async function runHeartbeatOnce(opts: {
         updatedAt: previousUpdatedAt,
       });
       // Prune the transcript to remove HEARTBEAT_OK turns
-      await pruneHeartbeatTranscript(transcriptState);
+      await pruneHeartbeatTranscript({ ...transcriptState, heartbeatPrompt: ctx.Body });
       const okSent = await maybeSendHeartbeatOk();
       emitHeartbeatEvent({
         status: "ok-token",
@@ -816,7 +912,7 @@ export async function runHeartbeatOnce(opts: {
         updatedAt: previousUpdatedAt,
       });
       // Prune the transcript to remove duplicate heartbeat turns
-      await pruneHeartbeatTranscript(transcriptState);
+      await pruneHeartbeatTranscript({ ...transcriptState, heartbeatPrompt: ctx.Body });
       emitHeartbeatEvent({
         status: "skipped",
         reason: "duplicate",
@@ -900,7 +996,6 @@ export async function runHeartbeatOnce(opts: {
       to: delivery.to,
       accountId: deliveryAccountId,
       agentId,
-      threadId: delivery.threadId,
       payloads: [
         ...reasoningPayloads,
         ...(shouldSkipMain
@@ -1091,8 +1186,15 @@ export function startHeartbeatRunner(opts: {
     const now = startedAt;
     let ran = false;
 
-    if (requestedSessionKey || requestedAgentId) {
-      const targetAgentId = requestedAgentId ?? resolveAgentIdFromSessionKey(requestedSessionKey);
+    // Only resolve agent from session key when the key has an explicit agent prefix;
+    // bare keys (e.g. "some-session") would silently resolve to the default agent.
+    const inferredAgentId =
+      requestedAgentId ??
+      (requestedSessionKey && parseAgentSessionKey(requestedSessionKey)
+        ? resolveAgentIdFromSessionKey(requestedSessionKey)
+        : undefined);
+    if (inferredAgentId) {
+      const targetAgentId = inferredAgentId;
       const targetAgent = state.agents.get(targetAgentId);
       if (!targetAgent) {
         scheduleNext();

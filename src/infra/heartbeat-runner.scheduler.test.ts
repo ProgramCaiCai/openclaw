@@ -202,4 +202,36 @@ describe("startHeartbeatRunner", () => {
 
     runner.stop();
   });
+
+  it("skips targeted wake when sessionKey lacks agent prefix (bare key)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+
+    const runSpy = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });
+    const runner = startHeartbeatRunner({
+      cfg: {
+        agents: {
+          defaults: { heartbeat: { every: "30m" } },
+          list: [{ id: "main", heartbeat: { every: "30m" } }],
+        },
+      } as OpenClawConfig,
+      runOnce: runSpy,
+    });
+
+    // A bare session key without "agent:" prefix should NOT silently resolve
+    // to the default agent — it should fall through to the interval loop.
+    requestHeartbeatNow({
+      reason: "wake",
+      sessionKey: "some-bare-key",
+      coalesceMs: 0,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The wake should have run via the interval loop (all agents), not the targeted path
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    // Targeted path would pass sessionKey; interval loop does not
+    expect(runSpy.mock.calls[0]?.[0]).not.toHaveProperty("sessionKey");
+
+    runner.stop();
+  });
 });

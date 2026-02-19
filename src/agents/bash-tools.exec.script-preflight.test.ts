@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createExecTool } from "./bash-tools.exec.js";
 
 const isWin = process.platform === "win32";
 
@@ -26,6 +25,7 @@ describe("exec script preflight", () => {
       "utf-8",
     );
 
+    const { createExecTool } = await import("./bash-tools.exec.js");
     const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
 
     await expect(
@@ -34,6 +34,56 @@ describe("exec script preflight", () => {
         workdir: tmp,
       }),
     ).rejects.toThrow(/exec preflight: detected likely shell variable injection \(\$DM_JSON\)/);
+  });
+
+  it("allows env var tokens inside string literals", async () => {
+    if (isWin) {
+      return;
+    }
+
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-exec-preflight-"));
+    const jsPath = path.join(tmp, "ok.js");
+
+    await fs.writeFile(
+      jsPath,
+      ['console.log("echo $HOME")', "console.log('done')"].join("\n"),
+      "utf-8",
+    );
+
+    const { createExecTool } = await import("./bash-tools.exec.js");
+    const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
+
+    await expect(
+      tool.execute("call1", {
+        command: "node ok.js",
+        workdir: tmp,
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("allows valid Node identifiers that start with $", async () => {
+    if (isWin) {
+      return;
+    }
+
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-exec-preflight-"));
+    const jsPath = path.join(tmp, "ok-ident.js");
+
+    await fs.writeFile(
+      jsPath,
+      ["const $FOO = 1", "console.log($FOO)", "console.log('done')"].join("\n"),
+      "utf-8",
+    );
+
+    const { createExecTool } = await import("./bash-tools.exec.js");
+    const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
+
+    await expect(
+      tool.execute("call1", {
+        command: "node ok-ident.js",
+        workdir: tmp,
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("blocks obvious shell-as-js output before node execution", async () => {
@@ -50,6 +100,7 @@ describe("exec script preflight", () => {
       "utf-8",
     );
 
+    const { createExecTool } = await import("./bash-tools.exec.js");
     const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
 
     await expect(

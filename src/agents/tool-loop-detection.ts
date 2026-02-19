@@ -553,23 +553,42 @@ export function recordToolCallOutcome(
 
   const argsHash = hashToolCall(params.toolName, params.toolParams);
   let matched = false;
-  for (let i = state.toolCallHistory.length - 1; i >= 0; i -= 1) {
-    const call = state.toolCallHistory[i];
-    if (!call) {
-      continue;
+
+  if (params.toolCallId) {
+    // Prefer the same invocation entry even when hook-mutated params changed the args hash.
+    for (let i = state.toolCallHistory.length - 1; i >= 0; i -= 1) {
+      const call = state.toolCallHistory[i];
+      if (!call) {
+        continue;
+      }
+      if (call.toolCallId !== params.toolCallId || call.toolName !== params.toolName) {
+        continue;
+      }
+      if (call.resultHash !== undefined) {
+        continue;
+      }
+      call.resultHash = resultHash;
+      matched = true;
+      break;
     }
-    if (params.toolCallId && call.toolCallId !== params.toolCallId) {
-      continue;
+  }
+
+  if (!matched) {
+    for (let i = state.toolCallHistory.length - 1; i >= 0; i -= 1) {
+      const call = state.toolCallHistory[i];
+      if (!call) {
+        continue;
+      }
+      if (call.toolName !== params.toolName || call.argsHash !== argsHash) {
+        continue;
+      }
+      if (call.resultHash !== undefined) {
+        continue;
+      }
+      call.resultHash = resultHash;
+      matched = true;
+      break;
     }
-    if (call.toolName !== params.toolName || call.argsHash !== argsHash) {
-      continue;
-    }
-    if (call.resultHash !== undefined) {
-      continue;
-    }
-    call.resultHash = resultHash;
-    matched = true;
-    break;
   }
 
   if (!matched) {

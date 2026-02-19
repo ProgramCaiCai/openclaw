@@ -5,7 +5,6 @@ import {
   isNumericTelegramUserId,
   normalizeTelegramAllowFromEntry,
 } from "../channels/telegram/allow-from.js";
-import { fetchTelegramChatId } from "../channels/telegram/api.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/config.js";
 import {
@@ -330,13 +329,18 @@ async function maybeRepairTelegramAllowFromUsernames(cfg: OpenClawConfig): Promi
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 4000);
       try {
-        const id = await fetchTelegramChatId({
-          token,
-          chatId: username,
-          signal: controller.signal,
-        });
-        if (id) {
-          return id;
+        const url = `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(username)}`;
+        const res = await fetch(url, { signal: controller.signal }).catch(() => null);
+        if (!res || !res.ok) {
+          continue;
+        }
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          result?: { id?: number | string };
+        } | null;
+        const id = data?.ok ? data?.result?.id : undefined;
+        if (typeof id === "number" || typeof id === "string") {
+          return String(id);
         }
       } catch {
         // ignore and try next token
@@ -545,20 +549,29 @@ function maybeRepairDiscordNumericIds(cfg: OpenClawConfig): {
       return;
     }
     let converted = 0;
+    let skippedUnsafe = 0;
     const updated = raw.map((entry) => {
-      if (typeof entry === "number") {
-        converted += 1;
-        return String(entry);
+      if (typeof entry !== "number") {
+        return entry;
       }
-      return entry;
+      if (!Number.isSafeInteger(entry)) {
+        skippedUnsafe += 1;
+        return entry;
+      }
+      converted += 1;
+      return String(entry);
     });
-    if (converted === 0) {
-      return;
+    if (converted > 0) {
+      holder[key] = updated;
+      changes.push(
+        `- ${pathLabel}: converted ${converted} numeric ${converted === 1 ? "entry" : "entries"} to strings`,
+      );
     }
-    holder[key] = updated;
-    changes.push(
-      `- ${pathLabel}: converted ${converted} numeric ${converted === 1 ? "entry" : "entries"} to strings`,
-    );
+    if (skippedUnsafe > 0) {
+      changes.push(
+        `- ${pathLabel}: skipped ${skippedUnsafe} unsafe numeric ${skippedUnsafe === 1 ? "entry" : "entries"} (manual fix required)`,
+      );
+    }
   };
 
   for (const scope of collectDiscordAccountScopes(next)) {
@@ -923,10 +936,5 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
 
   noteOpencodeProviderOverrides(cfg);
 
-  return {
-    cfg,
-    path: snapshot.path ?? CONFIG_PATH,
-    shouldWriteConfig,
-    sourceConfigValid: snapshot.valid,
-  };
+  return { cfg, path: snapshot.path ?? CONFIG_PATH, shouldWriteConfig };
 }

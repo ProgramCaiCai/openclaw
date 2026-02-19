@@ -44,6 +44,9 @@ export type ExecToolDetails =
       durationMs: number;
       aggregated: string;
       cwd?: string;
+      /** When present, full output was saved outside the toolResult content/details. */
+      outputFile?: string;
+      excludedFromContext?: boolean;
     }
   | {
       status: "approval-pending";
