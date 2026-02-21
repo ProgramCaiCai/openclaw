@@ -43,6 +43,12 @@ import {
   truncateMiddle,
 } from "./bash-tools.shared.js";
 import { assertSandboxPath } from "./sandbox-paths.js";
+import {
+  EXCLUDED_CONTEXT_PREVIEW_CHARS,
+  formatExcludedFromContextHeader,
+  tailText,
+  writeToolOutputArtifact,
+} from "./tool-output-artifacts.js";
 
 export type { BashSandboxConfig } from "./bash-tools.shared.js";
 export type {
@@ -190,6 +196,7 @@ export function createExecTool(
         background?: boolean;
         timeout?: number;
         pty?: boolean;
+        excludeFromContext?: boolean;
         elevated?: boolean;
         host?: string;
         security?: string;
@@ -501,7 +508,7 @@ export function createExecTool(
         }
 
         run.promise
-          .then((outcome) => {
+          .then(async (outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
             }
@@ -512,11 +519,48 @@ export function createExecTool(
               reject(new Error(outcome.reason ?? "Command failed."));
               return;
             }
+            const warningText = getWarningText();
+
+            if (
+              params.excludeFromContext &&
+              (outcome.aggregated || "").length > EXCLUDED_CONTEXT_PREVIEW_CHARS
+            ) {
+              const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
+              const outputFile = await writeToolOutputArtifact({
+                preferredCwd: defaults?.cwd ?? run.session.cwd,
+                toolName: "exec",
+                toolCallId: artifactId,
+                output: outcome.aggregated ?? "",
+                extension: "log",
+              });
+              const preview = tailText(outcome.aggregated || "", EXCLUDED_CONTEXT_PREVIEW_CHARS);
+              const header = formatExcludedFromContextHeader({ toolName: "exec", outputFile });
+              const body = preview || "(no output)";
+
+              resolve({
+                content: [
+                  {
+                    type: "text",
+                    text: `${warningText}${header}\n\n${body}`,
+                  },
+                ],
+                details: {
+                  status: "completed",
+                  exitCode: outcome.exitCode ?? 0,
+                  durationMs: outcome.durationMs,
+                  aggregated: body,
+                  cwd: run.session.cwd,
+                  outputFile: outputFile ?? undefined,
+                  excludedFromContext: true,
+                },
+              });
+              return;
+            }
             resolve({
               content: [
                 {
                   type: "text",
-                  text: `${getWarningText()}${outcome.aggregated || "(no output)"}`,
+                  text: `${warningText}${outcome.aggregated || "(no output)"}`,
                 },
               ],
               details: {
