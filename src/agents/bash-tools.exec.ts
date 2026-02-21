@@ -552,7 +552,10 @@ export function createExecTool(
             }
             const warningText = getWarningText();
 
-            if (params.excludeFromContext) {
+            if (
+              params.excludeFromContext &&
+              (outcome.aggregated || "").length > EXCLUDED_CONTEXT_PREVIEW_CHARS
+            ) {
               const artifactId = typeof toolCallId === "string" && toolCallId ? toolCallId : "exec";
               const outputFile = await writeToolOutputArtifact({
                 preferredCwd: defaults?.cwd ?? run.session.cwd,
