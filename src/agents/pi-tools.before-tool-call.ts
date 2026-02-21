@@ -14,7 +14,9 @@ export type HookContext = {
   loopDetection?: ToolLoopDetectionConfig;
 };
 
-type HookOutcome = { blocked: true; reason: string } | { blocked: false; params: unknown };
+type HookOutcome =
+  | { blocked: true; reason: string }
+  | { blocked: false; params: unknown; loopParams: unknown };
 
 const log = createSubsystemLogger("agents/tools");
 const BEFORE_TOOL_CALL_WRAPPED = Symbol("beforeToolCallWrapped");
@@ -218,7 +220,7 @@ export async function runBeforeToolCallHook(args: {
 
   const hookRunner = getGlobalHookRunner();
   if (!hookRunner?.hasHooks("before_tool_call")) {
-    return { blocked: false, params: guardedParams };
+    return { blocked: false, params: guardedParams, loopParams: guardedParams };
   }
 
   try {
@@ -253,6 +255,7 @@ export async function runBeforeToolCallHook(args: {
           params: mergedParams,
           sessionKey: args.ctx?.sessionKey,
         }),
+        loopParams: guardedParams,
       };
     }
   } catch (err) {
@@ -260,7 +263,7 @@ export async function runBeforeToolCallHook(args: {
     log.warn(`before_tool_call hook failed: tool=${toolName}${toolCallId} error=${String(err)}`);
   }
 
-  return { blocked: false, params: guardedParams };
+  return { blocked: false, params: guardedParams, loopParams: guardedParams };
 }
 
 export function wrapToolWithBeforeToolCallHook(
@@ -299,7 +302,7 @@ export function wrapToolWithBeforeToolCallHook(
         await recordLoopOutcome({
           ctx,
           toolName: normalizedToolName,
-          toolParams: outcome.params,
+          toolParams: outcome.loopParams,
           toolCallId,
           result,
         });
@@ -308,7 +311,7 @@ export function wrapToolWithBeforeToolCallHook(
         await recordLoopOutcome({
           ctx,
           toolName: normalizedToolName,
-          toolParams: outcome.params,
+          toolParams: outcome.loopParams,
           toolCallId,
           error: err,
         });
