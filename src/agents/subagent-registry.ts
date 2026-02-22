@@ -22,6 +22,7 @@ export type SubagentRunRecord = {
   label?: string;
   model?: string;
   runTimeoutSeconds?: number;
+  spawnMode?: "run" | "session";
   createdAt: number;
   startedAt?: number;
   endedAt?: number;
@@ -536,6 +537,7 @@ export function registerSubagentRun(params: {
   model?: string;
   runTimeoutSeconds?: number;
   expectsCompletionMessage?: boolean;
+  spawnMode?: "run" | "session";
 }) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -554,6 +556,7 @@ export function registerSubagentRun(params: {
     label: params.label,
     model: params.model,
     runTimeoutSeconds,
+    spawnMode: params.spawnMode,
     createdAt: now,
     startedAt: now,
     cleanupHandled: false,
