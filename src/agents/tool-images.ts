@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -26,6 +27,55 @@ type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
 const MAX_IMAGE_DIMENSION_PX = DEFAULT_IMAGE_MAX_DIMENSION_PX;
 const MAX_IMAGE_BYTES = DEFAULT_IMAGE_MAX_BYTES;
 const log = createSubsystemLogger("agents/tool-images");
+
+const IMAGE_RESIZE_CACHE_MAX_ENTRIES = 128;
+
+type ImageResizeCacheEntry = {
+  base64: string;
+  mimeType: string;
+  resized: boolean;
+  width?: number;
+  height?: number;
+};
+
+const imageResizeCache = new Map<string, ImageResizeCacheEntry>();
+
+function buildImageResizeCacheKey(params: {
+  buffer: Buffer;
+  mimeType: string;
+  maxDimensionPx: number;
+  maxBytes: number;
+}): string {
+  const digest = crypto.createHash("sha1").update(params.buffer).digest("base64url");
+  return `${params.mimeType}|${params.maxDimensionPx}|${params.maxBytes}|${digest}`;
+}
+
+function readImageResizeCache(key: string): ImageResizeCacheEntry | undefined {
+  const cached = imageResizeCache.get(key);
+  if (!cached) {
+    return undefined;
+  }
+  // LRU bump.
+  imageResizeCache.delete(key);
+  imageResizeCache.set(key, cached);
+  return cached;
+}
+
+function writeImageResizeCache(key: string, entry: ImageResizeCacheEntry): void {
+  imageResizeCache.delete(key);
+  imageResizeCache.set(key, entry);
+  while (imageResizeCache.size > IMAGE_RESIZE_CACHE_MAX_ENTRIES) {
+    const oldest = imageResizeCache.keys().next().value;
+    if (!oldest) {
+      break;
+    }
+    imageResizeCache.delete(oldest);
+  }
+}
+
+export function __clearImageResizeCacheForTests(): void {
+  imageResizeCache.clear();
+}
 
 function isImageBlock(block: unknown): block is ImageContentBlock {
   if (!block || typeof block !== "object") {
@@ -159,6 +209,17 @@ async function resizeImageBase64IfNeeded(params: {
   height?: number;
 }> {
   const buf = Buffer.from(params.base64, "base64");
+  const cacheKey = buildImageResizeCacheKey({
+    buffer: buf,
+    mimeType: params.mimeType,
+    maxDimensionPx: params.maxDimensionPx,
+    maxBytes: params.maxBytes,
+  });
+  const cached = readImageResizeCache(cacheKey);
+  if (cached) {
+    return { ...cached };
+  }
+
   const meta = await getImageMetadata(buf);
   const width = meta?.width;
   const height = meta?.height;
@@ -172,13 +233,15 @@ async function resizeImageBase64IfNeeded(params: {
     width <= params.maxDimensionPx &&
     height <= params.maxDimensionPx
   ) {
-    return {
+    const passthrough = {
       base64: params.base64,
       mimeType: params.mimeType,
       resized: false,
       width,
       height,
     };
+    writeImageResizeCache(cacheKey, passthrough);
+    return passthrough;
   }
 
   const maxDim = hasDimensions ? Math.max(width ?? 0, height ?? 0) : params.maxDimensionPx;
@@ -229,13 +292,15 @@ async function resizeImageBase64IfNeeded(params: {
             byteReductionPct,
           },
         );
-        return {
+        const resized = {
           base64: out.toString("base64"),
           mimeType: "image/jpeg",
           resized: true,
           width,
           height,
         };
+        writeImageResizeCache(cacheKey, resized);
+        return resized;
       }
     }
   }
