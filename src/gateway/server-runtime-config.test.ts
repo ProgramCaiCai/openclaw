@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 
 describe("resolveGatewayRuntimeConfig", () => {
@@ -156,12 +156,18 @@ describe("resolveGatewayRuntimeConfig", () => {
         },
       };
 
-      await expect(
-        resolveGatewayRuntimeConfig({
-          cfg,
-          port: 18789,
-        }),
-      ).rejects.toThrow("gateway auth mode is token, but no token was configured");
+      // Ensure this test validates missing-token behavior without env fallback.
+      vi.stubEnv("OPENCLAW_GATEWAY_TOKEN", "");
+      try {
+        await expect(
+          resolveGatewayRuntimeConfig({
+            cfg,
+            port: 18789,
+          }),
+        ).rejects.toThrow("gateway auth mode is token, but no token was configured");
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it("should allow lan binding with token", async () => {
