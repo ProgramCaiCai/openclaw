@@ -184,4 +184,41 @@ describe("openai-responses reasoning replay", () => {
     expect(types).toContain("reasoning");
     expect(types).toContain("message");
   });
+
+  it("skips orphaned tool results that have no matching function call", async () => {
+    const orphanToolResult: ToolResultMessage = {
+      role: "toolResult",
+      toolCallId: "call_orphan|fc_orphan",
+      toolName: "noop",
+      content: [{ type: "text", text: "orphan" }],
+      isError: false,
+      timestamp: Date.now(),
+    };
+
+    const { input, types } = await runAbortedOpenAIResponsesStream({
+      messages: [
+        {
+          role: "user",
+          content: "hello",
+          timestamp: Date.now(),
+        },
+        orphanToolResult,
+        {
+          role: "user",
+          content: "next",
+          timestamp: Date.now(),
+        },
+      ],
+    });
+
+    expect(types).not.toContain("function_call_output");
+    expect(
+      input.some(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          (item as Record<string, unknown>).type === "function_call_output",
+      ),
+    ).toBe(false);
+  });
 });

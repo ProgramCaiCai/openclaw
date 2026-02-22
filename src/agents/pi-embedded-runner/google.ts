@@ -22,6 +22,7 @@ import {
   stripToolResultDetails,
   sanitizeToolUseResultPairing,
 } from "../session-transcript-repair.js";
+import { extractToolCallsFromAssistant, extractToolResultId } from "../tool-call-id.js";
 import type { TranscriptPolicy } from "../transcript-policy.js";
 import { resolveTranscriptPolicy } from "../transcript-policy.js";
 import { log } from "./logger.js";
@@ -421,6 +422,53 @@ export function applyGoogleTurnOrderingFix(params: {
   return { messages: sanitized, didPrepend };
 }
 
+function toOpenAICallId(id: string): string {
+  const [callId] = id.split("|");
+  return callId ?? "";
+}
+
+function dropOpenAIOrphanToolResults(messages: AgentMessage[]): AgentMessage[] {
+  let changed = false;
+  const seenCallIds = new Set<string>();
+  const out: AgentMessage[] = [];
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") {
+      out.push(msg);
+      continue;
+    }
+
+    if (msg.role === "assistant") {
+      const assistant = msg;
+      for (const toolCall of extractToolCallsFromAssistant(assistant)) {
+        const callId = toOpenAICallId(toolCall.id);
+        if (callId) {
+          seenCallIds.add(callId);
+        }
+      }
+      out.push(msg);
+      continue;
+    }
+
+    if (msg.role !== "toolResult") {
+      out.push(msg);
+      continue;
+    }
+
+    const toolResult = msg;
+    const rawToolResultId = extractToolResultId(toolResult);
+    const callId = rawToolResultId ? toOpenAICallId(rawToolResultId) : "";
+    if (!callId || !seenCallIds.has(callId)) {
+      changed = true;
+      continue;
+    }
+
+    out.push(msg);
+  }
+
+  return changed ? out : messages;
+}
+
 export async function sanitizeSessionHistory(params: {
   messages: AgentMessage[];
   modelApi?: string | null;
@@ -476,9 +524,12 @@ export async function sanitizeSessionHistory(params: {
         modelId: params.modelId,
       })
     : false;
-  const sanitizedOpenAI = isOpenAIResponsesApi
-    ? downgradeOpenAIReasoningBlocks(sanitizedToolResults)
+  const openAiOrphanFiltered = isOpenAIResponsesApi
+    ? dropOpenAIOrphanToolResults(sanitizedToolResults)
     : sanitizedToolResults;
+  const sanitizedOpenAI = isOpenAIResponsesApi
+    ? downgradeOpenAIReasoningBlocks(openAiOrphanFiltered)
+    : openAiOrphanFiltered;
 
   if (hasSnapshot && (!priorSnapshot || modelChanged)) {
     appendModelSnapshot(params.sessionManager, {

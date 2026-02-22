@@ -1,0 +1,32 @@
+diff --git a/dist/providers/openai-responses-shared.js b/dist/providers/openai-responses-shared.js
+index 00c580181f377cb81a3324573950e3ffa1d77751..c66dee3f9e262a73d093ccd8d8e1ff843613d0b8 100644
+--- a/dist/providers/openai-responses-shared.js
++++ b/dist/providers/openai-responses-shared.js
+@@ -52,6 +52,7 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+         });
+     }
+     let msgIndex = 0;
++    const emittedFunctionCallIds = new Set();
+     for (const msg of transformedMessages) {
+         if (msg.role === "user") {
+             if (typeof msg.content === "string") {
+@@ -133,6 +134,9 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+                         name: toolCall.name,
+                         arguments: JSON.stringify(toolCall.arguments),
+                     });
++                    if (callId) {
++                        emittedFunctionCallIds.add(callId);
++                    }
+                 }
+             }
+             if (output.length === 0)
+@@ -149,6 +153,9 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+             // Always send function_call_output with text (or placeholder if only images)
+             const hasText = textResult.length > 0;
+             const [callId] = msg.toolCallId.split("|");
++            if (!callId || !emittedFunctionCallIds.has(callId)) {
++                continue;
++            }
+             messages.push({
+                 type: "function_call_output",
+                 call_id: callId,

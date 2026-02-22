@@ -285,6 +285,54 @@ describe("sanitizeSessionHistory", () => {
     ).toBe(false);
   });
 
+  it("drops orphaned toolResult entries when switching from claude history to openai responses", async () => {
+    const sessionEntries = [
+      makeModelSnapshotEntry({
+        provider: "anthropic",
+        modelApi: "anthropic-messages",
+        modelId: "claude-opus-4-6",
+      }),
+    ];
+    const sessionManager = makeInMemorySessionManager(sessionEntries);
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "toolUse", id: "toolu_01live", name: "read", input: { path: "foo" } }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "toolu_01live",
+        toolName: "read",
+        content: [{ type: "text", text: "ok" }],
+      } as unknown as AgentMessage,
+      { role: "user", content: "continue" },
+      {
+        role: "toolResult",
+        toolCallId: "toolu_01orphan",
+        toolName: "read",
+        content: [{ type: "text", text: "stale result" }],
+      } as unknown as AgentMessage,
+    ] as unknown as AgentMessage[];
+
+    const result = await sanitizeSessionHistory({
+      messages,
+      modelApi: "openai-responses",
+      provider: "custom_openai",
+      modelId: "gpt-5.3-codex",
+      sessionManager,
+      sessionId: TEST_SESSION_ID,
+    });
+
+    expect(result.map((msg) => msg.role)).toEqual(["assistant", "toolResult", "user"]);
+    expect(
+      result.some(
+        (msg) =>
+          msg.role === "toolResult" &&
+          (msg as { toolCallId?: string }).toolCallId === "toolu_01orphan",
+      ),
+    ).toBe(false);
+  });
+
   it("drops assistant thinking blocks for github-copilot models", async () => {
     vi.mocked(helpers.isGoogleModelApi).mockReturnValue(false);
 
