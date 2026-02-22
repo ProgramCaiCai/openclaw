@@ -98,6 +98,20 @@ function createBoundedJsonResult(payload: unknown): AgentToolResult<unknown> {
   };
 }
 
+function isPairingRequiredMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("pairing required") || lower.includes("not_paired");
+}
+
+function extractPairingRequestId(message: string): string | null {
+  const match = message.match(/\(requestId:\s*([^)]+)\)/i);
+  if (!match) {
+    return null;
+  }
+  const value = (match[1] ?? "").trim();
+  return value.length > 0 ? value : null;
+}
+
 // Flattened schema: runtime validates per-action requirements.
 const NodesToolSchema = Type.Object({
   action: stringEnum(NODES_TOOL_ACTIONS),
@@ -600,7 +614,14 @@ export function createNodesTool(options?: {
             ? gatewayOpts.gatewayUrl.trim()
             : "default";
         const agentLabel = agentId ?? "unknown";
-        const message = err instanceof Error ? err.message : String(err);
+        let message = err instanceof Error ? err.message : String(err);
+        if (action === "invoke" && isPairingRequiredMessage(message)) {
+          const requestId = extractPairingRequestId(message);
+          const approveHint = requestId
+            ? `Approve pairing request ${requestId} and retry.`
+            : "Approve the pending pairing request and retry.";
+          message = `pairing required before node invoke. ${approveHint}`;
+        }
         throw new Error(
           `agent=${agentLabel} node=${nodeLabel} gateway=${gatewayLabel} action=${action}: ${message}`,
           { cause: err },

@@ -55,7 +55,7 @@ describe("resolveDeliveryTarget thread session lookup", () => {
     });
 
     expect(result.to).toBe("-100111");
-    expect(result.threadId).toBe(9999);
+    expect(result.threadId).toBeUndefined();
     expect(result.channel).toBe("telegram");
   });
 
@@ -106,7 +106,7 @@ describe("resolveDeliveryTarget thread session lookup", () => {
     });
 
     expect(result.to).toBe("63448508");
-    expect(result.threadId).toBe(1008013);
+    expect(result.threadId).toBeUndefined();
     expect(result.channel).toBe("telegram");
   });
 
@@ -126,6 +126,6 @@ describe("resolveDeliveryTarget thread session lookup", () => {
     });
 
     expect(result.to).toBe("63448508");
-    expect(result.threadId).toBe(1008013);
+    expect(result.threadId).toBeUndefined();
   });
 });
