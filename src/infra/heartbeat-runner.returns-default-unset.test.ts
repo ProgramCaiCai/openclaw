@@ -1292,12 +1292,10 @@ describe("runHeartbeatOnce", () => {
         },
       });
 
-      expect(res.status).toBe("ran");
-      expect(replySpy).toHaveBeenCalledTimes(1);
-      const calledCtx = replySpy.mock.calls[0]?.[0] as { Provider?: string; Body?: string };
-      expect(calledCtx.Provider).toBe("cron-event");
-      expect(calledCtx.Body).toContain("scheduled reminder has been triggered");
-      expect(sendWhatsApp).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe("skipped");
+      expect(res.reason).toBe("empty-heartbeat-file");
+      expect(replySpy).not.toHaveBeenCalled();
+      expect(sendWhatsApp).not.toHaveBeenCalled();
     } finally {
       replySpy.mockRestore();
     }

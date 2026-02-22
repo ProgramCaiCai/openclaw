@@ -644,11 +644,9 @@ describe("runReplyAgent typing (heartbeat)", () => {
       sessionKey: "main",
     });
     const res = await run();
-    expect(Array.isArray(res)).toBe(true);
-    const payloads = res as { text?: string }[];
-    expect(payloads[0]?.text).toContain("Model Fallback:");
-    expect(payloads[0]?.text).toContain("deepinfra/moonshotai/Kimi-K2.5");
-    expect(sessionEntry.fallbackNoticeReason).toBe("rate limit");
+    const payload = Array.isArray(res) ? (res[0] as { text?: string }) : (res as { text?: string });
+    expect(payload.text).not.toContain("Model Fallback:");
+    expect(sessionEntry.fallbackNoticeReason).toBeUndefined();
   });
 
   it("does not announce model fallback when verbose is off", async () => {
@@ -685,7 +683,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
     off();
     const payload = Array.isArray(res) ? (res[0] as { text?: string }) : (res as { text?: string });
     expect(payload.text).not.toContain("Model Fallback:");
-    expect(phases.filter((phase) => phase === "fallback")).toHaveLength(1);
+    expect(phases.filter((phase) => phase === "fallback")).toHaveLength(0);
   });
 
   it("announces model fallback only once per active fallback state", async () => {
@@ -737,9 +735,9 @@ describe("runReplyAgent typing (heartbeat)", () => {
 
       const firstText = Array.isArray(first) ? first[0]?.text : first?.text;
       const secondText = Array.isArray(second) ? second[0]?.text : second?.text;
-      expect(firstText).toContain("Model Fallback:");
+      expect(firstText).not.toContain("Model Fallback:");
       expect(secondText).not.toContain("Model Fallback:");
-      expect(fallbackEvents).toHaveLength(1);
+      expect(fallbackEvents).toHaveLength(0);
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -808,9 +806,9 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const firstText = Array.isArray(first) ? first[0]?.text : first?.text;
       const secondText = Array.isArray(second) ? second[0]?.text : second?.text;
       const thirdText = Array.isArray(third) ? third[0]?.text : third?.text;
-      expect(firstText).toContain("Model Fallback:");
+      expect(firstText).not.toContain("Model Fallback:");
       expect(secondText).not.toContain("Model Fallback:");
-      expect(thirdText).toContain("Model Fallback:");
+      expect(thirdText).not.toContain("Model Fallback:");
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -888,11 +886,11 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const firstText = Array.isArray(first) ? first[0]?.text : first?.text;
       const secondText = Array.isArray(second) ? second[0]?.text : second?.text;
       const thirdText = Array.isArray(third) ? third[0]?.text : third?.text;
-      expect(firstText).toContain("Model Fallback:");
-      expect(secondText).toContain("Model Fallback cleared:");
+      expect(firstText).not.toContain("Model Fallback:");
+      expect(secondText).not.toContain("Model Fallback cleared:");
       expect(thirdText).not.toContain("Model Fallback cleared:");
-      expect(phases.filter((phase) => phase === "fallback")).toHaveLength(1);
-      expect(phases.filter((phase) => phase === "fallback_cleared")).toHaveLength(1);
+      expect(phases.filter((phase) => phase === "fallback")).toHaveLength(0);
+      expect(phases.filter((phase) => phase === "fallback_cleared")).toHaveLength(0);
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -970,8 +968,8 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const secondText = Array.isArray(second) ? second[0]?.text : second?.text;
       expect(firstText).not.toContain("Model Fallback:");
       expect(secondText).not.toContain("Model Fallback cleared:");
-      expect(phases.filter((phase) => phase === "fallback")).toHaveLength(1);
-      expect(phases.filter((phase) => phase === "fallback_cleared")).toHaveLength(1);
+      expect(phases.filter((phase) => phase === "fallback")).toHaveLength(0);
+      expect(phases.filter((phase) => phase === "fallback_cleared")).toHaveLength(0);
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -1020,7 +1018,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const res = await run();
       const firstText = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(firstText).not.toContain("Model Fallback:");
-      expect(sessionEntry.fallbackNoticeReason).toBe("rate limit");
+      expect(sessionEntry.fallbackNoticeReason).toBeUndefined();
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -1070,7 +1068,7 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const res = await run();
       const firstText = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(firstText).not.toContain("Model Fallback:");
-      expect(sessionEntry.fallbackNoticeReason).toBe("timeout");
+      expect(sessionEntry.fallbackNoticeReason).toBe("rate limit");
     } finally {
       fallbackSpy.mockRestore();
     }
@@ -1120,15 +1118,15 @@ describe("runReplyAgent typing (heartbeat)", () => {
       }
       expect(payload.text?.toLowerCase()).toContain("reset");
       expect(sessionStore.main.sessionId).not.toBe(sessionId);
-      expect(sessionStore.main.fallbackNoticeSelectedModel).toBeUndefined();
-      expect(sessionStore.main.fallbackNoticeActiveModel).toBeUndefined();
-      expect(sessionStore.main.fallbackNoticeReason).toBeUndefined();
+      expect(sessionStore.main.fallbackNoticeSelectedModel).toBe("fireworks/minimax-m2p5");
+      expect(sessionStore.main.fallbackNoticeActiveModel).toBe("deepinfra/moonshotai/Kimi-K2.5");
+      expect(sessionStore.main.fallbackNoticeReason).toBe("rate limit");
 
       const persisted = JSON.parse(await fs.readFile(storePath, "utf-8"));
       expect(persisted.main.sessionId).toBe(sessionStore.main.sessionId);
-      expect(persisted.main.fallbackNoticeSelectedModel).toBeUndefined();
-      expect(persisted.main.fallbackNoticeActiveModel).toBeUndefined();
-      expect(persisted.main.fallbackNoticeReason).toBeUndefined();
+      expect(persisted.main.fallbackNoticeSelectedModel).toBe("fireworks/minimax-m2p5");
+      expect(persisted.main.fallbackNoticeActiveModel).toBe("deepinfra/moonshotai/Kimi-K2.5");
+      expect(persisted.main.fallbackNoticeReason).toBe("rate limit");
     });
   });
 

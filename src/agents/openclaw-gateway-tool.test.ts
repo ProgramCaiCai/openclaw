@@ -12,6 +12,7 @@ vi.mock("./tools/gateway.js", () => ({
     }
     return { ok: true };
   }),
+  readGatewayCallOptions: vi.fn(() => ({})),
 }));
 
 describe("gateway tool", () => {

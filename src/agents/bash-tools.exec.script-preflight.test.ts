@@ -124,6 +124,7 @@ describe("exec script preflight", () => {
     await fs.mkdir(workdir, { recursive: true });
     await fs.writeFile(outsidePath, "const value = $DM_JSON;", "utf-8");
 
+    const { createExecTool } = await import("./bash-tools.exec.js");
     const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
 
     const result = await tool.execute("call-outside", {
