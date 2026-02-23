@@ -1,11 +1,11 @@
 {
   "schemaVersion": 2,
   "scopeSlug": "evo11-official-bugs",
-  "status": "running",
-  "currentRound": 2,
-  "currentPhase": "round-2.done",
-  "eventSeq": 5,
-  "updatedAt": "2026-02-23T01:26:55Z",
+  "status": "done",
+  "currentRound": 3,
+  "currentPhase": "round-3.early-termination.done",
+  "eventSeq": 6,
+  "updatedAt": "2026-02-23T01:28:43Z",
   "runId": "134524fe-8019-42d0-88b1-ad544b8f571d",
   "lockOwner": {
     "pid": 83955,
@@ -60,6 +60,10 @@
     {
       "kind": "verification-fallback",
       "reason": "node_modules-missing-round2"
+    },
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing-round3"
     }
   ]
 }

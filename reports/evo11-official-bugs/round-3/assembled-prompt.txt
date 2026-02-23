@@ -1,0 +1,6 @@
+Round 3 closure review for evo11-official-bugs.
+
+Goal:
+- confirm no new fixable findings after two verification passes.
+- ensure residual remains none.
+- if criteria met for early termination (2 consecutive rounds, fixable=0, residual=none), emit closure artifact.

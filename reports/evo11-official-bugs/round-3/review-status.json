@@ -1,0 +1,7 @@
+{
+  "architecture": {"executor":"claude-cli","exitCode":0,"artifactSha256":"f6d7814b31c847cfde73d1adb3843f2f17ac9aa4d37e0b2023a8173d7ee0fb19","status":"ok","findingCount":0,"fixableFindingCount":0},
+  "codeQuality": {"executor":"codex-cli","exitCode":0,"artifactSha256":"a129ee34bb3da7b489254b18273707df6d2830288d7a30ac101da42a8ab23f51","status":"ok","findingCount":0,"fixableFindingCount":0},
+  "redteam": {"executor":"sessions_spawn","sessionId":"sess-r3-redteam","artifactSha256":"d5f336120a0312357c196256383534e6f958a6b1d1f292d9c3dcf7e42f5d1366","status":"ok","findingCount":0,"fixableFindingCount":0},
+  "tester": {"executor":"sessions_spawn","sessionId":"sess-r3-tester","artifactSha256":"8e77b323bb1015f640139000e15c6664de1fb712dea0dbfc965dde2294119fb6","testMatrixSha256":"ab46f33c25f39a68725721ce6e08eb7e207f638d268ba799046f5cf3e7f699f0","status":"ok","findingCount":0,"fixableFindingCount":0},
+  "reviewBaseCommit": "c359a26b49f52c8bee3ceed3f4e6cb3830f9df3f"
+}
