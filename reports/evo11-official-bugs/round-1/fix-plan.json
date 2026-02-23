@@ -1,0 +1,48 @@
+{
+  "round": 1,
+  "fixReadiness": "ready",
+  "groups": [
+    {
+      "id": "A",
+      "label": "exec-approvals-node-set-hardening",
+      "type": "code-fix",
+      "findingIds": ["R1-01"],
+      "files": ["src/gateway/server-methods/exec-approvals.ts"],
+      "verify": ["gateway route error path check"],
+      "dependsOn": []
+    },
+    {
+      "id": "B",
+      "label": "browser-status-actionability-probe",
+      "type": "code-fix",
+      "findingIds": ["R1-02"],
+      "files": [
+        "src/browser/routes/basic.ts",
+        "src/browser/server.post-tabs-open-profile-unknown-returns-404.test.ts"
+      ],
+      "verify": ["browser status stale probe test"],
+      "dependsOn": []
+    },
+    {
+      "id": "C",
+      "label": "feishu-duplicate-fallback-guard",
+      "type": "code-fix",
+      "findingIds": ["R1-03"],
+      "files": [
+        "extensions/feishu/src/reply-dispatcher.ts",
+        "extensions/feishu/src/reply-dispatcher.test.ts"
+      ],
+      "verify": ["reply-dispatcher duplicate tests"],
+      "dependsOn": []
+    },
+    {
+      "id": "D",
+      "label": "config-migration-localization-gap",
+      "type": "blocked",
+      "findingIds": ["R1-04"],
+      "files": ["src/config/**"],
+      "verify": [],
+      "dependsOn": []
+    }
+  ]
+}
