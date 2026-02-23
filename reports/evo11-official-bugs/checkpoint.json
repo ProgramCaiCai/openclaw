@@ -2,10 +2,10 @@
   "schemaVersion": 2,
   "scopeSlug": "evo11-official-bugs",
   "status": "running",
-  "currentRound": 1,
-  "currentPhase": "round-1.done",
-  "eventSeq": 4,
-  "updatedAt": "2026-02-23T01:24:25Z",
+  "currentRound": 2,
+  "currentPhase": "round-2.done",
+  "eventSeq": 5,
+  "updatedAt": "2026-02-23T01:26:55Z",
   "runId": "134524fe-8019-42d0-88b1-ad544b8f571d",
   "lockOwner": {
     "pid": 83955,
@@ -16,19 +16,50 @@
     "subtaskCount": 3
   },
   "reviewers": {
-    "architecture": { "executor": "claude-cli", "status": "ok" },
-    "codeQuality": { "executor": "codex-cli", "status": "ok" },
-    "redteam": { "executor": "sessions_spawn", "status": "ok" },
-    "tester": { "executor": "sessions_spawn", "status": "ok" }
+    "architecture": {
+      "executor": "claude-cli",
+      "status": "ok"
+    },
+    "codeQuality": {
+      "executor": "codex-cli",
+      "status": "ok"
+    },
+    "redteam": {
+      "executor": "sessions_spawn",
+      "status": "ok"
+    },
+    "tester": {
+      "executor": "sessions_spawn",
+      "status": "ok"
+    }
   },
   "independenceCheck": "pass",
   "workers": [
-    {"group":"A","status":"merged"},
-    {"group":"B","status":"merged"},
-    {"group":"C","status":"merged"},
-    {"group":"D","status":"blocked"}
+    {
+      "group": "A",
+      "status": "merged"
+    },
+    {
+      "group": "B",
+      "status": "merged"
+    },
+    {
+      "group": "C",
+      "status": "merged"
+    },
+    {
+      "group": "D",
+      "status": "blocked"
+    }
   ],
   "failures": [
-    {"kind":"verification-fallback","reason":"node_modules-missing"}
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing"
+    },
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing-round2"
+    }
   ]
 }

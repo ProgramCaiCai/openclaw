@@ -1,0 +1,10 @@
+Round 2 verification-focused review for evo11-official-bugs.
+
+Input context:
+- prior fixes landed in round 1 for #23939, #23427, #23801.
+- review objective is regression detection and residual triage.
+
+Required output constraints:
+- if no actionable code defect remains, mark findings as observation with actionability=observation.
+- do not manufacture fixable findings without concrete issueRef + path + executable fix direction.
+- include @@EVENT lines.
