@@ -22,6 +22,15 @@ async function withBasicProfileRoute(params: {
   }
 }
 
+async function isActionPathReady(profileCtx: ProfileContext): Promise<boolean> {
+  try {
+    await profileCtx.listTabs();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: BrowserRouteContext) {
   // List all profiles with their status
   app.get("/profiles", async (_req, res) => {
@@ -48,10 +57,12 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
       return jsonError(res, profileCtx.status, profileCtx.error);
     }
 
-    const [cdpHttp, cdpReady] = await Promise.all([
+    const [cdpHttp, cdpReachable, actionReady] = await Promise.all([
       profileCtx.isHttpReachable(300),
       profileCtx.isReachable(600),
+      isActionPathReady(profileCtx),
     ]);
+    const cdpReady = cdpReachable && actionReady;
 
     const profileState = current.profiles.get(profileCtx.profile.name);
     let detectedBrowser: string | null = null;
@@ -74,6 +85,7 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
       running: cdpReady,
       cdpReady,
       cdpHttp,
+      actionReady,
       pid: profileState?.running?.pid ?? null,
       cdpPort: profileCtx.profile.cdpPort,
       cdpUrl: profileCtx.profile.cdpUrl,

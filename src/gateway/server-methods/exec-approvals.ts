@@ -86,6 +86,36 @@ function toExecApprovalsPayload(snapshot: ExecApprovalsSnapshot) {
   };
 }
 
+function parseExecApprovalsSnapshotPayload(raw: unknown): ExecApprovalsSnapshot | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const obj = raw as {
+    path?: unknown;
+    exists?: unknown;
+    hash?: unknown;
+    file?: unknown;
+  };
+  if (typeof obj.path !== "string" || !obj.path.trim()) {
+    return null;
+  }
+  if (typeof obj.exists !== "boolean") {
+    return null;
+  }
+  if (typeof obj.hash !== "string" || !obj.hash.trim()) {
+    return null;
+  }
+  if (!obj.file || typeof obj.file !== "object") {
+    return null;
+  }
+  return {
+    path: obj.path,
+    exists: obj.exists,
+    hash: obj.hash,
+    file: normalizeExecApprovals(obj.file as ExecApprovalsFile),
+  };
+}
+
 function resolveNodeIdOrRespond(nodeId: string, respond: RespondFn): string | null {
   const id = nodeId.trim();
   if (!id) {
@@ -186,8 +216,21 @@ export const execApprovalsHandlers: GatewayRequestHandlers = {
       if (!respondUnavailableOnNodeInvokeError(respond, res)) {
         return;
       }
-      const payload = safeParseJson(res.payloadJSON ?? null);
-      respond(true, payload, undefined);
+      const parsed = parseExecApprovalsSnapshotPayload(
+        res.payloadJSON ? safeParseJson(res.payloadJSON) : res.payload,
+      );
+      if (!parsed) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.UNAVAILABLE,
+            "node returned invalid exec approvals snapshot payload",
+          ),
+        );
+        return;
+      }
+      respond(true, toExecApprovalsPayload(parsed), undefined);
     });
   },
 };

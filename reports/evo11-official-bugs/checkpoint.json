@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 2,
+  "scopeSlug": "evo11-official-bugs",
+  "status": "done",
+  "currentRound": 3,
+  "currentPhase": "round-3.early-termination.done",
+  "eventSeq": 6,
+  "updatedAt": "2026-02-23T01:28:43Z",
+  "runId": "134524fe-8019-42d0-88b1-ad544b8f571d",
+  "lockOwner": {
+    "pid": 83955,
+    "startTime": "Mon Feb 23 09:24:25 2026"
+  },
+  "decomposition": {
+    "status": "done",
+    "subtaskCount": 3
+  },
+  "reviewers": {
+    "architecture": {
+      "executor": "claude-cli",
+      "status": "ok"
+    },
+    "codeQuality": {
+      "executor": "codex-cli",
+      "status": "ok"
+    },
+    "redteam": {
+      "executor": "sessions_spawn",
+      "status": "ok"
+    },
+    "tester": {
+      "executor": "sessions_spawn",
+      "status": "ok"
+    }
+  },
+  "independenceCheck": "pass",
+  "workers": [
+    {
+      "group": "A",
+      "status": "merged"
+    },
+    {
+      "group": "B",
+      "status": "merged"
+    },
+    {
+      "group": "C",
+      "status": "merged"
+    },
+    {
+      "group": "D",
+      "status": "blocked"
+    }
+  ],
+  "failures": [
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing"
+    },
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing-round2"
+    },
+    {
+      "kind": "verification-fallback",
+      "reason": "node_modules-missing-round3"
+    }
+  ]
+}

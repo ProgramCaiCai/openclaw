@@ -47,6 +47,36 @@ describe("browser control server", () => {
     const body = (await result.json()) as { error: string };
     expect(body.error).toContain("Invalid URL:");
   });
+
+  it("GET / degrades cdpReady when action probe fails", async () => {
+    state.reachable = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/json/list")) {
+          return makeResponse({}, { ok: false, status: 500, text: "boom" });
+        }
+        return makeResponse({}, { ok: false, status: 500, text: "unexpected" });
+      }),
+    );
+
+    await startBrowserControlServerFromConfig();
+    const base = getBrowserControlServerBaseUrl();
+
+    const result = await realFetch(`${base}/`);
+    expect(result.status).toBe(200);
+    const body = (await result.json()) as {
+      cdpHttp?: boolean;
+      actionReady?: boolean;
+      cdpReady?: boolean;
+      running?: boolean;
+    };
+    expect(body.cdpHttp).toBe(true);
+    expect(body.actionReady).toBe(false);
+    expect(body.cdpReady).toBe(false);
+    expect(body.running).toBe(false);
+  });
 });
 
 describe("profile CRUD endpoints", () => {

@@ -6,6 +6,7 @@ export type BrowserStatus = {
   running: boolean;
   cdpReady?: boolean;
   cdpHttp?: boolean;
+  actionReady?: boolean;
   pid: number | null;
   cdpPort: number;
   cdpUrl?: string;

@@ -81,6 +81,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   let lastPartial = "";
   let partialUpdateQueue: Promise<void> = Promise.resolve();
   let streamingStartPromise: Promise<void> | null = null;
+  let lastFallbackSend: { kind: string; key: string } | null = null;
 
   const startStreaming = () => {
     if (!streamingEnabled || streamingStartPromise || streaming) {
@@ -131,6 +132,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
       onReplyStart: () => {
+        lastFallbackSend = null;
         if (streamingEnabled && renderMode === "card") {
           startStreaming();
         }
@@ -161,6 +163,14 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
 
         let first = true;
         if (useCard) {
+          const deliveryKey = `card:${text}`;
+          if (
+            info?.kind === "final" &&
+            lastFallbackSend?.kind === "block" &&
+            lastFallbackSend.key === deliveryKey
+          ) {
+            return;
+          }
           for (const chunk of core.channel.text.chunkTextWithMode(
             text,
             textChunkLimit,
@@ -176,8 +186,17 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             });
             first = false;
           }
+          lastFallbackSend = { kind: info?.kind ?? "final", key: deliveryKey };
         } else {
           const converted = core.channel.text.convertMarkdownTables(text, tableMode);
+          const deliveryKey = `text:${converted}`;
+          if (
+            info?.kind === "final" &&
+            lastFallbackSend?.kind === "block" &&
+            lastFallbackSend.key === deliveryKey
+          ) {
+            return;
+          }
           for (const chunk of core.channel.text.chunkTextWithMode(
             converted,
             textChunkLimit,
@@ -193,6 +212,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             });
             first = false;
           }
+          lastFallbackSend = { kind: info?.kind ?? "final", key: deliveryKey };
         }
       },
       onError: async (error, info) => {
