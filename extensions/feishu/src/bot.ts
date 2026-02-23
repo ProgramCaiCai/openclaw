@@ -649,10 +649,13 @@ export async function handleFeishuMessage(params: {
         });
         if (created) {
           log(`feishu[${account.accountId}]: pairing request sender=${ctx.senderOpenId}`);
+        }
+        if (code) {
           try {
             await sendMessageFeishu({
               cfg,
-              to: `user:${ctx.senderOpenId}`,
+              // Reply to the current DM chat to avoid open_id delivery mismatches.
+              to: `chat:${ctx.chatId}`,
               text: core.channel.pairing.buildPairingReply({
                 channel: "feishu",
                 idLine: `Your Feishu user id: ${ctx.senderOpenId}`,
@@ -665,6 +668,8 @@ export async function handleFeishuMessage(params: {
               `feishu[${account.accountId}]: pairing reply failed for ${ctx.senderOpenId}: ${String(err)}`,
             );
           }
+        } else {
+          log(`feishu[${account.accountId}]: pairing request has no available code`);
         }
       } else {
         log(

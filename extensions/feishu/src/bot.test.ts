@@ -222,7 +222,68 @@ describe("handleFeishuMessage command authorization", () => {
     });
     expect(mockSendMessageFeishu).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "user:ou-unapproved",
+        to: "chat:oc-dm",
+        accountId: "default",
+      }),
+    );
+    expect(mockFinalizeInboundContext).not.toHaveBeenCalled();
+    expect(mockDispatchReplyFromConfig).not.toHaveBeenCalled();
+  });
+
+  it("resends pairing reply when pairing request already exists", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockReadAllowFromStore.mockResolvedValue([]);
+    mockUpsertPairingRequest.mockResolvedValue({ code: "ABCDEFGH", created: false });
+
+    const cfg: ClawdbotConfig = {
+      channels: {
+        feishu: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+        },
+      },
+    } as ClawdbotConfig;
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-unapproved",
+        },
+      },
+      message: {
+        message_id: "msg-pairing-existing",
+        chat_id: "oc-dm",
+        chat_type: "p2p",
+        message_type: "text",
+        content: JSON.stringify({ text: "hello again" }),
+      },
+    };
+
+    await handleFeishuMessage({
+      cfg,
+      event,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn((code: number): never => {
+          throw new Error(`exit ${code}`);
+        }),
+      } as RuntimeEnv,
+    });
+
+    expect(mockUpsertPairingRequest).toHaveBeenCalledWith({
+      channel: "feishu",
+      id: "ou-unapproved",
+      meta: { name: undefined },
+    });
+    expect(mockBuildPairingReply).toHaveBeenCalledWith({
+      channel: "feishu",
+      idLine: "Your Feishu user id: ou-unapproved",
+      code: "ABCDEFGH",
+    });
+    expect(mockSendMessageFeishu).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "chat:oc-dm",
         accountId: "default",
       }),
     );
