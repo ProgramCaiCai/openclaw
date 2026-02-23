@@ -1,0 +1,10 @@
+Round 1 review assembly for openclaw-issue-evo10
+
+Inputs:
+- reports/openclaw-issue-evo10/requirements.md
+- reports/openclaw-issue-evo10/decomposition.md
+
+Review focus:
+1) Reproduce and bound #23590 repeated image history resize
+2) Evaluate low-risk mitigation for #23715 prompt cache partition
+3) Build 10-round safe pipeline with strict gate checks

@@ -4,6 +4,35 @@ import { buildSubagentSystemPrompt } from "./subagent-announce.js";
 import { buildAgentSystemPrompt, buildRuntimeLine } from "./system-prompt.js";
 
 describe("buildAgentSystemPrompt", () => {
+  it("uses a stable instance key for the same workspace + agent", () => {
+    const a = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw-a",
+      runtimeInfo: { agentId: "main" },
+    });
+    const b = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw-a",
+      runtimeInfo: { agentId: "main" },
+    });
+
+    const firstLineA = a.split("\n")[0];
+    const firstLineB = b.split("\n")[0];
+    expect(firstLineA).toBe(firstLineB);
+    expect(firstLineA).toMatch(/instance [a-f0-9]{12}/);
+  });
+
+  it("varies instance key when workspace changes", () => {
+    const a = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw-a",
+      runtimeInfo: { agentId: "main" },
+    });
+    const b = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw-b",
+      runtimeInfo: { agentId: "main" },
+    });
+
+    expect(a.split("\n")[0]).not.toBe(b.split("\n")[0]);
+  });
+
   it("includes owner numbers when provided", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

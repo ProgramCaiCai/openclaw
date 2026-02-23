@@ -1,0 +1,8 @@
+Round 2 review assembly for openclaw-issue-evo10
+
+Carry-over residuals from round 1:
+- R1-01 image re-processing on every turn (#23590)
+- R1-02 prompt cache partition (#23715)
+
+Round objective:
+- Implement payload+limits keyed LRU cache in resize sanitizer for #23590

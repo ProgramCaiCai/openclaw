@@ -1,0 +1,7 @@
+{
+  "architecture": { "executor": "codex-cli", "exitCode": 0, "status": "ok" },
+  "codeQuality": { "executor": "codex-cli", "exitCode": 0, "status": "ok" },
+  "redteam": { "executor": "codex-cli", "status": "ok" },
+  "tester": { "executor": "codex-cli", "status": "ok" },
+  "reviewBaseCommit": "0004cebb6"
+}

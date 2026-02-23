@@ -421,14 +421,19 @@ export function buildAgentSystemPrompt(params: {
     readToolName,
   });
   const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
+  const promptInstanceKey = createHash("sha1")
+    .update(`${params.workspaceDir}|${runtimeInfo?.agentId ?? "main"}`)
+    .digest("hex")
+    .slice(0, 12);
+  const identityLine = `You are a personal assistant running inside OpenClaw (instance ${promptInstanceKey}).`;
 
-  // For "none" mode, return just the basic identity line
+  // Keep a stable but installation-specific opening line to improve upstream prompt-cache locality.
   if (promptMode === "none") {
-    return "You are a personal assistant running inside OpenClaw.";
+    return identityLine;
   }
 
   const lines = [
-    "You are a personal assistant running inside OpenClaw.",
+    identityLine,
     "",
     "## Tooling",
     "Tool availability (filtered by policy):",

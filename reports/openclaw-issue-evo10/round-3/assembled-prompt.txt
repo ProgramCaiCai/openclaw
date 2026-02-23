@@ -1,0 +1,5 @@
+Round 3 review assembly for openclaw-issue-evo10
+
+Objective:
+- Add dedicated cache-hit/cache-miss regression tests for #23590
+- keep #23715 as active residual
