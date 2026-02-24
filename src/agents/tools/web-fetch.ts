@@ -12,6 +12,7 @@ import {
   tailText,
   writeToolOutputArtifact,
 } from "../tool-output-artifacts.js";
+import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
 import {
   extractReadableContent,
@@ -39,6 +40,9 @@ const EXTRACT_MODES = ["markdown", "text"] as const;
 
 const HARD_FETCH_MAX_CHARS_CAP = 5_000;
 const DEFAULT_FETCH_MAX_CHARS = HARD_FETCH_MAX_CHARS_CAP;
+const DEFAULT_FETCH_MAX_RESPONSE_BYTES = 2_000_000;
+const FETCH_MAX_RESPONSE_BYTES_MIN = 32_000;
+const FETCH_MAX_RESPONSE_BYTES_MAX = 10_000_000;
 const DEFAULT_FETCH_MAX_REDIRECTS = 3;
 const DEFAULT_ERROR_MAX_CHARS = 4_000;
 const DEFAULT_ERROR_MAX_BYTES = 64_000;
