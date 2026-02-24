@@ -89,7 +89,7 @@ describe("cdp", () => {
 
     const created = await createTargetViaCdp({
       cdpUrl: `http://127.0.0.1:${httpPort}`,
-      url: "https://example.com",
+      url: "https://93.184.216.34",
     });
 
     expect(created.targetId).toBe("TARGET_123");
@@ -183,7 +183,7 @@ describe("cdp", () => {
     await expect(
       createTargetViaCdp({
         cdpUrl: `http://127.0.0.1:${httpPort}`,
-        url: "https://example.com",
+        url: "https://93.184.216.34",
       }),
     ).rejects.toThrow("CDP /json/version missing webSocketDebuggerUrl");
   });

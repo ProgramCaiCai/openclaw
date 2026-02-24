@@ -32,16 +32,16 @@ describe("pw-tools-core.snapshot navigate guard", () => {
     const goto = vi.fn(async () => {});
     setPwToolsCoreCurrentPage({
       goto,
-      url: vi.fn(() => "https://example.com"),
+      url: vi.fn(() => "https://93.184.216.34"),
     });
 
     const result = await mod.navigateViaPlaywright({
       cdpUrl: "http://127.0.0.1:18792",
-      url: "https://example.com",
+      url: "https://93.184.216.34",
       timeoutMs: 10,
     });
 
-    expect(goto).toHaveBeenCalledWith("https://example.com", { timeout: 1000 });
-    expect(result.url).toBe("https://example.com");
+    expect(goto).toHaveBeenCalledWith("https://93.184.216.34", { timeout: 1000 });
+    expect(result.url).toBe("https://93.184.216.34");
   });
 });

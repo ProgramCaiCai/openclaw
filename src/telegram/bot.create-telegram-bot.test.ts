@@ -31,6 +31,7 @@ import {
   wasSentByBot,
 } from "./bot.create-telegram-bot.test-harness.js";
 import { createTelegramBot, getTelegramSequentialKey } from "./bot.js";
+import * as ssrf from "../infra/net/ssrf.js";
 import { resolveTelegramFetch } from "./fetch.js";
 
 const loadConfig = getLoadConfigMock();
@@ -2007,6 +2008,17 @@ describe("createTelegramBot", () => {
     );
 
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const ssrfSpy = vi
+      .spyOn(ssrf, "resolvePinnedHostnameWithPolicy")
+      .mockImplementation(async (hostname) => {
+        const normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
+        const addresses = ["93.184.216.34"];
+        return {
+          hostname: normalized,
+          addresses,
+          lookup: ssrf.createPinnedLookup({ hostname: normalized, addresses }),
+        };
+      });
     try {
       createTelegramBot({ token: "tok", testTimings: TELEGRAM_TEST_TIMINGS });
       const handler = getOnHandler("channel_post") as (
@@ -2053,6 +2065,7 @@ describe("createTelegramBot", () => {
       expect(payload.Body).toContain("album caption");
       expect(payload.MediaPaths).toHaveLength(2);
     } finally {
+      ssrfSpy.mockRestore();
       setTimeoutSpy.mockRestore();
       fetchSpy.mockRestore();
     }
