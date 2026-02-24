@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
@@ -247,6 +250,53 @@ describe("installSessionToolResultGuard", () => {
     expect(textBlock.text).toContain("truncated");
   });
 
+  it("writes an artifact pointer when truncation happens during persistence", () => {
+    const sm = SessionManager.inMemory();
+    installSessionToolResultGuard(sm);
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-guard-artifact-"));
+    const prevCwd = process.cwd();
+
+    try {
+      process.chdir(tmpDir);
+      const largeText = "line\n".repeat(3000);
+
+      sm.appendMessage(toolCallMessage);
+      sm.appendMessage(
+        asAppendMessage({
+          role: "toolResult",
+          toolCallId: "call_1",
+          toolName: "read",
+          content: [{ type: "text", text: largeText }],
+          isError: false,
+          timestamp: Date.now(),
+        }),
+      );
+
+      const entries = sm
+        .getEntries()
+        .filter((e) => e.type === "message")
+        .map((e) => (e as { message: AgentMessage }).message);
+
+      const toolResult = entries.find((m) => m.role === "toolResult") as {
+        content: Array<{ type: string; text: string }>;
+      };
+      const textBlock = toolResult.content.find((b: { type: string }) => b.type === "text") as {
+        text: string;
+      };
+      expect(textBlock.text).toContain("Full output saved to:");
+
+      const match = textBlock.text.match(/Full output saved to: ([^\]]+)/);
+      expect(match?.[1]).toBeTruthy();
+      const artifactPath = match?.[1] ?? "";
+      expect(fs.existsSync(artifactPath)).toBe(true);
+      expect(fs.readFileSync(artifactPath, "utf8")).toBe(largeText);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("caps tool results by line count during persistence", () => {
     const sm = SessionManager.inMemory();
     installSessionToolResultGuard(sm);
@@ -308,6 +358,7 @@ describe("installSessionToolResultGuard", () => {
       text: string;
     };
     expect(textBlock.text).toBe(originalText);
+    expect(textBlock.text).not.toContain("Full output saved to:");
   });
 
   it("applies stricter caps for exec tool results", () => {

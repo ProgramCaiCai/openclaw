@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
+import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -45,13 +46,15 @@ export function formatExcludedFromContextHeader(params: {
   return `⚠️ [${name} output excluded from context; failed to save artifact]`;
 }
 
-export async function writeToolOutputArtifact(params: {
+function resolveArtifactTargets(params: {
   preferredCwd?: string;
   toolName: string;
   toolCallId: string;
-  output: string;
   extension?: string;
-}): Promise<string | null> {
+}): {
+  candidates: string[];
+  fileName: string;
+} {
   const baseCwd = params.preferredCwd?.trim() || process.cwd();
   const toolDir = safeToolDir(params.toolName);
   const candidates = [
@@ -61,14 +64,52 @@ export async function writeToolOutputArtifact(params: {
   const fileId = safeArtifactId(params.toolCallId);
   const rawExt = (params.extension ?? "log").replace(/^[.]+/, "");
   const ext = path.basename(rawExt).replace(/[^a-zA-Z0-9_-]/g, "") || "log";
-  const fileName = `${toolDir}-${Date.now()}-${fileId}.${ext}`;
+  return {
+    candidates,
+    fileName: `${toolDir}-${Date.now()}-${fileId}.${ext}`,
+  };
+}
 
+export async function writeToolOutputArtifact(params: {
+  preferredCwd?: string;
+  toolName: string;
+  toolCallId: string;
+  output: string;
+  extension?: string;
+}): Promise<string | null> {
+  const { candidates, fileName } = resolveArtifactTargets(params);
   const errors: string[] = [];
+
   for (const dir of candidates) {
     try {
-      await fs.mkdir(dir, { recursive: true });
+      await fsPromises.mkdir(dir, { recursive: true });
       const filePath = path.join(dir, fileName);
-      await fs.writeFile(filePath, params.output ?? "", "utf-8");
+      await fsPromises.writeFile(filePath, params.output ?? "", "utf-8");
+      return filePath;
+    } catch (err) {
+      errors.push(`${dir}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  console.warn(`[tool-output-artifacts] Failed to write artifact: ${errors.join("; ")}`);
+  return null;
+}
+
+export function writeToolOutputArtifactSync(params: {
+  preferredCwd?: string;
+  toolName: string;
+  toolCallId: string;
+  output: string;
+  extension?: string;
+}): string | null {
+  const { candidates, fileName } = resolveArtifactTargets(params);
+  const errors: string[] = [];
+
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, fileName);
+      fs.writeFileSync(filePath, params.output ?? "", "utf-8");
       return filePath;
     } catch (err) {
       errors.push(`${dir}: ${err instanceof Error ? err.message : String(err)}`);

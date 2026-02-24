@@ -336,7 +336,7 @@ export async function handleToolExecutionEnd(
       ...collectMessagingMediaUrlsFromToolResult(result),
     ];
     if (committedMediaUrls.length > 0) {
-      ctx.state.messagingToolSentMediaUrls.push(...committedMediaUrls);
+      ctx.state.messagingToolSentMediaUrls?.push(...committedMediaUrls);
       ctx.trimMessagingToolSent();
     }
   }

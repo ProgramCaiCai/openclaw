@@ -42,36 +42,13 @@ import {
   resolveWorkdir,
   truncateMiddle,
 } from "./bash-tools.shared.js";
+import { assertSandboxPath } from "./sandbox-paths.js";
 import {
   EXCLUDED_CONTEXT_PREVIEW_CHARS,
   formatExcludedFromContextHeader,
   tailText,
   writeToolOutputArtifact,
 } from "./tool-output-artifacts.js";
-import { callGatewayTool } from "./tools/gateway.js";
-import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
-
-export type ExecToolDefaults = {
-  host?: ExecHost;
-  security?: ExecSecurity;
-  ask?: ExecAsk;
-  node?: string;
-  pathPrepend?: string[];
-  safeBins?: string[];
-  agentId?: string;
-  backgroundMs?: number;
-  timeoutSec?: number;
-  approvalRunningNoticeMs?: number;
-  sandbox?: BashSandboxConfig;
-  elevated?: ExecElevatedDefaults;
-  allowBackground?: boolean;
-  scopeKey?: string;
-  sessionKey?: string;
-  messageProvider?: string;
-  notifyOnExit?: boolean;
-  notifyOnExitEmptySuccess?: boolean;
-  cwd?: string;
-};
 
 export type { BashSandboxConfig } from "./bash-tools.shared.js";
 export type {
@@ -202,26 +179,8 @@ async function validateScriptFileForShellBleed(params: {
           `This looks like a shell command, not JavaScript.`,
       );
     }
-  | {
-      status: "completed" | "failed";
-      exitCode: number | null;
-      durationMs: number;
-      aggregated: string;
-      cwd?: string;
-      /** When present, full output was saved outside the toolResult content/details. */
-      outputFile?: string;
-      excludedFromContext?: boolean;
-    }
-  | {
-      status: "approval-pending";
-      approvalId: string;
-      approvalSlug: string;
-      expiresAtMs: number;
-      host: ExecHost;
-      command: string;
-      cwd?: string;
-      nodeId?: string;
-    };
+  }
+}
 
 export function createExecTool(
   defaults?: ExecToolDefaults,
