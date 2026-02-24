@@ -1,8 +1,6 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import type { AnyAgentTool } from "./pi-tools.types.js";
-import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import { detectMime } from "../media/mime.js";
 import { sniffMimeFromBase64 } from "../media/sniff-mime-from-base64.js";
 import type { ImageSanitizationLimits } from "./image-sanitization.js";
@@ -365,7 +363,7 @@ export type ReadToolOptions = {
   imageSanitization?: ImageSanitizationLimits;
 };
 
-export function createOpenClawReadTool(base: AnyAgentTool, opts?: ReadToolOptions): AnyAgentTool {
+export function createOpenClawReadTool(base: AnyAgentTool, _opts?: ReadToolOptions): AnyAgentTool {
   const patched = patchToolSchemaForClaudeCompatibility(base);
 
   // Patch schema to include excludeFromContext

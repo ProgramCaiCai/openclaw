@@ -1,5 +1,4 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { TextContent } from "@mariozechner/pi-ai";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
@@ -280,22 +279,7 @@ export function installSessionToolResultGuard(
       if (id && result !== undefined) {
         pending.delete(id);
       }
-      // Apply the hard cap before + after hook transforms so persisted tool results
-      // always conform to the system limits.
-      const preCapped = hardCapToolResultMessageForPersistence(persistMessage(nextMessage), {
-        toolName,
-        toolCallId: id,
-      });
-      const transformed = persistToolResult(preCapped, {
-        toolCallId: id ?? undefined,
-        toolName,
-        isSynthetic: false,
-      });
-      const postCapped = hardCapToolResultMessageForPersistence(transformed, {
-        toolName,
-        toolCallId: id,
-      });
-      return originalAppend(postCapped as never);
+      return result;
     }
 
     const toolCalls =
