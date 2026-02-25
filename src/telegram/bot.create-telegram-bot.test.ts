@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Chat, Message } from "@grammyjs/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeRegExp, formatEnvelopeTimestamp } from "../../test/helpers/envelope-timestamp.js";
+import * as ssrf from "../infra/net/ssrf.js";
 import {
   answerCallbackQuerySpy,
   botCtorSpy,
@@ -31,7 +32,6 @@ import {
   wasSentByBot,
 } from "./bot.create-telegram-bot.test-harness.js";
 import { createTelegramBot, getTelegramSequentialKey } from "./bot.js";
-import * as ssrf from "../infra/net/ssrf.js";
 import { resolveTelegramFetch } from "./fetch.js";
 
 const loadConfig = getLoadConfigMock();
@@ -154,21 +154,21 @@ describe("createTelegramBot", () => {
         update: { message: mockMessage({ chat: mockChat({ id: 555 }) }) },
       }),
     ).toBe("telegram:555");
-    expect(
-      getTelegramSequentialKey({
-        message: mockMessage({ chat: mockChat({ id: 123 }), text: "/stop" }),
-      }),
-    ).toBe("telegram:123:control");
-    expect(
-      getTelegramSequentialKey({
-        message: mockMessage({ chat: mockChat({ id: 123 }), text: "/status" }),
-      }),
-    ).toBe("telegram:123");
-    expect(
-      getTelegramSequentialKey({
-        message: mockMessage({ chat: mockChat({ id: 123 }), text: "stop" }),
-      }),
-    ).toBe("telegram:123:control");
+    // Control / command messages get unique keys so they bypass the per-chat queue.
+    const stopKey = getTelegramSequentialKey({
+      message: mockMessage({ chat: mockChat({ id: 123 }), text: "/stop" }),
+    });
+    expect(stopKey).toMatch(/^telegram:123:control:\d+:\d+$/);
+    const statusKey = getTelegramSequentialKey({
+      message: mockMessage({ chat: mockChat({ id: 123 }), text: "/status" }),
+    });
+    expect(statusKey).toMatch(/^telegram:123:control:\d+:\d+$/);
+    // Each call produces a distinct key (no serialization between commands).
+    expect(statusKey).not.toBe(stopKey);
+    const stopTextKey = getTelegramSequentialKey({
+      message: mockMessage({ chat: mockChat({ id: 123 }), text: "stop" }),
+    });
+    expect(stopTextKey).toMatch(/^telegram:123:control:\d+:\d+$/);
     expect(
       getTelegramSequentialKey({
         message: mockMessage({ chat: mockChat({ id: 123 }), text: "stop please" }),
@@ -185,6 +185,31 @@ describe("createTelegramBot", () => {
       }),
     ).toBe("telegram:123");
   });
+  it("fast-path commands each get a unique control key (bypass sequential queue)", () => {
+    const fastPathCommands = [
+      "/status",
+      "/help",
+      "/commands",
+      "/compact",
+      "/reasoning",
+      "/verbose",
+      "/think",
+      "/model",
+    ];
+    const keys = new Set<string>();
+    for (const cmd of fastPathCommands) {
+      const key = getTelegramSequentialKey({
+        message: mockMessage({ chat: mockChat({ id: 42 }), text: cmd }),
+      });
+      // Must be a unique control key, not the plain chat key.
+      expect(key).toMatch(/^telegram:42:control:\d+:\d+$/);
+      expect(key).not.toBe("telegram:42");
+      keys.add(key);
+    }
+    // Every command produced a distinct key (no two share a queue).
+    expect(keys.size).toBe(fastPathCommands.length);
+  });
+
   it("routes callback_query payloads as messages and answers callbacks", async () => {
     onSpy.mockReset();
     replySpy.mockReset();

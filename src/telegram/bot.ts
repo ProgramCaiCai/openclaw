@@ -5,6 +5,7 @@ import type { ApiClientOptions } from "grammy";
 import { Bot, webhookCallback } from "grammy";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveTextChunkLimit } from "../auto-reply/chunk.js";
+import { hasControlCommand } from "../auto-reply/command-detection.js";
 import { isAbortRequestText } from "../auto-reply/reply/abort.js";
 import { DEFAULT_GROUP_HISTORY_LIMIT, type HistoryEntry } from "../auto-reply/reply/history.js";
 import {
@@ -62,6 +63,9 @@ export type TelegramBotOptions = {
   };
 };
 
+/** Monotonic counter so each control-command key is unique even within the same millisecond. */
+let controlKeyCounter = 0;
+
 export function getTelegramSequentialKey(ctx: {
   chat?: { id?: number };
   me?: UserFromGetMe;
@@ -94,11 +98,19 @@ export function getTelegramSequentialKey(ctx: {
   const chatId = msg?.chat?.id ?? ctx.chat?.id;
   const rawText = msg?.text ?? msg?.caption;
   const botUsername = ctx.me?.username;
-  if (isAbortRequestText(rawText, botUsername ? { botUsername } : undefined)) {
+  const normalizeOptions = botUsername ? { botUsername } : undefined;
+  const isControlMessage =
+    isAbortRequestText(rawText, normalizeOptions) ||
+    hasControlCommand(rawText, undefined, normalizeOptions);
+  if (isControlMessage) {
+    // Each control/command message gets a unique key so it bypasses the
+    // per-chat sequential queue entirely – no waiting for an in-flight
+    // agent run or other control messages.
+    const unique = `${Date.now()}:${controlKeyCounter++}`;
     if (typeof chatId === "number") {
-      return `telegram:${chatId}:control`;
+      return `telegram:${chatId}:control:${unique}`;
     }
-    return "telegram:control";
+    return `telegram:control:${unique}`;
   }
   const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
   const messageThreadId = msg?.message_thread_id;
