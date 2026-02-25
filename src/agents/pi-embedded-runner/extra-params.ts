@@ -265,6 +265,59 @@ export function resolveExtraParams(params: {
   return modelConfig?.params ? { ...modelConfig.params } : undefined;
 }
 
+function normalizeApiType(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveConfiguredModelApi(
+  cfg: OpenClawConfig | undefined,
+  provider: string,
+  modelId: string,
+): string | undefined {
+  const providerConfig = cfg?.models?.providers?.[provider];
+  if (!providerConfig) {
+    return undefined;
+  }
+
+  const modelConfig = providerConfig.models.find((model) => model.id === modelId);
+  return normalizeApiType(modelConfig?.api) ?? normalizeApiType(providerConfig.api);
+}
+
+function resolveEffectiveModelApi(params: {
+  cfg: OpenClawConfig | undefined;
+  provider: string;
+  modelId: string;
+  modelApi?: string;
+}): string | undefined {
+  const explicit = normalizeApiType(params.modelApi);
+  if (explicit) {
+    return explicit;
+  }
+
+  const fromConfig = resolveConfiguredModelApi(params.cfg, params.provider, params.modelId);
+  if (fromConfig) {
+    return fromConfig;
+  }
+
+  if (params.provider === "anthropic") {
+    return "anthropic-messages";
+  }
+
+  if (params.provider.toLowerCase().includes("anthropic")) {
+    return "anthropic-messages";
+  }
+
+  return undefined;
+}
+
+function isAnthropicMessagesApi(apiType: string | undefined): boolean {
+  return apiType === "anthropic-messages";
+}
+
 type CacheRetention = "none" | "short" | "long";
 type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
   cacheRetention?: CacheRetention;
@@ -276,16 +329,16 @@ type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
  *
  * Mapping: "5m" → "short", "1h" → "long"
  *
- * Only applies to Anthropic provider (OpenRouter uses openai-completions API
- * with hardcoded cache_control, not the cacheRetention stream option).
+ * Only applies when the underlying model uses Anthropic's messages API.
  *
- * Defaults to "short" for Anthropic provider when not explicitly configured.
+ * Defaults to "short" for anthropic-messages API models when not explicitly
+ * configured.
  */
 function resolveCacheRetention(
   extraParams: Record<string, unknown> | undefined,
-  provider: string,
+  modelApi: string | undefined,
 ): CacheRetention | undefined {
-  if (provider !== "anthropic") {
+  if (!isAnthropicMessagesApi(modelApi)) {
     return undefined;
   }
 
@@ -304,27 +357,29 @@ function resolveCacheRetention(
     return "long";
   }
 
-  // Default to "short" for Anthropic when not explicitly configured
+  // Default to "short" for anthropic-messages models when not explicitly configured
   return "short";
 }
 
 function createStreamFnWithExtraParams(
   baseStreamFn: StreamFn | undefined,
   extraParams: Record<string, unknown> | undefined,
-  provider: string,
+  modelApi: string | undefined,
 ): StreamFn | undefined {
-  if (!extraParams || Object.keys(extraParams).length === 0) {
+  const hasExtraParams = Boolean(extraParams && Object.keys(extraParams).length > 0);
+  if (!hasExtraParams && !isAnthropicMessagesApi(modelApi)) {
     return undefined;
   }
 
+  const resolvedExtraParams = extraParams ?? {};
   const streamParams: CacheRetentionStreamOptions = {};
-  if (typeof extraParams.temperature === "number") {
-    streamParams.temperature = extraParams.temperature;
+  if (typeof resolvedExtraParams.temperature === "number") {
+    streamParams.temperature = resolvedExtraParams.temperature;
   }
-  if (typeof extraParams.maxTokens === "number") {
-    streamParams.maxTokens = extraParams.maxTokens;
+  if (typeof resolvedExtraParams.maxTokens === "number") {
+    streamParams.maxTokens = resolvedExtraParams.maxTokens;
   }
-  const cacheRetention = resolveCacheRetention(extraParams, provider);
+  const cacheRetention = resolveCacheRetention(resolvedExtraParams, modelApi);
   if (cacheRetention) {
     streamParams.cacheRetention = cacheRetention;
   }
@@ -413,10 +468,11 @@ function parseHeaderList(value: unknown): string[] {
 
 function resolveAnthropicBetas(
   extraParams: Record<string, unknown> | undefined,
+  modelApi: string | undefined,
   provider: string,
   modelId: string,
 ): string[] | undefined {
-  if (provider !== "anthropic") {
+  if (!isAnthropicMessagesApi(modelApi)) {
     return undefined;
   }
 
@@ -559,6 +615,7 @@ export function applyExtraParamsToAgent(
   provider: string,
   modelId: string,
   extraParamsOverride?: Record<string, unknown>,
+  modelApi?: string,
 ): void {
   const extraParams = resolveExtraParams({
     cfg,
@@ -572,14 +629,20 @@ export function applyExtraParamsToAgent(
         )
       : undefined;
   const merged = Object.assign({}, extraParams, override);
-  const wrappedStreamFn = createStreamFnWithExtraParams(agent.streamFn, merged, provider);
+  const resolvedModelApi = resolveEffectiveModelApi({
+    cfg,
+    provider,
+    modelId,
+    modelApi,
+  });
+  const wrappedStreamFn = createStreamFnWithExtraParams(agent.streamFn, merged, resolvedModelApi);
 
   if (wrappedStreamFn) {
     log.debug(`applying extraParams to agent streamFn for ${provider}/${modelId}`);
     agent.streamFn = wrappedStreamFn;
   }
 
-  const anthropicBetas = resolveAnthropicBetas(merged, provider, modelId);
+  const anthropicBetas = resolveAnthropicBetas(merged, resolvedModelApi, provider, modelId);
   if (anthropicBetas?.length) {
     log.debug(
       `applying Anthropic beta header for ${provider}/${modelId}: ${anthropicBetas.join(",")}`,

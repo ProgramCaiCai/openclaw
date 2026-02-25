@@ -27,6 +27,112 @@ describe("cacheRetention default behavior", () => {
     // since that would require API provider setup.
   });
 
+  it("applies default short retention for anthropic-messages custom providers", () => {
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const baseStreamFn: StreamFn = (_model, _context, options) => {
+      calls.push(options as Record<string, unknown> | undefined);
+      return {} as ReturnType<StreamFn>;
+    };
+    const agent: { streamFn?: StreamFn } = { streamFn: baseStreamFn };
+    const provider = "custom_anthropic";
+    const modelId = "claude-3-sonnet";
+    const cfg = {
+      models: {
+        providers: {
+          custom_anthropic: {
+            baseUrl: "https://api.example.com/v1",
+            api: "anthropic-messages" as const,
+            models: [
+              {
+                id: "claude-3-sonnet",
+                name: "Claude 3 Sonnet",
+                reasoning: false,
+                input: ["text" as const],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 200000,
+                maxTokens: 8192,
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    applyExtraParamsToAgent(agent, cfg, provider, modelId);
+
+    void agent.streamFn?.(
+      {
+        api: "anthropic-messages",
+        provider,
+        id: modelId,
+      } as never,
+      { messages: [] } as never,
+      {},
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cacheRetention).toBe("short");
+  });
+
+  it("applies Anthropic beta headers for anthropic-messages custom providers", () => {
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const baseStreamFn: StreamFn = (_model, _context, options) => {
+      calls.push(options as Record<string, unknown> | undefined);
+      return {} as ReturnType<StreamFn>;
+    };
+    const agent: { streamFn?: StreamFn } = { streamFn: baseStreamFn };
+    const provider = "custom_anthropic";
+    const modelId = "claude-sonnet-4-6";
+    const cfg = {
+      agents: {
+        defaults: {
+          models: {
+            "custom_anthropic/claude-sonnet-4-6": {
+              params: {
+                context1m: true,
+              },
+            },
+          },
+        },
+      },
+      models: {
+        providers: {
+          custom_anthropic: {
+            baseUrl: "https://api.example.com/v1",
+            api: "anthropic-messages" as const,
+            models: [
+              {
+                id: "claude-sonnet-4-6",
+                name: "Claude Sonnet 4.6",
+                reasoning: false,
+                input: ["text" as const],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 200000,
+                maxTokens: 8192,
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    applyExtraParamsToAgent(agent, cfg, provider, modelId);
+
+    void agent.streamFn?.(
+      {
+        api: "anthropic-messages",
+        provider,
+        id: modelId,
+      } as never,
+      { messages: [] } as never,
+      { apiKey: "sk-ant-api03-test" } as never,
+    );
+
+    expect(calls).toHaveLength(1);
+    const headers = calls[0]?.headers as Record<string, string> | undefined;
+    expect(headers?.["anthropic-beta"]).toContain("context-1m-2025-08-07");
+  });
+
   it("respects explicit 'none' config", () => {
     const agent: { streamFn?: StreamFn } = {};
     const cfg = {
