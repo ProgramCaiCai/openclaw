@@ -5,6 +5,7 @@ import type {
   HumanDelayConfig,
   TypingMode,
 } from "./types.base.js";
+import type { OpenAIResponsesPromptCacheRetention } from "./types.models.js";
 import type {
   SandboxBrowserSettings,
   SandboxDockerSettings,
@@ -12,10 +13,23 @@ import type {
 } from "./types.sandbox.js";
 import type { MemorySearchConfig } from "./types.tools.js";
 
+export type AgentModelParamsConfig = {
+  temperature?: number;
+  maxTokens?: number;
+  cacheRetention?: "none" | "short" | "long";
+  cacheControlTtl?: string;
+  anthropicBeta?: string | string[];
+  context1m?: boolean;
+  tool_stream?: boolean;
+  promptCacheKey?: string;
+  promptCacheRetention?: OpenAIResponsesPromptCacheRetention;
+  [key: string]: unknown;
+};
+
 export type AgentModelEntryConfig = {
   alias?: string;
   /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
-  params?: Record<string, unknown>;
+  params?: AgentModelParamsConfig;
   /** Enable streaming for this model (default: true, false for Ollama to avoid SDK issue #1205). */
   streaming?: boolean;
 };

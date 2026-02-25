@@ -30,3 +30,13 @@ index 00c580181f377cb81a3324573950e3ffa1d77751..c66dee3f9e262a73d093ccd8d8e1ff84
              messages.push({
                  type: "function_call_output",
                  call_id: callId,
+@@ -378,6 +385,9 @@ export async function processResponsesStream(events, output, stream, model, opti
+         }
+         else if (event.type === "response.completed") {
+             const response = event.response;
++            if (response?.id) {
++                output.responseId = response.id;
++            }
+             if (response?.usage) {
+                 const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+                 output.usage = {

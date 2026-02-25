@@ -6,6 +6,7 @@ import {
   MemorySearchSchema,
 } from "./zod-schema.agent-runtime.js";
 import {
+  AgentModelParamsSchema,
   BlockStreamingChunkSchema,
   BlockStreamingCoalesceSchema,
   CliBackendSchema,
@@ -35,7 +36,7 @@ export const AgentDefaultsSchema = z
           .object({
             alias: z.string().optional(),
             /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
-            params: z.record(z.string(), z.unknown()).optional(),
+            params: AgentModelParamsSchema.optional(),
             /** Enable streaming for this model (default: true, false for Ollama to avoid SDK issue #1205). */
             streaming: z.boolean().optional(),
           })

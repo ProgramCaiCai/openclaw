@@ -7,6 +7,8 @@ export type ModelApi =
   | "bedrock-converse-stream"
   | "ollama";
 
+export type OpenAIResponsesPromptCacheRetention = "in_memory" | "24h";
+
 export type ModelCompatConfig = {
   supportsStore?: boolean;
   supportsDeveloperRole?: boolean;

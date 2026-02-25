@@ -13,6 +13,25 @@ export const ModelApiSchema = z.union([
   z.literal("ollama"),
 ]);
 
+export const OpenAIResponsesPromptCacheRetentionSchema = z.union([
+  z.literal("in_memory"),
+  z.literal("24h"),
+]);
+
+export const AgentModelParamsSchema = z
+  .object({
+    temperature: z.number().optional(),
+    maxTokens: z.number().int().positive().optional(),
+    cacheRetention: z.union([z.literal("none"), z.literal("short"), z.literal("long")]).optional(),
+    cacheControlTtl: z.string().optional(),
+    anthropicBeta: z.union([z.string(), z.array(z.string())]).optional(),
+    context1m: z.boolean().optional(),
+    tool_stream: z.boolean().optional(),
+    promptCacheKey: z.string().min(1).optional(),
+    promptCacheRetention: OpenAIResponsesPromptCacheRetentionSchema.optional(),
+  })
+  .catchall(z.unknown());
+
 export const ModelCompatSchema = z
   .object({
     supportsStore: z.boolean().optional(),
