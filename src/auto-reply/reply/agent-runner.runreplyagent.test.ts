@@ -373,6 +373,104 @@ describe("runReplyAgent typing (heartbeat)", () => {
     expect(typing.startTypingLoop).not.toHaveBeenCalled();
   });
 
+  it("forces a minimal visible reply when user turns end in NO_REPLY", async () => {
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+      payloads: [{ text: "NO_REPLY" }],
+      meta: {},
+    }));
+
+    const { run } = createMinimalRun({
+      opts: { isHeartbeat: false },
+      typingMode: "message",
+    });
+
+    await expect(run()).resolves.toEqual({ text: "Got it." });
+  });
+
+  it("keeps NO_REPLY behavior for heartbeat turns", async () => {
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+      payloads: [{ text: "NO_REPLY" }],
+      meta: {},
+    }));
+
+    const { run } = createMinimalRun({
+      opts: { isHeartbeat: true },
+      typingMode: "message",
+    });
+
+    await expect(run()).resolves.toBeUndefined();
+  });
+
+  it("does not inject fallback text after successful messaging tool sends", async () => {
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+      payloads: [{ text: "NO_REPLY" }],
+      meta: {},
+      didSendViaMessagingTool: true,
+      messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "chat" }],
+    }));
+
+    const { run } = createMinimalRun({
+      opts: { isHeartbeat: false },
+      typingMode: "message",
+    });
+
+    await expect(run()).resolves.toBeUndefined();
+  });
+
+  it("sends a short visible ack when a turn runs longer than 15s without output", async () => {
+    vi.useFakeTimers();
+    try {
+      const onBlockReply = vi.fn();
+      state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20_000));
+        return { payloads: [{ text: "final" }], meta: {} };
+      });
+
+      const { run } = createMinimalRun({
+        opts: { isHeartbeat: false, onBlockReply },
+        typingMode: "message",
+      });
+      const runPromise = run();
+
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(onBlockReply).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(onBlockReply).toHaveBeenCalledWith({ text: "Working on it..." });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await runPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not send the long-turn ack after stream start", async () => {
+    vi.useFakeTimers();
+    try {
+      const onBlockReply = vi.fn();
+      state.runEmbeddedPiAgentMock.mockImplementationOnce(async (params: AgentRunParams) => {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        await params.onAssistantMessageStart?.();
+        await new Promise((resolve) => setTimeout(resolve, 12_000));
+        return { payloads: [{ text: "final" }], meta: {} };
+      });
+
+      const { run } = createMinimalRun({
+        opts: { isHeartbeat: false, onBlockReply },
+        typingMode: "message",
+      });
+      const runPromise = run();
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(onBlockReply).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await runPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not suppress partial streaming for normal 'No' prefixes", async () => {
     const onPartialReply = vi.fn();
     state.runEmbeddedPiAgentMock.mockImplementationOnce(async (params: AgentRunParams) => {

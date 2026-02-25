@@ -4,6 +4,7 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
+import { isMessagingTool } from "../../agents/pi-embedded-messaging.js";
 import { isEmbeddedPiRunActive, queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
 import {
@@ -21,6 +22,7 @@ import { defaultRuntime } from "../../runtime.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
@@ -48,10 +50,84 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
+const LONG_OPERATION_ACK_TIMEOUT_MS = 15_000;
+const LONG_OPERATION_ACK_TEXT = "Working on it...";
+const A01_MIN_VISIBLE_REPLY_TEXT = "Got it.";
 const REMINDER_COMMITMENT_GUARD_NOTE =
   "Note: I did not schedule a reminder in this turn, so this will not trigger automatically.";
 const REMINDER_COMMITMENT_RE = /\b(i(?:'|’)ll|i will)\s+remind\b/i;
+const SYSTEM_ONLY_PROVIDERS = new Set([
+  "heartbeat",
+  "cron-event",
+  "exec-event",
+  "system",
+  "system-event",
+  "internal",
+]);
 const queueLog = createSubsystemLogger("auto-reply/reply-queue");
+
+type AgentEventLike = {
+  stream: string;
+  data: Record<string, unknown>;
+};
+
+function hasVisiblePayloadContent(payload: ReplyPayload | undefined): boolean {
+  if (!payload) {
+    return false;
+  }
+  const text = payload.text?.trim() ?? "";
+  if (text && !isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
+    return true;
+  }
+  if (payload.mediaUrl) {
+    return true;
+  }
+  if ((payload.mediaUrls?.length ?? 0) > 0) {
+    return true;
+  }
+  return Boolean(payload.channelData && Object.keys(payload.channelData).length > 0);
+}
+
+function isUserTriggeredTurn(params: {
+  isHeartbeat: boolean;
+  sessionCtx: TemplateContext;
+}): boolean {
+  if (params.isHeartbeat) {
+    return false;
+  }
+  const provider =
+    params.sessionCtx.OriginatingChannel ?? params.sessionCtx.Surface ?? params.sessionCtx.Provider;
+  const normalizedProvider = provider?.trim().toLowerCase();
+  if (!normalizedProvider) {
+    return true;
+  }
+  return !SYSTEM_ONLY_PROVIDERS.has(normalizedProvider);
+}
+
+function isMessagingSendEvent(evt: AgentEventLike): boolean {
+  if (evt.stream !== "tool") {
+    return false;
+  }
+  const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
+  if (phase !== "result") {
+    return false;
+  }
+  if (evt.data.isError === true) {
+    return false;
+  }
+  const toolName = typeof evt.data.name === "string" ? evt.data.name.trim().toLowerCase() : "";
+  if (!toolName) {
+    return false;
+  }
+  if (toolName === "sessions_send") {
+    return true;
+  }
+  if (toolName === "message") {
+    const meta = typeof evt.data.meta === "string" ? evt.data.meta.toLowerCase() : "";
+    return meta.includes("send") || meta.includes("thread-reply");
+  }
+  return isMessagingTool(toolName);
+}
 
 function applyReminderCommitmentGuard(params: {
   payloads: ReplyPayload[];
@@ -190,6 +266,147 @@ export async function runReplyAgent(params: {
         })
       : null;
 
+  const userTriggeredTurn = isUserTriggeredTurn({ isHeartbeat, sessionCtx });
+  let didEmitVisibleReply = false;
+  let didStartReplyStream = false;
+  let didSendVisibleMessagingReply = false;
+  let longOperationAckSent = false;
+  let longOperationWatchdog: NodeJS.Timeout | undefined;
+
+  const clearLongOperationWatchdog = () => {
+    if (!longOperationWatchdog) {
+      return;
+    }
+    clearTimeout(longOperationWatchdog);
+    longOperationWatchdog = undefined;
+  };
+
+  const markStreamStarted = () => {
+    if (!userTriggeredTurn) {
+      return;
+    }
+    didStartReplyStream = true;
+    clearLongOperationWatchdog();
+  };
+
+  const markVisibleReply = () => {
+    if (!userTriggeredTurn) {
+      return;
+    }
+    didEmitVisibleReply = true;
+    didStartReplyStream = true;
+    clearLongOperationWatchdog();
+  };
+
+  const markMessagingToolReply = () => {
+    if (!userTriggeredTurn) {
+      return;
+    }
+    didSendVisibleMessagingReply = true;
+    didEmitVisibleReply = true;
+    clearLongOperationWatchdog();
+  };
+
+  const emitLongOperationAck = async () => {
+    if (!userTriggeredTurn) {
+      return;
+    }
+    if (longOperationAckSent || didStartReplyStream || didSendVisibleMessagingReply) {
+      return;
+    }
+    const ackPayload: ReplyPayload = { text: LONG_OPERATION_ACK_TEXT };
+    if (opts?.onBlockReply) {
+      await opts.onBlockReply(ackPayload);
+      longOperationAckSent = true;
+      markVisibleReply();
+      return;
+    }
+    if (opts?.onToolResult) {
+      await opts.onToolResult(ackPayload);
+      longOperationAckSent = true;
+      markVisibleReply();
+      return;
+    }
+    if (opts?.onPartialReply) {
+      await opts.onPartialReply(ackPayload);
+      longOperationAckSent = true;
+      markVisibleReply();
+    }
+  };
+
+  const startLongOperationWatchdog = () => {
+    if (!userTriggeredTurn) {
+      return;
+    }
+    if (!opts?.onBlockReply && !opts?.onToolResult && !opts?.onPartialReply) {
+      return;
+    }
+    clearLongOperationWatchdog();
+    longOperationWatchdog = setTimeout(() => {
+      void emitLongOperationAck().catch((err) => {
+        defaultRuntime.error(`Failed to deliver long-operation acknowledgement: ${String(err)}`);
+      });
+    }, LONG_OPERATION_ACK_TIMEOUT_MS);
+  };
+
+  const optsWithAgentEvent = opts;
+  const runOpts: GetReplyOptions | undefined = opts
+    ? {
+        ...opts,
+        onPartialReply: opts.onPartialReply
+          ? async (payload) => {
+              if (hasVisiblePayloadContent(payload)) {
+                markVisibleReply();
+              }
+              await opts.onPartialReply?.(payload);
+            }
+          : undefined,
+        onAssistantMessageStart:
+          opts.onAssistantMessageStart || userTriggeredTurn
+            ? async () => {
+                markStreamStarted();
+                await opts.onAssistantMessageStart?.();
+              }
+            : undefined,
+        onBlockReply: opts.onBlockReply
+          ? async (payload, context) => {
+              if (hasVisiblePayloadContent(payload)) {
+                markVisibleReply();
+              }
+              await opts.onBlockReply?.(payload, context);
+            }
+          : undefined,
+        onToolResult: opts.onToolResult
+          ? async (payload) => {
+              if (hasVisiblePayloadContent(payload)) {
+                markVisibleReply();
+              }
+              await opts.onToolResult?.(payload);
+            }
+          : undefined,
+        onAgentEvent:
+          optsWithAgentEvent?.onAgentEvent || userTriggeredTurn
+            ? async (evt: AgentEventLike) => {
+                if (isMessagingSendEvent(evt)) {
+                  markMessagingToolReply();
+                }
+                await optsWithAgentEvent?.onAgentEvent?.(evt);
+              }
+            : undefined,
+      }
+    : userTriggeredTurn
+      ? {
+          onAssistantMessageStart: async () => {
+            markStreamStarted();
+          },
+          onAgentEvent: async (evt: AgentEventLike) => {
+            if (isMessagingSendEvent(evt)) {
+              markMessagingToolReply();
+            }
+          },
+        }
+      : undefined;
+
   const reportDeferredDispatch = (event: {
     kind: "steer" | "followup";
     accepted: boolean;
@@ -290,6 +507,7 @@ export async function runReplyAgent(params: {
     return undefined;
   }
 
+  startLongOperationWatchdog();
   await typingSignals.signalRunStart();
 
   activeSessionEntry = await runMemoryFlushIfNeeded({
@@ -404,7 +622,7 @@ export async function runReplyAgent(params: {
       commandBody,
       followupRun,
       sessionCtx,
-      opts,
+      opts: runOpts,
       typingSignals,
       blockReplyPipeline,
       blockStreamingEnabled,
@@ -464,6 +682,16 @@ export async function runReplyAgent(params: {
       await Promise.allSettled(pendingToolTasks);
     }
 
+    didSendVisibleMessagingReply =
+      didSendVisibleMessagingReply ||
+      runResult.didSendViaMessagingTool === true ||
+      (runResult.messagingToolSentMediaUrls?.length ?? 0) > 0 ||
+      (runResult.messagingToolSentTargets?.length ?? 0) > 0;
+    if (didSendVisibleMessagingReply) {
+      didEmitVisibleReply = true;
+      clearLongOperationWatchdog();
+    }
+
     const usage = runResult.meta.agentMeta?.usage;
     const promptTokens = runResult.meta.agentMeta?.promptTokens;
     const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? defaultModel;
@@ -491,10 +719,17 @@ export async function runReplyAgent(params: {
       cliSessionId,
     });
 
+    const shouldInjectA01Fallback = () =>
+      userTriggeredTurn && !didEmitVisibleReply && !didSendVisibleMessagingReply;
+    const a01FallbackPayload: ReplyPayload = { text: A01_MIN_VISIBLE_REPLY_TEXT };
+
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
     if (payloadArray.length === 0) {
+      if (shouldInjectA01Fallback()) {
+        return finalizeWithFollowup(a01FallbackPayload, queueKey, runFollowupTurn);
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
@@ -521,6 +756,9 @@ export async function runReplyAgent(params: {
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
 
     if (replyPayloads.length === 0) {
+      if (shouldInjectA01Fallback()) {
+        return finalizeWithFollowup(a01FallbackPayload, queueKey, runFollowupTurn);
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
@@ -621,6 +859,7 @@ export async function runReplyAgent(params: {
       runFollowupTurn,
     );
   } finally {
+    clearLongOperationWatchdog();
     blockReplyPipeline?.stop();
     typing.markRunComplete();
   }

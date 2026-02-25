@@ -384,6 +384,10 @@ export async function runAgentTurnWithFallback(params: {
                   autoCompactionCompleted = true;
                 }
               }
+              await params.opts?.onAgentEvent?.({
+                stream: evt.stream,
+                data: evt.data,
+              });
             },
             // Always pass onBlockReply so flushBlockReplyBuffer works before tool execution,
             // even when regular block streaming is disabled. The handler sends directly
