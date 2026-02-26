@@ -91,11 +91,11 @@ function resolveAutoOpenAIResponsesPromptCacheKey(
 ): string | undefined {
   const sessionId = normalizeNonEmptyString(options?.sessionId);
   if (sessionId && typeof model.provider === "string") {
-    return `openclaw:${model.provider}:${sessionId}`;
+    return sessionId;
   }
   const agentId = normalizeNonEmptyString(options?.metadata?.agentId);
   if (agentId && typeof model.provider === "string") {
-    return `openclaw:${model.provider}:agent:${agentId}`;
+    return agentId;
   }
   return undefined;
 }

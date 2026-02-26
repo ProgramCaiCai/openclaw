@@ -132,7 +132,7 @@ describe("extra-params: OpenAI Responses cache controls", () => {
       },
     });
 
-    expect(payload.prompt_cache_key).toBe("openclaw:openrouter:session-123");
+    expect(payload.prompt_cache_key).toBe("session-123");
   });
 
   it("injects previous_response_id from prior response result in same session", async () => {
