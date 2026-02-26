@@ -15,14 +15,10 @@ const ANTHROPIC_1M_MODEL_PREFIXES = ["claude-opus-4", "claude-sonnet-4"] as cons
 // Codex responses (chatgpt.com/backend-api/codex/responses) require `store=false`.
 const OPENAI_RESPONSES_APIS = new Set(["openai-responses"]);
 const OPENAI_RESPONSES_PROVIDERS = new Set(["openai"]);
-const OPENAI_RESPONSES_TRACKED_IDS_MAX = 1024;
-const OPENAI_RESPONSES_RESULT_WRAPPED = Symbol("openaiResponsesResultWrapped");
-
 type OpenAIResponsesProvider = { api?: unknown; provider?: unknown; id?: unknown };
 type OpenAIResponsesPayload = {
   prompt_cache_key?: unknown;
   prompt_cache_retention?: unknown;
-  previous_response_id?: unknown;
   store?: unknown;
 };
 
@@ -30,8 +26,6 @@ type OpenAIResponsesOptions = SimpleStreamOptions & {
   sessionId?: string;
   metadata?: Record<string, unknown>;
 };
-
-const openAIResponsesPreviousIdBySessionProvider = new Map<string, string>();
 
 function normalizeNonEmptyString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -43,36 +37,6 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
 
 function isOpenAIResponsesApi(model: { api?: unknown }): boolean {
   return typeof model.api === "string" && OPENAI_RESPONSES_APIS.has(model.api);
-}
-
-function toOpenAIResponsesSessionProviderKey(sessionId: string, provider: string): string {
-  return `${provider}:${sessionId}`;
-}
-
-function rememberOpenAIResponsesPreviousId(
-  sessionId: string,
-  provider: string,
-  responseId: string,
-): void {
-  const key = toOpenAIResponsesSessionProviderKey(sessionId, provider);
-  openAIResponsesPreviousIdBySessionProvider.delete(key);
-  openAIResponsesPreviousIdBySessionProvider.set(key, responseId);
-  if (openAIResponsesPreviousIdBySessionProvider.size <= OPENAI_RESPONSES_TRACKED_IDS_MAX) {
-    return;
-  }
-  const oldestKey = openAIResponsesPreviousIdBySessionProvider.keys().next().value;
-  if (typeof oldestKey === "string") {
-    openAIResponsesPreviousIdBySessionProvider.delete(oldestKey);
-  }
-}
-
-function resolveRememberedOpenAIResponsesPreviousId(
-  sessionId: string,
-  provider: string,
-): string | undefined {
-  return openAIResponsesPreviousIdBySessionProvider.get(
-    toOpenAIResponsesSessionProviderKey(sessionId, provider),
-  );
 }
 
 function resolveOpenAIResponsesPromptCacheRetention(
@@ -112,79 +76,6 @@ function resolveOpenAIResponsesPromptCacheKey(
   return resolveAutoOpenAIResponsesPromptCacheKey(model, options);
 }
 
-function resolveOpenAIResponsesResponseIdFromAssistant(
-  model: OpenAIResponsesProvider,
-  message: unknown,
-): string | undefined {
-  if (!message || typeof message !== "object") {
-    return undefined;
-  }
-  const typed = message as {
-    role?: unknown;
-    api?: unknown;
-    provider?: unknown;
-    responseId?: unknown;
-    response_id?: unknown;
-  };
-  if (typed.role !== "assistant" || typed.api !== "openai-responses") {
-    return undefined;
-  }
-  if (typeof model.provider === "string" && typed.provider !== model.provider) {
-    return undefined;
-  }
-  return normalizeNonEmptyString(typed.responseId) ?? normalizeNonEmptyString(typed.response_id);
-}
-
-function resolvePreviousOpenAIResponsesResponseIdFromContext(
-  model: OpenAIResponsesProvider,
-  messages: unknown,
-): string | undefined {
-  if (!Array.isArray(messages)) {
-    return undefined;
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const responseId = resolveOpenAIResponsesResponseIdFromAssistant(model, messages[i]);
-    if (responseId) {
-      return responseId;
-    }
-  }
-  return undefined;
-}
-
-function wrapOpenAIResponsesResultTracking(
-  stream: ReturnType<StreamFn>,
-  model: OpenAIResponsesProvider,
-  sessionId: string | undefined,
-): ReturnType<StreamFn> {
-  if (!sessionId || typeof model.provider !== "string") {
-    return stream;
-  }
-
-  const maybeStream = stream as ReturnType<StreamFn> & {
-    result?: (() => Promise<unknown>) | undefined;
-    [OPENAI_RESPONSES_RESULT_WRAPPED]?: true;
-  };
-  if (maybeStream[OPENAI_RESPONSES_RESULT_WRAPPED]) {
-    return stream;
-  }
-  if (typeof maybeStream.result !== "function") {
-    return stream;
-  }
-
-  const originalResult = maybeStream.result.bind(maybeStream);
-  maybeStream.result = async () => {
-    const message = await originalResult();
-    const responseId = resolveOpenAIResponsesResponseIdFromAssistant(model, message);
-    if (responseId) {
-      rememberOpenAIResponsesPreviousId(sessionId, model.provider as string, responseId);
-    }
-    return message;
-  };
-  maybeStream[OPENAI_RESPONSES_RESULT_WRAPPED] = true;
-
-  return stream;
-}
-
 function createOpenAIResponsesCacheParamsWrapper(
   baseStreamFn: StreamFn | undefined,
   extraParams: Record<string, unknown> | undefined,
@@ -196,28 +87,12 @@ function createOpenAIResponsesCacheParamsWrapper(
     }
 
     const typedOptions = options as OpenAIResponsesOptions | undefined;
-    const sessionId = normalizeNonEmptyString(typedOptions?.sessionId);
-    const provider = normalizeNonEmptyString(model.provider);
     const promptCacheRetention = resolveOpenAIResponsesPromptCacheRetention(extraParams);
     const promptCacheKey = resolveOpenAIResponsesPromptCacheKey(extraParams, model, typedOptions);
 
-    const previousFromContext = resolvePreviousOpenAIResponsesResponseIdFromContext(
-      model,
-      context.messages,
-    );
-    if (sessionId && provider && previousFromContext) {
-      rememberOpenAIResponsesPreviousId(sessionId, provider, previousFromContext);
-    }
-    const previousResponseId =
-      previousFromContext ??
-      (sessionId && provider
-        ? resolveRememberedOpenAIResponsesPreviousId(sessionId, provider)
-        : undefined);
+    const shouldInjectPayload = Boolean(promptCacheRetention) || Boolean(promptCacheKey);
 
-    const shouldInjectPayload =
-      Boolean(promptCacheRetention) || Boolean(promptCacheKey) || Boolean(previousResponseId);
-
-    const stream = shouldInjectPayload
+    return shouldInjectPayload
       ? underlying(model, context, {
           ...options,
           onPayload: (payload) => {
@@ -229,24 +104,12 @@ function createOpenAIResponsesCacheParamsWrapper(
               if (promptCacheKey) {
                 typedPayload.prompt_cache_key = promptCacheKey;
               }
-              if (previousResponseId) {
-                typedPayload.previous_response_id = previousResponseId;
-              }
             }
             options?.onPayload?.(payload);
           },
         })
       : underlying(model, context, options);
-
-    return wrapOpenAIResponsesResultTracking(stream, model, sessionId);
   };
-}
-
-/**
- * Test helper to reset in-memory previous_response_id tracking.
- */
-export function resetOpenAIResponsesPreviousIdTrackingForTests(): void {
-  openAIResponsesPreviousIdBySessionProvider.clear();
 }
 
 /**

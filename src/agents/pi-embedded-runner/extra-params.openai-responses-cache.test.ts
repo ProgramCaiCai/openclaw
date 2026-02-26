@@ -1,10 +1,7 @@
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@mariozechner/pi-ai";
-import { beforeEach, describe, expect, it } from "vitest";
-import {
-  applyExtraParamsToAgent,
-  resetOpenAIResponsesPreviousIdTrackingForTests,
-} from "./extra-params.js";
+import { describe, expect, it } from "vitest";
+import { applyExtraParamsToAgent } from "./extra-params.js";
 
 type OpenAIResponsesModel = Model<"openai-responses">;
 
@@ -15,22 +12,13 @@ type InvokeParams = {
   cfg?: Parameters<typeof applyExtraParamsToAgent>[1];
   options?: SimpleStreamOptions;
   context?: Context;
-  resultMessage?: Record<string, unknown>;
 };
 
 function invokeWrappedStream(params: InvokeParams) {
   const payload: Record<string, unknown> = { model: params.model.id, input: [] };
   const baseStreamFn: StreamFn = (_model, _context, options) => {
     options?.onPayload?.(payload);
-    return {
-      result: async () =>
-        params.resultMessage ?? {
-          role: "assistant",
-          api: "openai-responses",
-          provider: params.model.provider,
-          responseId: "resp_default",
-        },
-    } as ReturnType<StreamFn>;
+    return {} as ReturnType<StreamFn>;
   };
 
   const agent = { streamFn: baseStreamFn };
@@ -43,10 +31,6 @@ function invokeWrappedStream(params: InvokeParams) {
 }
 
 describe("extra-params: OpenAI Responses cache controls", () => {
-  beforeEach(() => {
-    resetOpenAIResponsesPreviousIdTrackingForTests();
-  });
-
   it("injects prompt_cache_retention for openai-responses across providers", () => {
     const { payload } = invokeWrappedStream({
       applyProvider: "openrouter",
@@ -133,37 +117,6 @@ describe("extra-params: OpenAI Responses cache controls", () => {
     });
 
     expect(payload.prompt_cache_key).toBe("session-123");
-  });
-
-  it("injects previous_response_id from prior response result in same session", async () => {
-    const model = {
-      api: "openai-responses",
-      provider: "openrouter",
-      id: "gpt-5",
-    } as OpenAIResponsesModel;
-
-    const first = invokeWrappedStream({
-      applyProvider: "openrouter",
-      applyModelId: "gpt-5",
-      model,
-      options: { sessionId: "session-prev" },
-      resultMessage: {
-        role: "assistant",
-        api: "openai-responses",
-        provider: "openrouter",
-        responseId: "resp_first",
-      },
-    });
-    await (first.stream as { result: () => Promise<unknown> }).result();
-
-    const second = invokeWrappedStream({
-      applyProvider: "openrouter",
-      applyModelId: "gpt-5",
-      model,
-      options: { sessionId: "session-prev" },
-    });
-
-    expect(second.payload.previous_response_id).toBe("resp_first");
   });
 
   it("forces store=true only for direct openai responses", () => {
