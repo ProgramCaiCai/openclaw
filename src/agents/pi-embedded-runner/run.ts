@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
+import { sleepWithAbort } from "../../infra/backoff.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
 import { isMarkdownCapableMessageChannel } from "../../utils/message-channel.js";
@@ -64,6 +65,9 @@ type ApiKeyInfo = ResolvedProviderAuth;
 // Avoid Anthropic's refusal test token poisoning session transcripts.
 const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";
 const ANTHROPIC_MAGIC_STRING_REPLACEMENT = "ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)";
+
+const EMPTY_RESPONSE_MAX_RETRIES = 3;
+const EMPTY_RESPONSE_BACKOFF_MS = [1000, 2000, 4000];
 
 function scrubAnthropicRefusalMagic(prompt: string): string {
   if (!prompt.includes(ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL)) {
@@ -491,6 +495,7 @@ export async function runEmbeddedPiAgent(
       const MAX_RUN_LOOP_ITERATIONS = resolveMaxRunRetryIterations(profileCandidates.length);
       let overflowCompactionAttempts = 0;
       let toolResultTruncationAttempted = false;
+      let emptyResponseRetryCount = 0;
       const usageAccumulator = createUsageAccumulator();
       let lastRunPromptUsage: ReturnType<typeof normalizeUsage> | undefined;
       let autoCompactionCount = 0;
@@ -1051,6 +1056,70 @@ export async function runEmbeddedPiAgent(
             suppressToolErrorWarnings: params.suppressToolErrorWarnings,
             inlineToolResultsAllowed: false,
           });
+
+          // --- Empty response detection & internal retry ---
+          // If the upstream returned HTTP 200 but produced no usable content
+          // (stream broke mid-flight, output_tokens=0, etc.), retry internally
+          // before surfacing an incomplete result to the caller.
+          if (
+            !aborted &&
+            !timedOut &&
+            !attempt.clientToolCall &&
+            !attempt.didSendViaMessagingTool
+          ) {
+            const outputTokens = lastAssistantUsage?.output ?? 0;
+            const isEmptyPayloads =
+              payloads.length === 0 ||
+              (outputTokens === 0 &&
+                payloads.every((p) => !p.text?.trim() && !p.mediaUrl && !p.mediaUrls?.length));
+
+            if (isEmptyPayloads) {
+              if (emptyResponseRetryCount < EMPTY_RESPONSE_MAX_RETRIES) {
+                const backoffMs =
+                  EMPTY_RESPONSE_BACKOFF_MS[emptyResponseRetryCount] ??
+                  EMPTY_RESPONSE_BACKOFF_MS[EMPTY_RESPONSE_BACKOFF_MS.length - 1];
+                log.warn(
+                  `[empty-response-retry] sessionKey=${params.sessionKey ?? params.sessionId} ` +
+                    `provider=${provider}/${modelId} attempt=${emptyResponseRetryCount + 1}/${EMPTY_RESPONSE_MAX_RETRIES} ` +
+                    `payloads=${payloads.length} outputTokens=${outputTokens} backoffMs=${backoffMs}`,
+                );
+                emptyResponseRetryCount += 1;
+                await sleepWithAbort(backoffMs, params.abortSignal);
+                continue;
+              }
+
+              // Retries exhausted — return explicit error payload.
+              const message =
+                `Upstream returned an empty response after ${EMPTY_RESPONSE_MAX_RETRIES} retries ` +
+                `(provider=${provider}, model=${modelId}).`;
+              log.error(
+                `[empty-response-exhausted] sessionKey=${params.sessionKey ?? params.sessionId} ` +
+                  `provider=${provider}/${modelId} retries=${emptyResponseRetryCount}`,
+              );
+              return {
+                payloads: [
+                  {
+                    text:
+                      "The model returned an empty response after multiple retries. " +
+                      "Please try again.",
+                    isError: true,
+                  },
+                ],
+                meta: {
+                  durationMs: Date.now() - started,
+                  agentMeta,
+                  aborted,
+                  systemPromptReport: attempt.systemPromptReport,
+                  error: { kind: "empty_response", message },
+                },
+                didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+                messagingToolSentTexts: attempt.messagingToolSentTexts,
+                messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+                messagingToolSentTargets: attempt.messagingToolSentTargets,
+                successfulCronAdds: attempt.successfulCronAdds,
+              };
+            }
+          }
 
           // Timeout aborts can leave the run without any assistant payloads.
           // Emit an explicit timeout error instead of silently completing, so
