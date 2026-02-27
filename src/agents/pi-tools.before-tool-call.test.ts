@@ -109,47 +109,13 @@ describe("before_tool_call loop detection behavior", () => {
       }
     }
   }
-
-  function createGenericReadRepeatFixture() {
-    const execute = vi.fn().mockResolvedValue({
-      content: [{ type: "text", text: "same output" }],
-      details: { ok: true },
-    });
-    return {
-      tool: createWrappedTool("read", execute),
-      params: { path: "/tmp/file" },
-    };
-  }
-
-  function createNoProgressProcessFixture(sessionId: string) {
+  it("blocks known poll loops when no progress repeats", async () => {
     const execute = vi.fn().mockResolvedValue({
       content: [{ type: "text", text: "(no new output)\n\nProcess still running." }],
       details: { status: "running", aggregated: "steady" },
     });
-    return {
-      tool: createWrappedTool("process", execute),
-      params: { action: "poll", sessionId },
-    };
-  }
-
-  function expectCriticalLoopEvent(
-    loopEvent: DiagnosticToolLoopEvent | undefined,
-    params: {
-      detector: "ping_pong" | "known_poll_no_progress";
-      toolName: string;
-      count?: number;
-    },
-  ) {
-    expect(loopEvent?.type).toBe("tool.loop");
-    expect(loopEvent?.level).toBe("critical");
-    expect(loopEvent?.action).toBe("block");
-    expect(loopEvent?.detector).toBe(params.detector);
-    expect(loopEvent?.count).toBe(params.count ?? CRITICAL_THRESHOLD);
-    expect(loopEvent?.toolName).toBe(params.toolName);
-  }
-
-  it("blocks known poll loops when no progress repeats", async () => {
-    const { tool, params } = createNoProgressProcessFixture("sess-1");
+    const tool = createWrappedTool("process", execute);
+    const params = { action: "poll", sessionId: "sess-1" };
 
     for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
       await expect(tool.execute(`poll-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -193,8 +159,37 @@ describe("before_tool_call loop detection behavior", () => {
     }
   });
 
+  it("blocks known poll loops when hook-mutated params still produce no progress", async () => {
+    hookRunner.hasHooks.mockReturnValue(true);
+    hookRunner.runBeforeToolCall.mockImplementation(async ({ params }) => ({
+      params: { ...(params as Record<string, unknown>), forwardedByHook: true },
+    }));
+
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "(no new output)\n\nProcess still running." }],
+      details: { status: "running", aggregated: "steady" },
+    });
+    const tool = createWrappedTool("process", execute);
+    const params = { action: "poll", sessionId: "sess-hook-mutated" };
+
+    for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
+      await expect(
+        tool.execute(`poll-hook-${i}`, params, undefined, undefined),
+      ).resolves.toBeDefined();
+    }
+
+    await expect(
+      tool.execute(`poll-hook-${CRITICAL_THRESHOLD}`, params, undefined, undefined),
+    ).rejects.toThrow("CRITICAL");
+  });
+
   it("keeps generic repeated calls warn-only below global breaker", async () => {
-    const { tool, params } = createGenericReadRepeatFixture();
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "same output" }],
+      details: { ok: true },
+    });
+    const tool = createWrappedTool("read", execute);
+    const params = { path: "/tmp/file" };
 
     for (let i = 0; i < CRITICAL_THRESHOLD + 5; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -202,7 +197,12 @@ describe("before_tool_call loop detection behavior", () => {
   });
 
   it("blocks generic repeated no-progress calls at global breaker threshold", async () => {
-    const { tool, params } = createGenericReadRepeatFixture();
+    const execute = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "same output" }],
+      details: { ok: true },
+    });
+    const tool = createWrappedTool("read", execute);
+    const params = { path: "/tmp/file" };
 
     for (let i = 0; i < GLOBAL_CIRCUIT_BREAKER_THRESHOLD; i += 1) {
       await expect(tool.execute(`read-${i}`, params, undefined, undefined)).resolves.toBeDefined();
@@ -216,7 +216,12 @@ describe("before_tool_call loop detection behavior", () => {
   it("coalesces repeated generic warning events into threshold buckets", async () => {
     await withToolLoopEvents(
       async (emitted) => {
-        const { tool, params } = createGenericReadRepeatFixture();
+        const execute = vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "same output" }],
+          details: { ok: true },
+        });
+        const tool = createWrappedTool("read", execute);
+        const params = { path: "/tmp/file" };
 
         for (let i = 0; i < 21; i += 1) {
           await tool.execute(`read-bucket-${i}`, params, undefined, undefined);
@@ -267,10 +272,12 @@ describe("before_tool_call loop detection behavior", () => {
       ).rejects.toThrow("CRITICAL");
 
       const loopEvent = emitted.at(-1);
-      expectCriticalLoopEvent(loopEvent, {
-        detector: "ping_pong",
-        toolName: "list",
-      });
+      expect(loopEvent?.type).toBe("tool.loop");
+      expect(loopEvent?.level).toBe("critical");
+      expect(loopEvent?.action).toBe("block");
+      expect(loopEvent?.detector).toBe("ping_pong");
+      expect(loopEvent?.count).toBe(CRITICAL_THRESHOLD);
+      expect(loopEvent?.toolName).toBe("list");
     });
   });
 
@@ -301,7 +308,12 @@ describe("before_tool_call loop detection behavior", () => {
 
   it("emits structured critical diagnostic events when blocking loops", async () => {
     await withToolLoopEvents(async (emitted) => {
-      const { tool, params } = createNoProgressProcessFixture("sess-crit");
+      const execute = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "(no new output)\n\nProcess still running." }],
+        details: { status: "running", aggregated: "steady" },
+      });
+      const tool = createWrappedTool("process", execute);
+      const params = { action: "poll", sessionId: "sess-crit" };
 
       for (let i = 0; i < CRITICAL_THRESHOLD; i += 1) {
         await tool.execute(`poll-${i}`, params, undefined, undefined);
@@ -312,10 +324,12 @@ describe("before_tool_call loop detection behavior", () => {
       ).rejects.toThrow("CRITICAL");
 
       const loopEvent = emitted.at(-1);
-      expectCriticalLoopEvent(loopEvent, {
-        detector: "known_poll_no_progress",
-        toolName: "process",
-      });
+      expect(loopEvent?.type).toBe("tool.loop");
+      expect(loopEvent?.level).toBe("critical");
+      expect(loopEvent?.action).toBe("block");
+      expect(loopEvent?.detector).toBe("known_poll_no_progress");
+      expect(loopEvent?.count).toBe(CRITICAL_THRESHOLD);
+      expect(loopEvent?.toolName).toBe("process");
     });
   });
 });

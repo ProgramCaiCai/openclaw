@@ -96,6 +96,7 @@ type BrowserProxyResult = {
 };
 
 const DEFAULT_BROWSER_PROXY_TIMEOUT_MS = 20_000;
+const BROWSER_SNAPSHOT_MAX_CHARS_CAP = DEFAULT_AI_SNAPSHOT_MAX_CHARS;
 
 type BrowserNodeTarget = {
   nodeId: string;
@@ -483,7 +484,7 @@ export function createBrowserTool(opts?: {
             typeof params.maxChars === "number" &&
             Number.isFinite(params.maxChars) &&
             params.maxChars > 0
-              ? Math.floor(params.maxChars)
+              ? Math.min(Math.floor(params.maxChars), BROWSER_SNAPSHOT_MAX_CHARS_CAP)
               : undefined;
           const resolvedMaxChars =
             format === "ai"
@@ -495,7 +496,7 @@ export function createBrowserTool(opts?: {
               : undefined;
           const interactive =
             typeof params.interactive === "boolean" ? params.interactive : undefined;
-          const compact = typeof params.compact === "boolean" ? params.compact : undefined;
+          const compact = typeof params.compact === "boolean" ? params.compact : true;
           const depth =
             typeof params.depth === "number" && Number.isFinite(params.depth)
               ? params.depth

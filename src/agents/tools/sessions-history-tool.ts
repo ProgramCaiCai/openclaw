@@ -243,33 +243,38 @@ export function createSessionsHistoryTool(opts?: {
 
       const limit =
         typeof params.limit === "number" && Number.isFinite(params.limit)
-          ? Math.max(1, Math.floor(params.limit))
+          ? Math.max(1, Math.min(50, Math.floor(params.limit)))
           : undefined;
       const includeTools = Boolean(params.includeTools);
       const result = await callGateway<{ messages: Array<unknown> }>({
         method: "chat.history",
-        params: { sessionKey: resolvedKey, limit },
+        params: { sessionKey: resolvedKey, limit, safeLimit: true },
       });
       const rawMessages = Array.isArray(result?.messages) ? result.messages : [];
       const selectedMessages = includeTools ? rawMessages : stripToolMessages(rawMessages);
-      const sanitizedMessages = selectedMessages.map((message) => sanitizeHistoryMessage(message));
+      const sanitizedMessages = selectedMessages.map((message: unknown) =>
+        sanitizeHistoryMessage(message),
+      );
       const contentTruncated = sanitizedMessages.some((entry) => entry.truncated);
       const contentRedacted = sanitizedMessages.some((entry) => entry.redacted);
       const cappedMessages = capArrayByJsonBytes(
         sanitizedMessages.map((entry) => entry.message),
         SESSIONS_HISTORY_MAX_BYTES,
       );
-      const droppedMessages = cappedMessages.items.length < selectedMessages.length;
+      // Only treat byte caps / hard caps as "droppedMessages"; filtering (tools/thinking)
+      // is intentional and should not be reported as a drop.
+      const droppedByByteCap = cappedMessages.items.length < sanitizedMessages.length;
       const hardened = enforceSessionsHistoryHardCap({
         items: cappedMessages.items,
         bytes: cappedMessages.bytes,
         maxBytes: SESSIONS_HISTORY_MAX_BYTES,
       });
+      const droppedMessages = droppedByByteCap || hardened.hardCapped;
       return jsonResult({
         sessionKey: displayKey,
         messages: hardened.items,
-        truncated: droppedMessages || contentTruncated || hardened.hardCapped,
-        droppedMessages: droppedMessages || hardened.hardCapped,
+        truncated: droppedMessages || contentTruncated,
+        droppedMessages,
         contentTruncated,
         contentRedacted,
         bytes: hardened.bytes,
