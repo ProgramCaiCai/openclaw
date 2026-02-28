@@ -30,9 +30,11 @@ import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import {
   HEARTBEAT_TOKEN,
+  isLowValuePlaceholderText,
   isSilentReplyPrefixText,
   isSilentReplyText,
   SILENT_REPLY_TOKEN,
+  stripLowValuePlaceholderPrefix,
 } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
@@ -130,6 +132,7 @@ export async function runAgentTurnWithFallback(params: {
     try {
       const normalizeStreamingText = (payload: ReplyPayload): { text?: string; skip: boolean } => {
         let text = payload.text;
+        const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
         if (!params.isHeartbeat && text?.includes("HEARTBEAT_OK")) {
           const stripped = stripHeartbeatToken(text, {
             mode: "message",
@@ -138,7 +141,7 @@ export async function runAgentTurnWithFallback(params: {
             didLogHeartbeatStrip = true;
             logVerbose("Stripped stray HEARTBEAT_OK token from reply");
           }
-          if (stripped.shouldSkip && (payload.mediaUrls?.length ?? 0) === 0) {
+          if (stripped.shouldSkip && !hasMedia) {
             return { skip: true };
           }
           text = stripped.text;
@@ -152,9 +155,27 @@ export async function runAgentTurnWithFallback(params: {
         ) {
           return { skip: true };
         }
+        if (text) {
+          const strippedPlaceholderPrefix = stripLowValuePlaceholderPrefix(text);
+          if (strippedPlaceholderPrefix !== text) {
+            if (!strippedPlaceholderPrefix) {
+              if (hasMedia) {
+                return { text: undefined, skip: false };
+              }
+              return { skip: true };
+            }
+            text = strippedPlaceholderPrefix;
+          }
+        }
+        if (isLowValuePlaceholderText(text)) {
+          if (hasMedia) {
+            return { text: undefined, skip: false };
+          }
+          return { skip: true };
+        }
         if (!text) {
           // Allow media-only payloads (e.g. tool result screenshots) through.
-          if ((payload.mediaUrls?.length ?? 0) > 0) {
+          if (hasMedia) {
             return { text: undefined, skip: false };
           }
           return { skip: true };
@@ -454,6 +475,7 @@ export async function runAgentTurnWithFallback(params: {
           kind: "final",
           payload: {
             text: "⚠️ Context limit exceeded. I've reset our conversation to start fresh - please try again.\n\nTo prevent this, increase your compaction buffer by setting `agents.defaults.compaction.reserveTokensFloor` to 20000 or higher in your config.",
+            isError: true,
           },
         };
       }
@@ -464,6 +486,7 @@ export async function runAgentTurnWithFallback(params: {
             kind: "final",
             payload: {
               text: "⚠️ Message ordering conflict. I've reset the conversation - please try again.",
+              isError: true,
             },
           };
         }
@@ -488,6 +511,7 @@ export async function runAgentTurnWithFallback(params: {
           kind: "final",
           payload: {
             text: "⚠️ Context limit exceeded during compaction. I've reset our conversation to start fresh - please try again.\n\nTo prevent this, increase your compaction buffer by setting `agents.defaults.compaction.reserveTokensFloor` to 20000 or higher in your config.",
+            isError: true,
           },
         };
       }
@@ -498,6 +522,7 @@ export async function runAgentTurnWithFallback(params: {
             kind: "final",
             payload: {
               text: "⚠️ Message ordering conflict. I've reset the conversation - please try again.",
+              isError: true,
             },
           };
         }
@@ -544,6 +569,7 @@ export async function runAgentTurnWithFallback(params: {
           kind: "final",
           payload: {
             text: "⚠️ Session history was corrupted. I've reset the conversation - please try again!",
+            isError: true,
           },
         };
       }
@@ -578,6 +604,7 @@ export async function runAgentTurnWithFallback(params: {
         kind: "final",
         payload: {
           text: fallbackText,
+          isError: true,
         },
       };
     }

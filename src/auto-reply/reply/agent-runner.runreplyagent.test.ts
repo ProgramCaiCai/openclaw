@@ -391,6 +391,18 @@ describe("runReplyAgent typing (heartbeat)", () => {
         shouldType: false,
       },
       {
+        partials: ["Answer, for user question..."],
+        finalText: "answer for user question",
+        expectedForwarded: [] as string[],
+        shouldType: false,
+      },
+      {
+        partials: ["answer for user question\n\n这是正常回复内容"],
+        finalText: "这是正常回复内容",
+        expectedForwarded: ["这是正常回复内容"],
+        shouldType: true,
+      },
+      {
         partials: ["No", "No, that is valid"],
         finalText: "No, that is valid",
         expectedForwarded: ["No", "No, that is valid"],
@@ -527,13 +539,27 @@ describe("runReplyAgent typing (heartbeat)", () => {
     const cases = [
       {
         toolText: "tooling",
+        expectedForwardedText: "tooling",
         shouldType: true,
         shouldForward: true,
       },
       {
         toolText: "NO_REPLY",
+        expectedForwardedText: undefined,
         shouldType: false,
         shouldForward: false,
+      },
+      {
+        toolText: "answer for user question!!",
+        expectedForwardedText: undefined,
+        shouldType: false,
+        shouldForward: false,
+      },
+      {
+        toolText: "Answer For User Question\n\n内容",
+        expectedForwardedText: "内容",
+        shouldType: true,
+        shouldForward: true,
       },
     ] as const;
 
@@ -551,14 +577,14 @@ describe("runReplyAgent typing (heartbeat)", () => {
       await run();
 
       if (testCase.shouldType) {
-        expect(typing.startTypingOnText).toHaveBeenCalledWith(testCase.toolText);
+        expect(typing.startTypingOnText).toHaveBeenCalledWith(testCase.expectedForwardedText);
       } else {
         expect(typing.startTypingOnText).not.toHaveBeenCalled();
       }
 
       if (testCase.shouldForward) {
         expect(onToolResult).toHaveBeenCalledWith({
-          text: testCase.toolText,
+          text: testCase.expectedForwardedText,
           mediaUrls: [],
         });
       } else {

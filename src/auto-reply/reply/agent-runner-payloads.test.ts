@@ -10,6 +10,57 @@ const baseParams = {
 };
 
 describe("buildReplyPayloads media filter integration", () => {
+  it("drops low-value placeholder text payloads with no media", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "answer for user question" }],
+    });
+
+    expect(replyPayloads).toHaveLength(0);
+  });
+
+  it("strips placeholder prefix and keeps substantive text", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "answer for user question\n\n正常内容" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe("正常内容");
+  });
+
+  it("strips placeholder prefix case-insensitively", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "Answer For User Question\n\n内容" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe("内容");
+  });
+
+  it("treats punctuation-only placeholder variants as empty text", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "answer for user question.", mediaUrl: "file:///tmp/photo.jpg" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBeUndefined();
+    expect(replyPayloads[0]?.mediaUrl).toBe("file:///tmp/photo.jpg");
+  });
+
+  it("keeps media-only payloads when text is low-value placeholder", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "answer for user question", mediaUrl: "file:///tmp/photo.jpg" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBeUndefined();
+    expect(replyPayloads[0]?.mediaUrl).toBe("file:///tmp/photo.jpg");
+  });
+
   it("strips media URL from payload when in messagingToolSentMediaUrls", () => {
     const { replyPayloads } = buildReplyPayloads({
       ...baseParams,
