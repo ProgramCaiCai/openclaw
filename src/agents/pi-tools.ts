@@ -46,6 +46,12 @@ import type { SandboxContext } from "./sandbox.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { createToolFsPolicy, resolveToolFsConfig } from "./tool-fs-policy.js";
 import {
+  DEFAULT_TOOL_OUTPUT_HARD_LIMITS,
+  EXEC_TOOL_OUTPUT_HARD_LIMITS,
+  type ToolOutputHardLimits,
+  wrapToolWithHardOutputTruncate,
+} from "./tool-output-hard-truncate.js";
+import {
   applyToolPolicyPipeline,
   buildDefaultToolPolicyPipelineSteps,
 } from "./tool-policy-pipeline.js";
@@ -85,6 +91,14 @@ function applyMessageProviderToolPolicy(
   }
   const deniedSet = new Set(deniedTools);
   return tools.filter((tool) => !deniedSet.has(tool.name));
+}
+
+function resolveToolHardOutputLimits(toolName: string): ToolOutputHardLimits {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized === "exec" || normalized === "bash") {
+    return EXEC_TOOL_OUTPUT_HARD_LIMITS;
+  }
+  return DEFAULT_TOOL_OUTPUT_HARD_LIMITS;
 }
 
 function isApplyPatchAllowedForModel(params: {
@@ -536,9 +550,12 @@ export function createOpenClawCodingTools(options?: {
   const withAbort = options?.abortSignal
     ? withHooks.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
     : withHooks;
+  const withHardTruncate = withAbort.map((tool) =>
+    wrapToolWithHardOutputTruncate(tool, resolveToolHardOutputLimits(tool.name)),
+  );
 
   // NOTE: Keep canonical (lowercase) tool names here.
   // pi-ai's Anthropic OAuth transport remaps tool names to Claude Code-style names
   // on the wire and maps them back for tool dispatch.
-  return withAbort;
+  return withHardTruncate;
 }

@@ -170,7 +170,8 @@ describe("gateway server chat", () => {
           expect(spy.mock.calls.length).toBeGreaterThan(0);
         }, FAST_WAIT_OPTS);
 
-        expect(capturedOpts?.disableBlockStreaming).toBeUndefined();
+        // Local customization: block streaming is explicitly disabled
+        expect(capturedOpts?.disableBlockStreaming).toBe(true);
       } finally {
         testState.agentConfig = undefined;
       }
