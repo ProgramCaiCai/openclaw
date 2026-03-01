@@ -1194,14 +1194,14 @@ export async function runEmbeddedAttempt(
         throw new Error("Embedded agent session missing");
       }
       const activeSession = session;
+      const guardContextWindowTokens =
+        typeof params.model.contextWindow === "number" &&
+        Number.isFinite(params.model.contextWindow)
+          ? params.model.contextWindow
+          : DEFAULT_CONTEXT_TOKENS;
       removeToolResultContextGuard = installToolResultContextGuard({
         agent: activeSession.agent,
-        contextWindowTokens: Math.max(
-          1,
-          Math.floor(
-            params.model.contextWindow ?? params.model.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
-          ),
-        ),
+        contextWindowTokens: Math.max(1, Math.floor(guardContextWindowTokens)),
       });
       const cacheTrace = createCacheTrace({
         cfg: params.config,

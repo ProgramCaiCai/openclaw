@@ -38,7 +38,9 @@ export { extractReadableContent } from "./web-fetch-utils.js";
 
 const EXTRACT_MODES = ["markdown", "text"] as const;
 
-const HARD_FETCH_MAX_CHARS_CAP = 5_000;
+// Keep deep extraction usable by default while relying on downstream hard-output
+// truncation to protect model context size.
+const HARD_FETCH_MAX_CHARS_CAP = 50_000;
 const DEFAULT_FETCH_MAX_CHARS = HARD_FETCH_MAX_CHARS_CAP;
 const DEFAULT_FETCH_MAX_RESPONSE_BYTES = 2_000_000;
 const FETCH_MAX_RESPONSE_BYTES_MIN = 32_000;

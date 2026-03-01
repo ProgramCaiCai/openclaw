@@ -633,12 +633,13 @@ export async function compactEmbeddedPiSessionDirect(
           }),
         );
       }
+      const guardContextWindowTokens =
+        typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow)
+          ? model.contextWindow
+          : DEFAULT_CONTEXT_TOKENS;
       const removeToolResultContextGuard = installToolResultContextGuard({
         agent: session.agent,
-        contextWindowTokens: Math.max(
-          1,
-          Math.floor(model.contextWindow ?? model.maxTokens ?? DEFAULT_CONTEXT_TOKENS),
-        ),
+        contextWindowTokens: Math.max(1, Math.floor(guardContextWindowTokens)),
       });
 
       try {

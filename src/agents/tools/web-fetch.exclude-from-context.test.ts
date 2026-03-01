@@ -104,4 +104,41 @@ describe("web_fetch excludeFromContext", () => {
     const artifactContent = fs.readFileSync(details.outputFile!, "utf-8");
     expect(artifactContent.length).toBeGreaterThanOrEqual(4_000);
   });
+
+  it("honors a high configured maxCharsCap for deep content extraction", async () => {
+    const longText = "z".repeat(40_000);
+    const mockFetch = vi.fn((input: RequestInfo) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: makeHeaders({ "content-type": "text/plain" }),
+        text: async () => longText,
+        url: requestUrl(input),
+      } as Response),
+    );
+    // @ts-expect-error mock
+    global.fetch = mockFetch;
+
+    const tool = createWebFetchTool({
+      config: {
+        tools: {
+          web: {
+            fetch: {
+              cacheTtlMinutes: 0,
+              firecrawl: { enabled: false },
+              maxCharsCap: 30_000,
+            },
+          },
+        },
+      },
+      sandboxed: false,
+    });
+
+    const result = await tool?.execute?.("call_deep_extract", {
+      url: "https://example.com/deep",
+      maxChars: 25_000,
+    });
+    const details = result?.details as { text?: string } | undefined;
+    expect(details?.text?.length ?? 0).toBeGreaterThan(20_000);
+  });
 });
