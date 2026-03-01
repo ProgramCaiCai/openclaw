@@ -142,6 +142,14 @@ vi.mock("../agents/openclaw-tools.js", () => {
         };
       },
     },
+    {
+      name: "tools_invoke_large",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({
+        huge: "z".repeat(96 * 1024),
+        note: "large payload",
+      }),
+    },
   ];
 
   return {
@@ -336,6 +344,20 @@ describe("POST /tools/invoke", () => {
     expect(body.ok).toBe(true);
     expect(body).toHaveProperty("result");
     expect(lastCreateOpenClawToolsContext?.allowMediaInvokeCommands).toBe(true);
+  });
+
+  it("bounds oversized direct tool output in /tools/invoke responses", async () => {
+    const res = await invokeToolAuthed({
+      tool: "tools_invoke_large",
+      args: {},
+      sessionKey: "main",
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    const resultBytes = Buffer.byteLength(JSON.stringify(body.result ?? {}), "utf8");
+    expect(resultBytes).toBeLessThanOrEqual(20 * 1024);
   });
 
   it("supports tools.alsoAllow in profile and implicit modes", async () => {

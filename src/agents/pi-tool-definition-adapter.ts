@@ -12,6 +12,9 @@ import {
   isToolWrappedWithBeforeToolCallHook,
   runBeforeToolCallHook,
 } from "./pi-tools.before-tool-call.js";
+import { hardCapToolOutput } from "./tool-output-hard-cap.js";
+import { resolveToolHardOutputLimits } from "./tool-output-hard-limits.js";
+import { hardTruncateToolPayload } from "./tool-output-hard-truncate.js";
 import { normalizeToolName } from "./tool-policy.js";
 import { jsonResult } from "./tools/common.js";
 
@@ -80,30 +83,51 @@ function normalizeToolExecutionResult(params: {
   result: unknown;
 }): AgentToolResult<unknown> {
   const { toolName, result } = params;
+  const limits = resolveToolHardOutputLimits(toolName);
+  const capOptions = {
+    maxBytes: limits.maxBytesUtf8,
+    maxLines: limits.maxLines,
+  };
+  const truncateText = (text: string): string => {
+    const out = hardTruncateToolPayload(text, limits, { toolName });
+    return typeof out === "string" ? out : stringifyToolPayload(out);
+  };
+  const capDetails = (value: unknown): unknown => hardCapToolOutput(value, capOptions);
+
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
     if (Array.isArray(record.content)) {
-      return result as AgentToolResult<unknown>;
+      if (!("details" in record)) {
+        return result as AgentToolResult<unknown>;
+      }
+      const cappedDetails = capDetails(record.details);
+      if (cappedDetails === record.details) {
+        return result as AgentToolResult<unknown>;
+      }
+      return {
+        ...record,
+        details: cappedDetails,
+      } as AgentToolResult<unknown>;
     }
     logDebug(`tools: ${toolName} returned non-standard result (missing content[]); coercing`);
     const details = "details" in record ? record.details : record;
-    const safeDetails = details ?? { status: "ok", tool: toolName };
+    const safeDetails = capDetails(details ?? { status: "ok", tool: toolName });
     return {
       content: [
         {
           type: "text",
-          text: stringifyToolPayload(safeDetails),
+          text: truncateText(stringifyToolPayload(safeDetails)),
         },
       ],
       details: safeDetails,
     };
   }
-  const safeDetails = result ?? { status: "ok", tool: toolName };
+  const safeDetails = capDetails(result ?? { status: "ok", tool: toolName });
   return {
     content: [
       {
         type: "text",
-        text: stringifyToolPayload(safeDetails),
+        text: truncateText(stringifyToolPayload(safeDetails)),
       },
     ],
     details: safeDetails,

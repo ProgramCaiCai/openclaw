@@ -15,11 +15,11 @@ function makeUser(text: string): AgentMessage {
   });
 }
 
-function makeToolResult(id: string, text: string): AgentMessage {
+function makeToolResult(id: string, text: string, toolName = "read"): AgentMessage {
   return castAgentMessage({
     role: "toolResult",
     toolCallId: id,
-    toolName: "read",
+    toolName,
     content: [{ type: "text", text }],
     isError: false,
     timestamp: Date.now(),
@@ -92,6 +92,11 @@ async function applyGuardToContext(
   return await agent.transformContext?.(contextForNextCall, new AbortController().signal);
 }
 
+function expectCompactionNotice(text: string): void {
+  expect(text.startsWith(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER)).toBe(true);
+  expect(text).toContain("[context:");
+}
+
 function expectCompactedToolResultsWithoutContextNotice(
   contextForNextCall: AgentMessage[],
   oldIndex: number,
@@ -99,8 +104,8 @@ function expectCompactedToolResultsWithoutContextNotice(
 ) {
   const oldResultText = getToolResultText(contextForNextCall[oldIndex]);
   const newResultText = getToolResultText(contextForNextCall[newIndex]);
-  expect(oldResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
-  expect(newResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+  expectCompactionNotice(oldResultText);
+  expectCompactionNotice(newResultText);
   expect(newResultText).not.toContain(CONTEXT_LIMIT_TRUNCATION_NOTICE);
 }
 
@@ -135,9 +140,9 @@ describe("installToolResultContextGuard", () => {
     const second = getToolResultText(contextForNextCall[2]);
     const third = getToolResultText(contextForNextCall[3]);
 
-    expect(first).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
-    expect(second).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
-    expect(third).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    expectCompactionNotice(first);
+    expectCompactionNotice(second);
+    expectCompactionNotice(third);
   });
 
   it("survives repeated large tool results by compacting older outputs before later turns", async () => {
@@ -158,7 +163,7 @@ describe("installToolResultContextGuard", () => {
       .filter((msg) => msg.role === "toolResult")
       .map((msg) => getToolResultText(msg as AgentMessage));
 
-    expect(toolResultTexts[0]).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    expectCompactionNotice(toolResultTexts[0] ?? "");
     expect(toolResultTexts[3]?.length).toBe(95_000);
     expect(toolResultTexts.join("\n")).not.toContain(CONTEXT_LIMIT_TRUNCATION_NOTICE);
   });
@@ -178,6 +183,28 @@ describe("installToolResultContextGuard", () => {
     const newResultText = getToolResultText(contextForNextCall[0]);
     expect(newResultText.length).toBeLessThan(5_000);
     expect(newResultText).toContain(CONTEXT_LIMIT_TRUNCATION_NOTICE);
+    expect(newResultText).toContain("[context:");
+    expect(newResultText).toContain("original~");
+    expect(newResultText).toContain("limit~");
+  });
+
+  it("uses exec-specific recovery hint for shell tool output truncation", async () => {
+    const agent = makeGuardableAgent();
+
+    installToolResultContextGuard({
+      agent,
+      contextWindowTokens: 1_000,
+    });
+
+    const contextForNextCall = [makeToolResult("call_exec", "z".repeat(5_000), "exec")];
+
+    await agent.transformContext?.(contextForNextCall, new AbortController().signal);
+
+    const newResultText = getToolResultText(contextForNextCall[0]);
+    expect(newResultText).toContain(CONTEXT_LIMIT_TRUNCATION_NOTICE);
+    expect(newResultText).toContain("[context:");
+    expect(newResultText).toContain("tool=exec");
+    expect(newResultText).toContain("grep/jq/awk/head/tail");
   });
 
   it("keeps compacting oldest-first until overflow clears, including the newest tool result when needed", async () => {
@@ -212,7 +239,7 @@ describe("installToolResultContextGuard", () => {
     expect(transformed).not.toBe(contextForNextCall);
     const transformedMessages = transformed as AgentMessage[];
     const oldResultText = getToolResultText(transformedMessages[1]);
-    expect(oldResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    expectCompactionNotice(oldResultText);
   });
 
   it("handles legacy role=tool string outputs when enforcing context budget", async () => {
@@ -234,8 +261,10 @@ describe("installToolResultContextGuard", () => {
     const oldResultText = (contextForNextCall[1] as { content?: unknown }).content;
     const newResultText = (contextForNextCall[2] as { content?: unknown }).content;
 
-    expect(oldResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
-    expect(newResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    const oldResultString = typeof oldResultText === "string" ? oldResultText : "";
+    const newResultString = typeof newResultText === "string" ? newResultText : "";
+    expectCompactionNotice(oldResultString);
+    expectCompactionNotice(newResultString);
   });
 
   it("drops oversized read-tool details payloads when compacting tool results", async () => {
@@ -263,8 +292,8 @@ describe("installToolResultContextGuard", () => {
     const oldResultText = getToolResultText(contextForNextCall[1]);
     const newResultText = getToolResultText(contextForNextCall[2]);
 
-    expect(oldResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
-    expect(newResultText).toBe(PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    expectCompactionNotice(oldResultText);
+    expectCompactionNotice(newResultText);
     expect(oldResult.details).toBeUndefined();
     expect(newResult.details).toBeUndefined();
   });

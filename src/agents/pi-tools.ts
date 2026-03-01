@@ -46,12 +46,8 @@ import type { SandboxContext } from "./sandbox.js";
 import { isXaiProvider } from "./schema/clean-for-xai.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { createToolFsPolicy, resolveToolFsConfig } from "./tool-fs-policy.js";
-import {
-  DEFAULT_TOOL_OUTPUT_HARD_LIMITS,
-  EXEC_TOOL_OUTPUT_HARD_LIMITS,
-  type ToolOutputHardLimits,
-  wrapToolWithHardOutputTruncate,
-} from "./tool-output-hard-truncate.js";
+import { resolveToolHardOutputLimits } from "./tool-output-hard-limits.js";
+import { wrapToolWithHardOutputTruncate } from "./tool-output-hard-truncate.js";
 import {
   applyToolPolicyPipeline,
   buildDefaultToolPolicyPipelineSteps,
@@ -106,15 +102,6 @@ function applyModelProviderToolPolicy(
   // web_search alongside it causes duplicate-name request failures.
   return tools.filter((tool) => !TOOL_DENY_FOR_XAI_PROVIDERS.has(tool.name));
 }
-
-function resolveToolHardOutputLimits(toolName: string): ToolOutputHardLimits {
-  const normalized = toolName.trim().toLowerCase();
-  if (normalized === "exec" || normalized === "bash") {
-    return EXEC_TOOL_OUTPUT_HARD_LIMITS;
-  }
-  return DEFAULT_TOOL_OUTPUT_HARD_LIMITS;
-}
-
 function isApplyPatchAllowedForModel(params: {
   modelProvider?: string;
   modelId?: string;

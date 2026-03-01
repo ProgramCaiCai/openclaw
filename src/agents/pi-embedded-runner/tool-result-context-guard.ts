@@ -17,6 +17,11 @@ const SINGLE_TOOL_RESULT_CONTEXT_SHARE = 0.5;
 
 export const CONTEXT_LIMIT_TRUNCATION_NOTICE = "[truncated: output exceeded context limit]";
 const CONTEXT_LIMIT_TRUNCATION_SUFFIX = `\n${CONTEXT_LIMIT_TRUNCATION_NOTICE}`;
+const CONTEXT_NOTICE_PREFIX = "[context:";
+const READ_RECOVERY_HINT = "Use read with offset/limit for specific ranges.";
+const EXEC_RECOVERY_HINT =
+  "For shell output, rerun narrower commands with grep/jq/awk/head/tail to extract specific sections.";
+const GENERIC_RECOVERY_HINT = "Rerun with narrower params or request specific sections.";
 
 export const PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER =
   "[compacted: tool output removed to free context]";
@@ -32,7 +37,110 @@ type GuardableAgentRecord = {
   transformContext?: GuardableTransformContext;
 };
 
-function truncateTextToBudget(text: string, maxChars: number): string {
+type ToolResultMeta = {
+  toolName?: string;
+  toolCallId?: string;
+};
+
+function asTrimmedString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function shortenContextToken(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  if (maxChars <= 3) {
+    return value.slice(0, maxChars);
+  }
+  const head = Math.max(1, Math.floor((maxChars - 3) / 2));
+  const tail = Math.max(1, maxChars - 3 - head);
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
+
+function getToolResultMeta(msg: AgentMessage): ToolResultMeta {
+  const record = msg as {
+    toolName?: unknown;
+    tool_name?: unknown;
+    toolCallId?: unknown;
+    tool_call_id?: unknown;
+  };
+  const toolNameRaw = asTrimmedString(record.toolName) ?? asTrimmedString(record.tool_name);
+  const toolCallIdRaw = asTrimmedString(record.toolCallId) ?? asTrimmedString(record.tool_call_id);
+  return {
+    toolName: toolNameRaw ? shortenContextToken(toolNameRaw.replace(/\s+/g, " "), 32) : undefined,
+    toolCallId: toolCallIdRaw
+      ? shortenContextToken(toolCallIdRaw.replace(/\s+/g, " "), 24)
+      : undefined,
+  };
+}
+
+function resolveRecoveryHint(toolName?: string): string {
+  const normalized = toolName?.trim().toLowerCase();
+  if (normalized === "read") {
+    return READ_RECOVERY_HINT;
+  }
+  if (normalized === "exec" || normalized === "bash") {
+    return EXEC_RECOVERY_HINT;
+  }
+  return GENERIC_RECOVERY_HINT;
+}
+
+function formatContextDetailLine(params: { msg: AgentMessage; detailParts: string[] }): string {
+  const meta = getToolResultMeta(params.msg);
+  const parts = [...params.detailParts];
+  if (meta.toolName) {
+    parts.unshift(`tool=${meta.toolName}`);
+  }
+  if (meta.toolCallId) {
+    parts.unshift(`call=${meta.toolCallId}`);
+  }
+  const details = parts.filter((part) => part.length > 0).join("; ");
+  const hint = resolveRecoveryHint(meta.toolName);
+  const body = details ? `${details}. ${hint}` : hint;
+  return `${CONTEXT_NOTICE_PREFIX} ${body}]`;
+}
+
+function buildContextLimitNotice(params: {
+  msg: AgentMessage;
+  originalChars: number;
+  maxChars: number;
+}): string {
+  const detailLine = formatContextDetailLine({
+    msg: params.msg,
+    detailParts: [
+      `original~${Math.max(0, Math.floor(params.originalChars))} chars`,
+      `limit~${Math.max(0, Math.floor(params.maxChars))} chars`,
+    ],
+  });
+  return `${CONTEXT_LIMIT_TRUNCATION_NOTICE}\n${detailLine}`;
+}
+
+function buildCompactionNotice(params: {
+  msg: AgentMessage;
+  removedChars: number;
+  maxCharsHint: number;
+}): string {
+  const detailLine = formatContextDetailLine({
+    msg: params.msg,
+    detailParts: [`removed~${Math.max(0, Math.floor(params.removedChars))} chars`],
+  });
+  const detailed = `${PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER}\n${detailLine}`;
+  if (detailed.length >= params.maxCharsHint) {
+    return PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER;
+  }
+  return detailed;
+}
+
+function truncateTextToBudget(
+  text: string,
+  maxChars: number,
+  suffix = CONTEXT_LIMIT_TRUNCATION_SUFFIX,
+): string {
   if (text.length <= maxChars) {
     return text;
   }
@@ -41,9 +149,10 @@ function truncateTextToBudget(text: string, maxChars: number): string {
     return CONTEXT_LIMIT_TRUNCATION_NOTICE;
   }
 
-  const bodyBudget = Math.max(0, maxChars - CONTEXT_LIMIT_TRUNCATION_SUFFIX.length);
+  const normalizedSuffix = suffix || CONTEXT_LIMIT_TRUNCATION_SUFFIX;
+  const bodyBudget = Math.max(0, maxChars - normalizedSuffix.length);
   if (bodyBudget <= 0) {
-    return CONTEXT_LIMIT_TRUNCATION_NOTICE;
+    return normalizedSuffix.length <= maxChars ? normalizedSuffix : CONTEXT_LIMIT_TRUNCATION_NOTICE;
   }
 
   let cutPoint = bodyBudget;
@@ -52,7 +161,7 @@ function truncateTextToBudget(text: string, maxChars: number): string {
     cutPoint = newline;
   }
 
-  return text.slice(0, cutPoint) + CONTEXT_LIMIT_TRUNCATION_SUFFIX;
+  return text.slice(0, cutPoint) + normalizedSuffix;
 }
 
 function replaceToolResultText(msg: AgentMessage, text: string): AgentMessage {
@@ -82,12 +191,17 @@ function truncateToolResultToChars(
     return msg;
   }
 
+  const contextNotice = buildContextLimitNotice({
+    msg,
+    originalChars: estimatedChars,
+    maxChars,
+  });
   const rawText = getToolResultText(msg);
   if (!rawText) {
-    return replaceToolResultText(msg, CONTEXT_LIMIT_TRUNCATION_NOTICE);
+    return replaceToolResultText(msg, contextNotice);
   }
 
-  const truncatedText = truncateTextToBudget(rawText, maxChars);
+  const truncatedText = truncateTextToBudget(rawText, maxChars, `\n${contextNotice}`);
   return replaceToolResultText(msg, truncatedText);
 }
 
@@ -113,7 +227,14 @@ function compactExistingToolResultsInPlace(params: {
       continue;
     }
 
-    const compacted = replaceToolResultText(msg, PREEMPTIVE_TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    const compacted = replaceToolResultText(
+      msg,
+      buildCompactionNotice({
+        msg,
+        removedChars: before,
+        maxCharsHint: before,
+      }),
+    );
     applyMessageMutationInPlace(msg, compacted, cache);
     const after = estimateMessageCharsCached(msg, cache);
     if (after >= before) {

@@ -6,11 +6,16 @@ import { buildTestCtx } from "./test-ctx.js";
 import type { TypingController } from "./typing.js";
 
 const handleCommandsMock = vi.fn();
+const createOpenClawToolsMock = vi.fn();
 
 vi.mock("./commands.js", () => ({
   handleCommands: (...args: unknown[]) => handleCommandsMock(...args),
   buildStatusReply: vi.fn(),
   buildCommandContext: vi.fn(),
+}));
+
+vi.mock("../../agents/openclaw-tools.js", () => ({
+  createOpenClawTools: (...args: unknown[]) => createOpenClawToolsMock(...args),
 }));
 
 // Import after mocks.
@@ -87,6 +92,15 @@ const createHandleInlineActionsInput = (params: {
 describe("handleInlineActions", () => {
   beforeEach(() => {
     handleCommandsMock.mockReset();
+    createOpenClawToolsMock.mockReset();
+    createOpenClawToolsMock.mockReturnValue([
+      {
+        name: "huge_tool",
+        execute: async () => ({
+          content: [{ type: "text", text: "A".repeat(96 * 1024) }],
+        }),
+      },
+    ]);
   });
 
   it("skips whatsapp replies when config is empty and From !== To", async () => {
@@ -220,5 +234,47 @@ describe("handleInlineActions", () => {
     expect(sessionStore["s:main"]?.abortCutoffMessageSid).toBeUndefined();
     expect(sessionStore["s:main"]?.abortCutoffTimestamp).toBeUndefined();
     expect(handleCommandsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds inline skill tool output before replying", async () => {
+    const typing = createTypingController();
+    const ctx = buildTestCtx({
+      Body: "/huge sample args",
+      CommandBody: "/huge sample args",
+    });
+
+    const result = await handleInlineActions(
+      createHandleInlineActionsInput({
+        ctx,
+        typing,
+        cleanedBody: "/huge sample args",
+        command: {
+          isAuthorizedSender: true,
+          senderIsOwner: true,
+          senderId: "owner-1",
+          rawBodyNormalized: "/huge sample args",
+          commandBodyNormalized: "/huge sample args",
+        },
+        overrides: {
+          allowTextCommands: true,
+          skillCommands: [
+            {
+              name: "huge",
+              skillName: "HugeSkill",
+              description: "dispatches huge tool output",
+              dispatch: { kind: "tool", toolName: "huge_tool", argMode: "raw" },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(result.kind).toBe("reply");
+    if (result.kind !== "reply") {
+      throw new Error("expected reply result");
+    }
+    const reply = result.reply as { text?: string } | undefined;
+    expect(typeof reply?.text).toBe("string");
+    expect((reply?.text ?? "").length).toBeLessThanOrEqual(20 * 1024);
   });
 });

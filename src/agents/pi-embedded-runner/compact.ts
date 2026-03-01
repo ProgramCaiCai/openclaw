@@ -89,6 +89,7 @@ import {
   createSystemPromptOverride,
 } from "./system-prompt.js";
 import { collectAllowedToolNames } from "./tool-name-allowlist.js";
+import { installToolResultContextGuard } from "./tool-result-context-guard.js";
 import { splitSdkTools } from "./tool-split.js";
 import type { EmbeddedPiCompactResult } from "./types.js";
 import { describeUnknownError, mapThinkingLevel } from "./utils.js";
@@ -632,6 +633,13 @@ export async function compactEmbeddedPiSessionDirect(
           }),
         );
       }
+      const removeToolResultContextGuard = installToolResultContextGuard({
+        agent: session.agent,
+        contextWindowTokens: Math.max(
+          1,
+          Math.floor(model.contextWindow ?? model.maxTokens ?? DEFAULT_CONTEXT_TOKENS),
+        ),
+      });
 
       try {
         const prior = await sanitizeSessionHistory({
@@ -859,6 +867,7 @@ export async function compactEmbeddedPiSessionDirect(
           sessionManager,
           clearPendingOnTimeout: true,
         });
+        removeToolResultContextGuard();
         session.dispose();
       }
     } finally {
