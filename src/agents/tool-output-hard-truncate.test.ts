@@ -69,6 +69,24 @@ describe("hardTruncateToolPayload", () => {
     expect(out).toContain("showing head+tail preview]");
   });
 
+  it("caps non-content object payloads to hard size limits", () => {
+    const payload = {
+      huge: "x".repeat(64 * 1024),
+      nested: {
+        lines: Array.from({ length: 2000 }, (_, i) => `line-${i}`),
+      },
+    };
+    const maxBytes = 1024;
+    const out = hardTruncateToolPayload(payload, {
+      maxBytesUtf8: maxBytes,
+      maxLines: 120,
+      suffix: "Use read with offset/limit.",
+    });
+
+    const bytes = countBytesUtf8(JSON.stringify(out));
+    expect(bytes).toBeLessThanOrEqual(maxBytes);
+  });
+
   it("truncates across content blocks using shared budgets", () => {
     const payload = {
       content: [
