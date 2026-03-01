@@ -51,6 +51,15 @@ describe("hardCapToolOutput", () => {
     expect(out).toBe(payload);
   });
 
+  it("does not bypass line caps for multiline strings in fast path", () => {
+    const payload = { content: [{ type: "text", text: "\n".repeat(3_000) }] };
+    const out = hardCapToolOutput(payload, { maxBytes: 32 * 1024, maxLines: 400 }) as {
+      content?: Array<{ text?: string }>;
+    };
+    const text = out.content?.[0]?.text ?? "";
+    expect(text.split(/\r?\n/).length).toBeLessThanOrEqual(400);
+  });
+
   it("keeps deeper nested values with the default depth", () => {
     const payload = {
       a: {
