@@ -3,7 +3,6 @@ import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent
 import { getActiveEmbeddedRunCount } from "../agents/pi-embedded-runner/runs.js";
 import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
 import { initSubagentRegistry } from "../agents/subagent-registry.js";
-import { SubagentWatchdog } from "../agents/subagent-watchdog.js";
 import { getTotalPendingReplies } from "../auto-reply/reply/dispatcher-registry.js";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
@@ -373,10 +372,6 @@ export async function startGatewayServer(
   const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
   if (diagnosticsEnabled) {
     startDiagnosticHeartbeat();
-  }
-  const subagentWatchdog = new SubagentWatchdog();
-  if (!minimalTestGateway) {
-    subagentWatchdog.start();
   }
   setGatewaySigusr1RestartPolicy({ allowExternal: isRestartEnabled(cfgAtStart) });
   setPreRestartDeferralCheck(
@@ -925,7 +920,6 @@ export async function startGatewayServer(
       if (diagnosticsEnabled) {
         stopDiagnosticHeartbeat();
       }
-      subagentWatchdog.stop();
       if (skillsRefreshTimer) {
         clearTimeout(skillsRefreshTimer);
         skillsRefreshTimer = null;
