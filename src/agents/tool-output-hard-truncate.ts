@@ -8,6 +8,7 @@ import {
   TOOL_OUTPUT_HARD_MAX_BYTES_EXEC,
   TOOL_OUTPUT_HARD_MAX_LINES,
   TOOL_OUTPUT_HARD_MAX_LINES_EXEC,
+  hardCapToolOutput,
 } from "./tool-output-hard-cap.js";
 
 export type ToolOutputHardLimits = {
@@ -393,7 +394,13 @@ export function hardTruncateToolPayload(
   }
 
   if (!isToolPayloadWithContent(payload)) {
-    return payload;
+    if (!payload || typeof payload !== "object") {
+      return payload;
+    }
+    return hardCapToolOutput(payload, {
+      maxBytes: Math.max(0, Math.floor(limits.maxBytesUtf8)),
+      maxLines: Math.max(0, Math.floor(limits.maxLines)),
+    });
   }
 
   const original = payload as { content: unknown[] };

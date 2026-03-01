@@ -97,4 +97,23 @@ describe("pi tool definition adapter", () => {
     expect(result.content[0]).toMatchObject({ type: "text" });
     expect((result.content[0] as { text?: string }).text).toContain('"count"');
   });
+
+  it("bounds coerced large object results to hard output limits", async () => {
+    const tool = {
+      name: "memory_query_huge",
+      label: "Memory Query Huge",
+      description: "returns very large object",
+      parameters: Type.Object({}),
+      execute: (async () => ({
+        huge: "A".repeat(80 * 1024),
+        nested: { marker: "x" },
+      })) as unknown as AgentTool["execute"],
+    } satisfies AgentTool;
+
+    const result = await executeTool(tool, "call5");
+    const textBlock = result.content[0] as { text?: string };
+    const text = textBlock.text ?? "";
+    const textBytes = Buffer.byteLength(text, "utf8");
+    expect(textBytes).toBeLessThanOrEqual(12 * 1024);
+  });
 });
