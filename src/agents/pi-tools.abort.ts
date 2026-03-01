@@ -43,6 +43,16 @@ function combineAbortSignals(a?: AbortSignal, b?: AbortSignal): AbortSignal | un
   return controller.signal;
 }
 
+function copySymbolProperties<T extends object>(from: object, to: T): T {
+  for (const symbol of Object.getOwnPropertySymbols(from)) {
+    const descriptor = Object.getOwnPropertyDescriptor(from, symbol);
+    if (descriptor) {
+      Object.defineProperty(to, symbol, descriptor);
+    }
+  }
+  return to;
+}
+
 export function wrapToolWithAbortSignal(
   tool: AnyAgentTool,
   abortSignal?: AbortSignal,
@@ -54,7 +64,7 @@ export function wrapToolWithAbortSignal(
   if (!execute) {
     return tool;
   }
-  return {
+  return copySymbolProperties(tool, {
     ...tool,
     execute: async (toolCallId, params, signal, onUpdate) => {
       const combined = combineAbortSignals(signal, abortSignal);
@@ -63,5 +73,5 @@ export function wrapToolWithAbortSignal(
       }
       return await execute(toolCallId, params, combined, onUpdate);
     },
-  };
+  });
 }
