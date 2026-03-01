@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isLowValuePlaceholderText,
+  sanitizeLowValuePlaceholderText,
   isSilentReplyPrefixText,
   isSilentReplyText,
   stripLowValuePlaceholderPrefix,
@@ -96,5 +97,39 @@ describe("stripLowValuePlaceholderPrefix", () => {
 
   it("keeps normal text unchanged", () => {
     expect(stripLowValuePlaceholderPrefix("正常内容不含占位文本")).toBe("正常内容不含占位文本");
+  });
+
+  it("does not strip when placeholder phrase is followed by same-line substantive text", () => {
+    const input = "answer for user question about billing and invoices";
+    expect(stripLowValuePlaceholderPrefix(input)).toBe(input);
+  });
+
+  it("does not strip when placeholder phrase is followed by a single newline + content", () => {
+    const input = "answer for user question\n继续写具体内容";
+    expect(stripLowValuePlaceholderPrefix(input)).toBe(input);
+  });
+});
+
+describe("sanitizeLowValuePlaceholderText", () => {
+  it("skips low-value placeholder text without media", () => {
+    expect(sanitizeLowValuePlaceholderText("answer for user question", false)).toEqual({
+      text: undefined,
+      skip: true,
+    });
+  });
+
+  it("keeps media-only payloads when placeholder text is present", () => {
+    expect(sanitizeLowValuePlaceholderText("answer for user question", true)).toEqual({
+      text: undefined,
+      skip: false,
+    });
+  });
+
+  it("preserves substantive same-line text that starts similarly", () => {
+    const text = "answer for user question about billing";
+    expect(sanitizeLowValuePlaceholderText(text, false)).toEqual({
+      text,
+      skip: false,
+    });
   });
 });
