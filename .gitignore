@@ -96,6 +96,9 @@ USER.md
 /local/
 package-lock.json
 .claude/
+.claude/settings.local.json
+.openclaw/bugfix/
+reports/bugfix/
 .agents/
 .agents
 .agent/

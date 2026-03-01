@@ -39,6 +39,17 @@ describe("buildReplyPayloads media filter integration", () => {
     expect(replyPayloads[0]?.text).toBe("内容");
   });
 
+  it("does not strip substantive same-line text that starts with the placeholder phrase", () => {
+    const text = "answer for user question about billing details";
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe(text);
+  });
+
   it("treats punctuation-only placeholder variants as empty text", () => {
     const { replyPayloads } = buildReplyPayloads({
       ...baseParams,

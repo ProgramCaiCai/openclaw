@@ -2,9 +2,13 @@ import { escapeRegExp } from "../utils.js";
 
 export const HEARTBEAT_TOKEN = "HEARTBEAT_OK";
 export const SILENT_REPLY_TOKEN = "NO_REPLY";
-const LOW_VALUE_PLACEHOLDER_TEXT = "answer for user question";
-const LOW_VALUE_PLACEHOLDER_PREFIX =
-  /^\s*answer(?:[\p{P}\p{Z}\s]+)for(?:[\p{P}\p{Z}\s]+)user(?:[\p{P}\p{Z}\s]+)question(?=$|[\p{P}\p{Z}\s])(?:[\p{P}\p{Z}\s]*)/iu;
+// Observed low-value preamble from model outputs when generation fails to produce
+// substantive content. Keep this as an extensible list for provider/model variants.
+const LOW_VALUE_PLACEHOLDER_TEXTS = ["answer for user question"] as const;
+const LOW_VALUE_PLACEHOLDER_TEXT_SET = new Set<string>(LOW_VALUE_PLACEHOLDER_TEXTS);
+const LOW_VALUE_PLACEHOLDER_PREFIX_PATTERNS = [
+  /^\s*answer(?:[\p{P}\p{Z}\s]+)for(?:[\p{P}\p{Z}\s]+)user(?:[\p{P}\p{Z}\s]+)question(?:[\p{P}\p{Z}\t ]*)(?:(?:\r?\n){2,}|$)/iu,
+] as const;
 
 function normalizeLowValuePlaceholderText(text: string): string {
   return text
@@ -18,15 +22,39 @@ export function isLowValuePlaceholderText(text: string | undefined): boolean {
   if (!text) {
     return false;
   }
-  return normalizeLowValuePlaceholderText(text) === LOW_VALUE_PLACEHOLDER_TEXT;
+  return LOW_VALUE_PLACEHOLDER_TEXT_SET.has(normalizeLowValuePlaceholderText(text));
 }
 
 export function stripLowValuePlaceholderPrefix(text: string): string {
-  const match = LOW_VALUE_PLACEHOLDER_PREFIX.exec(text);
-  if (!match) {
-    return text;
+  for (const pattern of LOW_VALUE_PLACEHOLDER_PREFIX_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match) {
+      return text.slice(match[0].length).trim();
+    }
   }
-  return text.slice(match[0].length).trim();
+  return text;
+}
+
+export function sanitizeLowValuePlaceholderText(
+  text: string | undefined,
+  hasMedia: boolean,
+): { text: string | undefined; skip: boolean } {
+  let normalizedText = text;
+  if (normalizedText) {
+    const strippedPlaceholderPrefix = stripLowValuePlaceholderPrefix(normalizedText);
+    if (strippedPlaceholderPrefix !== normalizedText) {
+      normalizedText = strippedPlaceholderPrefix;
+    }
+  }
+
+  if (!normalizedText || isLowValuePlaceholderText(normalizedText)) {
+    if (hasMedia) {
+      return { text: undefined, skip: false };
+    }
+    return { text: undefined, skip: true };
+  }
+
+  return { text: normalizedText, skip: false };
 }
 
 const silentExactRegexByToken = new Map<string, RegExp>();
