@@ -136,6 +136,25 @@ describe("workspace path resolution", () => {
     });
   });
 
+  it("applies tighter hard-truncate limits to exec output", async () => {
+    await withTempDir("openclaw-ws-", async (workspaceDir) => {
+      const tools = createOpenClawCodingTools({
+        workspaceDir,
+        exec: { host: "gateway", ask: "off", security: "full" },
+      });
+      const execTool = tools.find((tool) => tool.name === "exec");
+      expect(execTool).toBeDefined();
+
+      const result = await execTool?.execute("ws-exec-hardcap", {
+        command: "yes line | head -n 800",
+      });
+      const output = getTextContent(result);
+      expect(output).toContain("showing head+tail preview");
+      expect(output).toContain("/tmp/openclaw/artifacts/");
+      expect((output ?? "").split("\n").length).toBeLessThanOrEqual(200);
+    });
+  });
+
   it("rejects @-prefixed absolute paths outside workspace when workspaceOnly is enabled", async () => {
     await withTempDir("openclaw-ws-", async (workspaceDir) => {
       const cfg: OpenClawConfig = { tools: { fs: { workspaceOnly: true } } };

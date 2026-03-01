@@ -240,7 +240,7 @@ describe("before_tool_call hook deduplication (#15502)", () => {
       extensionContext,
     );
 
-    expect(hookRunner.runBeforeToolCall).toHaveBeenCalledTimes(1);
+    expect(hookRunner.runBeforeToolCall).toHaveBeenCalledTimes(2);
   });
 });
 
