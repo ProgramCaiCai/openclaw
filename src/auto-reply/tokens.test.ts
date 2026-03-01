@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { isSilentReplyPrefixText, isSilentReplyText } from "./tokens.js";
+import {
+  isLowValuePlaceholderText,
+  isSilentReplyPrefixText,
+  isSilentReplyText,
+  stripLowValuePlaceholderPrefix,
+} from "./tokens.js";
 
 describe("isSilentReplyText", () => {
   it("returns true for exact token", () => {
@@ -54,5 +59,42 @@ describe("isSilentReplyPrefixText", () => {
     expect(isSilentReplyPrefixText("NO_X")).toBe(false);
     expect(isSilentReplyPrefixText("NO_REPLY more")).toBe(false);
     expect(isSilentReplyPrefixText("NO-")).toBe(false);
+  });
+});
+
+describe("isLowValuePlaceholderText", () => {
+  it("matches placeholder phrase with case/punctuation/spacing variations", () => {
+    expect(isLowValuePlaceholderText("answer for user question")).toBe(true);
+    expect(isLowValuePlaceholderText(" Answer   FOR user    question ")).toBe(true);
+    expect(isLowValuePlaceholderText("answer, for user question!!!")).toBe(true);
+  });
+
+  it("returns false for undefined/empty and substantive text", () => {
+    expect(isLowValuePlaceholderText(undefined)).toBe(false);
+    expect(isLowValuePlaceholderText("")).toBe(false);
+    expect(isLowValuePlaceholderText("answer for user question about refunds")).toBe(false);
+    expect(isLowValuePlaceholderText("Here is the answer for your question")).toBe(false);
+  });
+});
+
+describe("stripLowValuePlaceholderPrefix", () => {
+  it("returns empty for exact placeholder text", () => {
+    expect(stripLowValuePlaceholderPrefix("answer for user question")).toBe("");
+  });
+
+  it("strips placeholder prefix and keeps remaining content", () => {
+    expect(stripLowValuePlaceholderPrefix("answer for user question\n\n正常内容")).toBe("正常内容");
+  });
+
+  it("strips prefix case-insensitively", () => {
+    expect(stripLowValuePlaceholderPrefix("Answer For User Question\n\n内容")).toBe("内容");
+  });
+
+  it("strips punctuation-only placeholder variants to empty", () => {
+    expect(stripLowValuePlaceholderPrefix("answer for user question.")).toBe("");
+  });
+
+  it("keeps normal text unchanged", () => {
+    expect(stripLowValuePlaceholderPrefix("正常内容不含占位文本")).toBe("正常内容不含占位文本");
   });
 });
