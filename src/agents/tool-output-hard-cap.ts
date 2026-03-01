@@ -361,6 +361,50 @@ function capContainerSize(value: unknown, opts: { maxArray: number; maxKeys: num
   return out;
 }
 
+function hasStringThatNeedsTruncation(
+  value: unknown,
+  opts: { maxBytes: number; maxLines: number; maxDepth: number },
+): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: opts.maxDepth }];
+  const seen = new WeakSet<object>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    const input = current.value;
+    if (typeof input === "string") {
+      if (Buffer.byteLength(input, "utf8") > opts.maxBytes || countLines(input) > opts.maxLines) {
+        return true;
+      }
+      continue;
+    }
+    if (!input || typeof input !== "object") {
+      continue;
+    }
+    if (seen.has(input)) {
+      continue;
+    }
+    seen.add(input);
+    if (current.depth <= 0) {
+      continue;
+    }
+
+    const nextDepth = current.depth - 1;
+    if (Array.isArray(input)) {
+      for (const item of input) {
+        stack.push({ value: item, depth: nextDepth });
+      }
+      continue;
+    }
+    for (const item of Object.values(input as Record<string, unknown>)) {
+      stack.push({ value: item, depth: nextDepth });
+    }
+  }
+  return false;
+}
+
 export function hardCapToolOutput(
   value: unknown,
   opts?: { maxBytes?: number; maxLines?: number; maxDepth?: number },
@@ -379,7 +423,7 @@ export function hardCapToolOutput(
       if (
         typeof serializedInput === "string" &&
         Buffer.byteLength(serializedInput, "utf8") <= maxBytes &&
-        countLines(serializedInput) <= maxLines
+        !hasStringThatNeedsTruncation(value, { maxBytes, maxLines, maxDepth })
       ) {
         return value;
       }
