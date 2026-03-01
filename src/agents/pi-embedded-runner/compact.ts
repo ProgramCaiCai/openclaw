@@ -29,7 +29,7 @@ import type { ExecElevatedDefaults } from "../bash-tools.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "../bootstrap-files.js";
 import { listChannelSupportedActions, resolveChannelMessageToolHints } from "../channel-tools.js";
 import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
 import { resolveOpenClawDocsPath } from "../docs-path.js";
 import { getApiKeyForModel, resolveModelAuthMode } from "../model-auth.js";
 import { ensureOpenClawModelsJson } from "../models-config.js";
@@ -80,6 +80,7 @@ import {
   createSystemPromptOverride,
 } from "./system-prompt.js";
 import { collectAllowedToolNames } from "./tool-name-allowlist.js";
+import { installToolResultContextGuard } from "./tool-result-context-guard.js";
 import { splitSdkTools } from "./tool-split.js";
 import type { EmbeddedPiCompactResult } from "./types.js";
 import { describeUnknownError, mapThinkingLevel } from "./utils.js";
@@ -583,6 +584,13 @@ export async function compactEmbeddedPiSessionDirect(
         resourceLoader,
       });
       applySystemPromptOverrideToSession(session, systemPromptOverride());
+      const removeToolResultContextGuard = installToolResultContextGuard({
+        agent: session.agent,
+        contextWindowTokens: Math.max(
+          1,
+          Math.floor(model.contextWindow ?? model.maxTokens ?? DEFAULT_CONTEXT_TOKENS),
+        ),
+      });
 
       try {
         const prior = await sanitizeSessionHistory({
@@ -729,6 +737,7 @@ export async function compactEmbeddedPiSessionDirect(
           agent: session?.agent,
           sessionManager,
         });
+        removeToolResultContextGuard();
         session.dispose();
       }
     } finally {

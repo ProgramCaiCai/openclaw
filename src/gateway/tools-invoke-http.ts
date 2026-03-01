@@ -5,6 +5,8 @@ import {
   resolveGroupToolPolicy,
   resolveSubagentToolPolicy,
 } from "../agents/pi-tools.policy.js";
+import { resolveToolHardOutputLimits } from "../agents/tool-output-hard-limits.js";
+import { wrapToolWithHardOutputTruncate } from "../agents/tool-output-hard-truncate.js";
 import {
   applyToolPolicyPipeline,
   buildDefaultToolPolicyPipelineSteps,
@@ -298,8 +300,11 @@ export async function handleToolsInvokeHttpRequest(
   );
   const gatewayDenySet = new Set(gatewayDenyNames);
   const gatewayFiltered = subagentFiltered.filter((t) => !gatewayDenySet.has(t.name));
+  const guardedTools = gatewayFiltered.map((tool) =>
+    wrapToolWithHardOutputTruncate(tool, resolveToolHardOutputLimits(tool.name)),
+  );
 
-  const tool = gatewayFiltered.find((t) => t.name === toolName);
+  const tool = guardedTools.find((t) => t.name === toolName);
   if (!tool) {
     sendJson(res, 404, {
       ok: false,
