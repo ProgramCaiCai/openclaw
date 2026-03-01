@@ -2,7 +2,11 @@ import type { ReplyToMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { OriginatingChannelType } from "../templating.js";
-import { SILENT_REPLY_TOKEN } from "../tokens.js";
+import {
+  isLowValuePlaceholderText,
+  SILENT_REPLY_TOKEN,
+  stripLowValuePlaceholderPrefix,
+} from "../tokens.js";
 import type { ReplyPayload } from "../types.js";
 import { formatBunFetchSocketError, isBunFetchSocketError } from "./agent-runner-utils.js";
 import { createBlockReplyPayloadKey, type BlockReplyPipeline } from "./block-reply-pipeline.js";
@@ -117,24 +121,40 @@ export async function buildReplyPayloads(params: {
     ? params.payloads
     : params.payloads.flatMap((payload) => {
         let text = payload.text;
+        const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+        const toSanitizedPayload = (nextText: string | undefined): ReplyPayload[] => {
+          let normalizedText = nextText;
+          if (normalizedText) {
+            const strippedPlaceholderPrefix = stripLowValuePlaceholderPrefix(normalizedText);
+            if (strippedPlaceholderPrefix !== normalizedText) {
+              normalizedText = strippedPlaceholderPrefix;
+            }
+          }
+          if (!normalizedText || isLowValuePlaceholderText(normalizedText)) {
+            if (!hasMedia) {
+              return [];
+            }
+            return [{ ...payload, text: undefined }];
+          }
+          return [{ ...payload, text: normalizedText }];
+        };
 
         if (payload.isError && text && isBunFetchSocketError(text)) {
           text = formatBunFetchSocketError(text);
         }
 
         if (!text || !text.includes("HEARTBEAT_OK")) {
-          return [{ ...payload, text }];
+          return toSanitizedPayload(text);
         }
         const stripped = stripHeartbeatToken(text, { mode: "message" });
         if (stripped.didStrip && !didLogHeartbeatStrip) {
           didLogHeartbeatStrip = true;
           logVerbose("Stripped stray HEARTBEAT_OK token from reply");
         }
-        const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
         if (stripped.shouldSkip && !hasMedia) {
           return [];
         }
-        return [{ ...payload, text: stripped.text }];
+        return toSanitizedPayload(stripped.text);
       });
 
   const replyTaggedPayloads = (

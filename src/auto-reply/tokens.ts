@@ -2,6 +2,32 @@ import { escapeRegExp } from "../utils.js";
 
 export const HEARTBEAT_TOKEN = "HEARTBEAT_OK";
 export const SILENT_REPLY_TOKEN = "NO_REPLY";
+const LOW_VALUE_PLACEHOLDER_TEXT = "answer for user question";
+const LOW_VALUE_PLACEHOLDER_PREFIX =
+  /^\s*answer(?:[\p{P}\p{Z}\s]+)for(?:[\p{P}\p{Z}\s]+)user(?:[\p{P}\p{Z}\s]+)question(?=$|[\p{P}\p{Z}\s])(?:[\p{P}\p{Z}\s]*)/iu;
+
+function normalizeLowValuePlaceholderText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function isLowValuePlaceholderText(text: string | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+  return normalizeLowValuePlaceholderText(text) === LOW_VALUE_PLACEHOLDER_TEXT;
+}
+
+export function stripLowValuePlaceholderPrefix(text: string): string {
+  const match = LOW_VALUE_PLACEHOLDER_PREFIX.exec(text);
+  if (!match) {
+    return text;
+  }
+  return text.slice(match[0].length).trim();
+}
 
 const silentExactRegexByToken = new Map<string, RegExp>();
 const silentTrailingRegexByToken = new Map<string, RegExp>();
