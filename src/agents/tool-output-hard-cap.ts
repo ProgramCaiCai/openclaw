@@ -60,6 +60,7 @@ export function makeHardLimitSuffix(params: {
 const DEFAULT_TRUNCATION_SUFFIX = makeHardLimitSuffix({ context: "Tool output truncated" });
 
 const DEFAULT_TRUNCATION_MIDDLE_MARKER = "… [snip]";
+const TOOL_OUTPUT_HARD_WALK_MAX_DEPTH = 12;
 
 function countLines(text: string): number {
   if (!text) {
@@ -250,37 +251,43 @@ export function hardTruncateText(
     tailLines: 0,
   };
 
-  const maxIters = 8;
-  let budgetScale = 1.0;
-  let lastSuffix = resolveSuffixText(opts?.suffix, meta0);
+  const clipToLimits = (input: string): string =>
+    sliceToMaxUtf8Bytes(sliceToMaxLines(input, maxLines), maxBytes);
+  const fallbackTiny = (suffixText: string): { text: string; truncated: true } => ({
+    text: clipToLimits(suffixText),
+    truncated: true,
+  });
 
-  for (let iter = 0; iter < maxIters; iter++) {
-    const suffixTextBase = resolveSuffixText(opts?.suffix, meta0);
-
-    const reservedLines = countLines(middleMarker) + countLines(suffixTextBase);
+  const buildPreview = (
+    suffixText: string,
+  ): {
+    out: string;
+    meta: HardTruncateMeta;
+    fits: boolean;
+    tiny?: { text: string; truncated: true };
+  } => {
+    const reservedLines = countLines(middleMarker) + countLines(suffixText);
     const availableLines = Math.max(0, maxLines - reservedLines);
 
-    // Account for the join newlines between (head, middle, tail, suffix).
+    // Reserve join newlines between (head, middle, tail, suffix).
     const joinBytes = 3;
     const reservedBytes =
-      Buffer.byteLength(middleMarker, "utf8") +
-      Buffer.byteLength(suffixTextBase, "utf8") +
-      joinBytes;
+      Buffer.byteLength(middleMarker, "utf8") + Buffer.byteLength(suffixText, "utf8") + joinBytes;
     const availableBytes = Math.max(0, maxBytes - reservedBytes);
 
     if (availableBytes <= 0 || availableLines <= 0) {
-      const tiny = sliceToMaxUtf8Bytes(sliceToMaxLines(suffixTextBase, maxLines), maxBytes);
-      return { text: tiny, truncated: true };
+      return {
+        out: "",
+        meta: meta0,
+        fits: false,
+        tiny: fallbackTiny(suffixText),
+      };
     }
 
-    const linesBudget = Math.max(1, Math.floor(availableLines * budgetScale));
-    const bytesBudget = Math.max(1, Math.floor(availableBytes * budgetScale));
-
-    const headLinesBudget = Math.ceil(linesBudget / 2);
-    const tailLinesBudget = Math.max(0, linesBudget - headLinesBudget);
-
-    const headBytesBudget = Math.ceil(bytesBudget / 2);
-    const tailBytesBudget = Math.max(0, bytesBudget - headBytesBudget);
+    const headLinesBudget = Math.ceil(availableLines / 2);
+    const tailLinesBudget = Math.max(0, availableLines - headLinesBudget);
+    const headBytesBudget = Math.ceil(availableBytes / 2);
+    const tailBytesBudget = Math.max(0, availableBytes - headBytesBudget);
 
     let head = sliceToMaxLines(text, headLinesBudget);
     head = sliceToMaxUtf8Bytes(head, headBytesBudget);
@@ -295,28 +302,37 @@ export function hardTruncateText(
       tailBytes: Buffer.byteLength(tail, "utf8"),
       tailLines: countLines(tail),
     };
-
-    const suffixText = resolveSuffixText(opts?.suffix, meta);
     const out = joinNonEmpty([head, middleMarker, tail, suffixText]);
+    const fits = countLines(out) <= maxLines && Buffer.byteLength(out, "utf8") <= maxBytes;
+    return { out, meta, fits };
+  };
 
-    const outLines = countLines(out);
-    const outBytes = Buffer.byteLength(out, "utf8");
-
-    if (outLines <= maxLines && outBytes <= maxBytes) {
-      return { text: out, truncated: true };
-    }
-
-    if (suffixText !== lastSuffix) {
-      lastSuffix = suffixText;
-      continue;
-    }
-
-    budgetScale *= 0.8;
+  const suffixBase = resolveSuffixText(opts?.suffix, meta0);
+  let attempt = buildPreview(suffixBase);
+  if (attempt.tiny) {
+    return attempt.tiny;
   }
 
-  const suffixText = resolveSuffixText(opts?.suffix, meta0);
-  const tiny = sliceToMaxUtf8Bytes(sliceToMaxLines(suffixText, maxLines), maxBytes);
-  return { text: tiny, truncated: true };
+  if (typeof opts?.suffix === "function") {
+    const suffixFinal = resolveSuffixText(opts.suffix, attempt.meta);
+    if (suffixFinal !== suffixBase) {
+      attempt = buildPreview(suffixFinal);
+      if (attempt.tiny) {
+        return attempt.tiny;
+      }
+    }
+  }
+
+  if (attempt.fits) {
+    return { text: attempt.out, truncated: true };
+  }
+
+  const clipped = clipToLimits(attempt.out);
+  if (clipped) {
+    return { text: clipped, truncated: true };
+  }
+
+  return fallbackTiny(resolveSuffixText(opts?.suffix, meta0));
 }
 
 function capContainerSize(value: unknown, opts: { maxArray: number; maxKeys: number }): unknown {
@@ -345,9 +361,32 @@ function capContainerSize(value: unknown, opts: { maxArray: number; maxKeys: num
   return out;
 }
 
-export function hardCapToolOutput(value: unknown, opts?: { maxBytes?: number; maxLines?: number }) {
+export function hardCapToolOutput(
+  value: unknown,
+  opts?: { maxBytes?: number; maxLines?: number; maxDepth?: number },
+) {
   const maxBytes = opts?.maxBytes ?? TOOL_OUTPUT_HARD_MAX_BYTES;
   const maxLines = opts?.maxLines ?? TOOL_OUTPUT_HARD_MAX_LINES;
+  const maxDepth = toIntLimit(opts?.maxDepth, TOOL_OUTPUT_HARD_WALK_MAX_DEPTH);
+
+  if (typeof value === "string") {
+    return hardTruncateText(value, { maxBytes, maxLines }).text;
+  }
+
+  if (value && typeof value === "object") {
+    try {
+      const serializedInput = JSON.stringify(value);
+      if (
+        typeof serializedInput === "string" &&
+        Buffer.byteLength(serializedInput, "utf8") <= maxBytes &&
+        countLines(serializedInput) <= maxLines
+      ) {
+        return value;
+      }
+    } catch {
+      // Fall through to recursive mapping for circular/non-serializable values.
+    }
+  }
 
   const seen = new WeakMap<object, unknown>();
   const walk = (input: unknown, depth: number): unknown => {
@@ -394,7 +433,7 @@ export function hardCapToolOutput(value: unknown, opts?: { maxBytes?: number; ma
     return out;
   };
 
-  const mapped = walk(value, 6);
+  const mapped = walk(value, maxDepth);
 
   // Enforce total payload size by falling back to a capped string preview.
   try {
