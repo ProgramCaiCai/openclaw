@@ -2,11 +2,7 @@ import type { ReplyToMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { OriginatingChannelType } from "../templating.js";
-import {
-  isLowValuePlaceholderText,
-  SILENT_REPLY_TOKEN,
-  stripLowValuePlaceholderPrefix,
-} from "../tokens.js";
+import { sanitizeLowValuePlaceholderText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { ReplyPayload } from "../types.js";
 import { formatBunFetchSocketError, isBunFetchSocketError } from "./agent-runner-utils.js";
 import { createBlockReplyPayloadKey, type BlockReplyPipeline } from "./block-reply-pipeline.js";
@@ -52,20 +48,11 @@ export function buildReplyPayloads(params: {
         let text = payload.text;
         const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
         const toSanitizedPayload = (nextText: string | undefined): ReplyPayload[] => {
-          let normalizedText = nextText;
-          if (normalizedText) {
-            const strippedPlaceholderPrefix = stripLowValuePlaceholderPrefix(normalizedText);
-            if (strippedPlaceholderPrefix !== normalizedText) {
-              normalizedText = strippedPlaceholderPrefix;
-            }
+          const placeholderSanitized = sanitizeLowValuePlaceholderText(nextText, hasMedia);
+          if (placeholderSanitized.skip) {
+            return [];
           }
-          if (!normalizedText || isLowValuePlaceholderText(normalizedText)) {
-            if (!hasMedia) {
-              return [];
-            }
-            return [{ ...payload, text: undefined }];
-          }
-          return [{ ...payload, text: normalizedText }];
+          return [{ ...payload, text: placeholderSanitized.text }];
         };
 
         if (payload.isError && text && isBunFetchSocketError(text)) {

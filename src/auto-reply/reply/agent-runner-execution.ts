@@ -30,11 +30,10 @@ import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import {
   HEARTBEAT_TOKEN,
-  isLowValuePlaceholderText,
+  sanitizeLowValuePlaceholderText,
   isSilentReplyPrefixText,
   isSilentReplyText,
   SILENT_REPLY_TOKEN,
-  stripLowValuePlaceholderPrefix,
 } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
@@ -155,24 +154,11 @@ export async function runAgentTurnWithFallback(params: {
         ) {
           return { skip: true };
         }
-        if (text) {
-          const strippedPlaceholderPrefix = stripLowValuePlaceholderPrefix(text);
-          if (strippedPlaceholderPrefix !== text) {
-            if (!strippedPlaceholderPrefix) {
-              if (hasMedia) {
-                return { text: undefined, skip: false };
-              }
-              return { skip: true };
-            }
-            text = strippedPlaceholderPrefix;
-          }
-        }
-        if (isLowValuePlaceholderText(text)) {
-          if (hasMedia) {
-            return { text: undefined, skip: false };
-          }
+        const placeholderSanitized = sanitizeLowValuePlaceholderText(text, hasMedia);
+        if (placeholderSanitized.skip) {
           return { skip: true };
         }
+        text = placeholderSanitized.text;
         if (!text) {
           // Allow media-only payloads (e.g. tool result screenshots) through.
           if (hasMedia) {
