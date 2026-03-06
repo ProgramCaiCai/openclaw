@@ -202,6 +202,37 @@ describe("deliverOutboundPayloads", () => {
     });
   });
 
+  it("defaults Telegram paragraph-separated replies to multi-message chunks", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
+    const cfg: OpenClawConfig = {
+      channels: { telegram: { botToken: "tok-1", textChunkLimit: 4000 } },
+    };
+
+    await withEnvAsync({ TELEGRAM_BOT_TOKEN: "" }, async () => {
+      await deliverOutboundPayloads({
+        cfg,
+        channel: "telegram",
+        to: "123",
+        payloads: [{ text: "First paragraph\n\nSecond paragraph" }],
+        deps: { sendTelegram },
+      });
+    });
+
+    expect(sendTelegram).toHaveBeenCalledTimes(2);
+    expect(sendTelegram).toHaveBeenNthCalledWith(
+      1,
+      "123",
+      "First paragraph",
+      expect.objectContaining({ textMode: "html", verbose: false }),
+    );
+    expect(sendTelegram).toHaveBeenNthCalledWith(
+      2,
+      "123",
+      "Second paragraph",
+      expect.objectContaining({ textMode: "html", verbose: false }),
+    );
+  });
+
   it("passes explicit accountId to sendTelegram", async () => {
     const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
 
