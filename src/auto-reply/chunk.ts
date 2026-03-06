@@ -14,15 +14,16 @@ export type TextChunkProvider = ChannelId | typeof INTERNAL_MESSAGE_CHANNEL;
 
 /**
  * Chunking mode for outbound messages:
- * - "length": Split only when exceeding textChunkLimit (default)
+ * - "length": Split only when exceeding textChunkLimit (default for most providers)
  * - "newline": Prefer breaking on "soft" boundaries. Historically this split on every
  *   newline; now it only breaks on paragraph boundaries (blank lines) unless the text
- *   exceeds the length limit.
+ *   exceeds the length limit. Telegram defaults to this mode for readability.
  */
 export type ChunkMode = "length" | "newline";
 
 const DEFAULT_CHUNK_LIMIT = 4000;
 const DEFAULT_CHUNK_MODE: ChunkMode = "length";
+const TELEGRAM_DEFAULT_CHUNK_MODE: ChunkMode = "newline";
 
 type ProviderChunkConfig = {
   textChunkLimit?: number;
@@ -103,7 +104,10 @@ export function resolveChunkMode(
   const providerConfig = (channelsConfig?.[provider] ??
     (cfg as Record<string, unknown> | undefined)?.[provider]) as ProviderChunkConfig | undefined;
   const mode = resolveChunkModeForProvider(providerConfig, accountId);
-  return mode ?? DEFAULT_CHUNK_MODE;
+  if (mode) {
+    return mode;
+  }
+  return provider === "telegram" ? TELEGRAM_DEFAULT_CHUNK_MODE : DEFAULT_CHUNK_MODE;
 }
 
 /**
