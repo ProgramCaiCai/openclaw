@@ -7,6 +7,7 @@ import { resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
 import { writeFileWithinRoot } from "../infra/fs-safe.js";
+import { createSqlDataLoader, type SqlDataLoader } from "../infra/sql-dataloader.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   materializeWindowsSpawnProgram,
@@ -48,6 +49,19 @@ const QMD_EMBED_BACKOFF_BASE_MS = 60_000;
 const QMD_EMBED_BACKOFF_MAX_MS = 60 * 60 * 1000;
 const HAN_SCRIPT_RE = /[\u3400-\u9fff]/u;
 const QMD_BM25_HAN_KEYWORD_LIMIT = 12;
+const QMD_SQL_DATALOADER_MAX_KEYS_PER_BATCH = 250;
+
+function isQmdSqlDataLoaderEnabled(): boolean {
+  const raw = process.env.OPENCLAW_QMD_SQL_DATALOADER;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
 
 let qmdEmbedQueueTail: Promise<void> = Promise.resolve();
 
@@ -214,6 +228,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
   >();
   private readonly maxQmdOutputChars = MAX_QMD_OUTPUT_CHARS;
+  private readonly qmdSqlDataLoaderEnabled: boolean;
   private readonly sessionExporter: SessionExporterConfig | null;
   private updateTimer: NodeJS.Timeout | null = null;
   private pendingUpdate: Promise<void> | null = null;
@@ -257,6 +272,7 @@ export class QmdMemoryManager implements MemorySearchManager {
       XDG_CACHE_HOME: this.xdgCacheHome,
       NO_COLOR: "1",
     };
+    this.qmdSqlDataLoaderEnabled = isQmdSqlDataLoaderEnabled();
     this.sessionExporter = this.qmd.sessions.enabled
       ? {
           dir: this.qmd.sessions.exportDir ?? path.join(this.qmdDir, "sessions"),
@@ -882,13 +898,23 @@ export class QmdMemoryManager implements MemorySearchManager {
       }
       parsed = await runSearchAttempt(false);
     }
+    const lookupLoader = this.qmdSqlDataLoaderEnabled
+      ? this.createDocLocationDataLoader()
+      : undefined;
+    const locationPromises = parsed.map((entry) =>
+      this.resolveDocLocation(
+        entry.docid,
+        {
+          preferredCollection: entry.collection,
+          preferredFile: entry.file,
+        },
+        lookupLoader,
+      ),
+    );
+
     const results: MemorySearchResult[] = [];
-    for (const entry of parsed) {
-      const docHints = this.normalizeDocHints({
-        preferredCollection: entry.collection,
-        preferredFile: entry.file,
-      });
-      const doc = await this.resolveDocLocation(entry.docid, docHints);
+    for (const [index, entry] of parsed.entries()) {
+      const doc = await locationPromises[index];
       if (!doc) {
         continue;
       }
@@ -1651,6 +1677,7 @@ export class QmdMemoryManager implements MemorySearchManager {
   private async resolveDocLocation(
     docid?: string,
     hints?: { preferredCollection?: string; preferredFile?: string },
+    loader?: SqlDataLoader<string, Array<{ collection: string; path: string }>>,
   ): Promise<{ rel: string; abs: string; source: MemorySource } | null> {
     const normalizedHints = this.normalizeDocHints(hints);
     if (!docid) {
@@ -1665,24 +1692,9 @@ export class QmdMemoryManager implements MemorySearchManager {
     if (cached) {
       return cached;
     }
-    const db = this.ensureDb();
-    let rows: Array<{ collection: string; path: string }> = [];
-    try {
-      rows = db
-        .prepare("SELECT collection, path FROM documents WHERE hash = ? AND active = 1")
-        .all(normalized) as Array<{ collection: string; path: string }>;
-      if (rows.length === 0) {
-        rows = db
-          .prepare("SELECT collection, path FROM documents WHERE hash LIKE ? AND active = 1")
-          .all(`${normalized}%`) as Array<{ collection: string; path: string }>;
-      }
-    } catch (err) {
-      if (this.isSqliteBusyError(err)) {
-        log.debug(`qmd index is busy while resolving doc path: ${String(err)}`);
-        throw this.createQmdBusyError(err);
-      }
-      throw err;
-    }
+    const rows = loader
+      ? await loader.load(normalized)
+      : await this.fetchDocLookupRowsSingle(normalized);
     if (rows.length === 0) {
       return null;
     }
@@ -1772,6 +1784,97 @@ export class QmdMemoryManager implements MemorySearchManager {
       return null;
     }
     return relative.replace(/\\/g, "/");
+  }
+
+  private async fetchDocLookupRowsSingle(
+    docid: string,
+  ): Promise<Array<{ collection: string; path: string }>> {
+    const db = this.ensureDb();
+    try {
+      const exactRows = db
+        .prepare("SELECT collection, path FROM documents WHERE hash = ? AND active = 1")
+        .all(docid) as Array<{ collection: string; path: string }>;
+      if (exactRows.length > 0) {
+        return exactRows;
+      }
+      return db
+        .prepare("SELECT collection, path FROM documents WHERE hash LIKE ? AND active = 1")
+        .all(`${docid}%`) as Array<{ collection: string; path: string }>;
+    } catch (err) {
+      if (this.isSqliteBusyError(err)) {
+        log.debug(`qmd index is busy while resolving doc path: ${String(err)}`);
+        throw this.createQmdBusyError(err);
+      }
+      throw err;
+    }
+  }
+
+  private createDocLocationDataLoader(): SqlDataLoader<
+    string,
+    Array<{ collection: string; path: string }>
+  > {
+    return createSqlDataLoader(async (docids) => this.fetchDocLookupRowsBatch(docids));
+  }
+
+  private async fetchDocLookupRowsBatch(
+    docids: readonly string[],
+  ): Promise<Map<string, Array<{ collection: string; path: string }>>> {
+    const result = new Map<string, Array<{ collection: string; path: string }>>();
+    const normalizedDocids: string[] = [];
+    for (const rawDocid of docids) {
+      const normalized = rawDocid.trim();
+      if (!normalized || result.has(normalized)) {
+        continue;
+      }
+      result.set(normalized, []);
+      normalizedDocids.push(normalized);
+    }
+    if (normalizedDocids.length === 0) {
+      return result;
+    }
+
+    const db = this.ensureDb();
+    try {
+      for (
+        let index = 0;
+        index < normalizedDocids.length;
+        index += QMD_SQL_DATALOADER_MAX_KEYS_PER_BATCH
+      ) {
+        const batch = normalizedDocids.slice(index, index + QMD_SQL_DATALOADER_MAX_KEYS_PER_BATCH);
+        const placeholders = batch.map(() => "?").join(", ");
+        const rows = db
+          .prepare(
+            `SELECT hash, collection, path FROM documents WHERE active = 1 AND hash IN (${placeholders})`,
+          )
+          .all(...batch) as Array<{ hash: string; collection: string; path: string }>;
+        for (const row of rows) {
+          const byDocid = result.get(row.hash);
+          if (byDocid) {
+            byDocid.push({ collection: row.collection, path: row.path });
+          }
+        }
+      }
+      for (const docid of normalizedDocids) {
+        const exactRows = result.get(docid) ?? [];
+        if (exactRows.length > 0) {
+          continue;
+        }
+        const fallbackRows = db
+          .prepare("SELECT collection, path FROM documents WHERE hash LIKE ? AND active = 1")
+          .all(`${docid}%`) as Array<{ collection: string; path: string }>;
+        if (fallbackRows.length > 0) {
+          result.set(docid, fallbackRows);
+        }
+      }
+    } catch (err) {
+      if (this.isSqliteBusyError(err)) {
+        log.debug(`qmd index is busy while resolving doc path: ${String(err)}`);
+        throw this.createQmdBusyError(err);
+      }
+      throw err;
+    }
+
+    return result;
   }
 
   private pickDocLocation(
