@@ -155,6 +155,7 @@ describe("QmdMemoryManager", () => {
   afterEach(async () => {
     vi.useRealTimers();
     delete process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_QMD_SQL_DATALOADER;
     delete (globalThis as Record<string, unknown>).__openclawMcporterDaemonStart;
     delete (globalThis as Record<string, unknown>).__openclawMcporterColdStartWarned;
   });
@@ -2050,6 +2051,79 @@ describe("QmdMemoryManager", () => {
         await manager.close();
       }
     }
+  });
+
+  it("batches exact doc lookups with sql dataloader", async () => {
+    process.env.OPENCLAW_QMD_SQL_DATALOADER = "1";
+    const prepareCalls: string[] = [];
+
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "search") {
+        const child = createMockChild({ autoClose: false });
+        emitAndClose(
+          child,
+          "stdout",
+          JSON.stringify([
+            { docid: "doc-a", score: 0.8, snippet: "@@ -1,1\nfirst" },
+            { docid: "doc-b", score: 0.7, snippet: "@@ -2,1\nsecond" },
+          ]),
+        );
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const { manager } = await createManager();
+    const inner = manager as unknown as {
+      db: {
+        prepare: (query: string) => { all: (...args: unknown[]) => unknown };
+        close: () => void;
+      };
+    };
+    inner.db = {
+      prepare: (query: string) => {
+        prepareCalls.push(query);
+        if (query.includes("hash IN")) {
+          return {
+            all: (...args: unknown[]) => {
+              expect(args).toEqual(["doc-a", "doc-b"]);
+              return [
+                { hash: "doc-a", collection: "workspace-main", path: "notes/a.md" },
+                { hash: "doc-b", collection: "workspace-main", path: "notes/b.md" },
+              ];
+            },
+          };
+        }
+        if (query.includes("hash LIKE ?")) {
+          return { all: () => [] };
+        }
+        throw new Error(`unexpected sqlite query: ${query}`);
+      },
+      close: () => {},
+    };
+
+    const results = await manager.search("test", { sessionKey: "agent:main:slack:dm:u123" });
+    expect(results).toEqual([
+      {
+        path: "notes/a.md",
+        startLine: 1,
+        endLine: 1,
+        score: 0.8,
+        snippet: "@@ -1,1\nfirst",
+        source: "memory",
+      },
+      {
+        path: "notes/b.md",
+        startLine: 2,
+        endLine: 2,
+        score: 0.7,
+        snippet: "@@ -2,1\nsecond",
+        source: "memory",
+      },
+    ]);
+    expect(prepareCalls.filter((query) => query.includes("hash IN"))).toHaveLength(1);
+    expect(prepareCalls.filter((query) => query.includes("hash LIKE ?"))).toHaveLength(0);
+    await manager.close();
   });
 
   it("prefers exact docid match before prefix fallback for qmd document lookups", async () => {
