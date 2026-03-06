@@ -1492,4 +1492,87 @@ describe("runReplyAgent transient HTTP retry", () => {
     const payload = Array.isArray(result) ? result[0] : result;
     expect(payload?.text).toContain("Recovered response");
   });
+
+  it("retries once when model fallback surfaces transient HTTP summary text", async () => {
+    vi.useFakeTimers();
+    runWithModelFallbackMock
+      .mockRejectedValueOnce(
+        new Error(
+          "All models failed (2): anthropic/claude: 502 Bad Gateway | openai/gpt-5: 503 Service Unavailable",
+        ),
+      )
+      .mockResolvedValueOnce({
+        result: {
+          payloads: [{ text: "Recovered after fallback summary" }],
+          meta: {},
+        },
+        provider: "anthropic",
+        model: "claude",
+        attempts: [],
+      });
+
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "telegram",
+      MessageSid: "msg",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "interrupt" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "hello",
+      summaryLine: "hello",
+      enqueuedAt: Date.now(),
+      run: {
+        sessionId: "session",
+        sessionKey: "main",
+        messageProvider: "telegram",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "anthropic",
+        model: "claude",
+        thinkLevel: "low",
+        verboseLevel: "off",
+        elevatedLevel: "off",
+        bashElevated: {
+          enabled: false,
+          allowed: false,
+          defaultLevel: "off",
+        },
+        timeoutMs: 1_000,
+        blockReplyBreak: "message_end",
+      },
+    } as unknown as FollowupRun;
+
+    const runPromise = runReplyAgent({
+      commandBody: "hello",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      defaultModel: "anthropic/claude-opus-4-5",
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    const result = await runPromise;
+
+    expect(runWithModelFallbackMock).toHaveBeenCalledTimes(2);
+    expect(runtimeErrorMock).toHaveBeenCalledWith(
+      expect.stringContaining("Transient HTTP provider error before reply"),
+    );
+
+    const payload = Array.isArray(result) ? result[0] : result;
+    expect(payload?.text).toContain("Recovered after fallback summary");
+  });
 });
