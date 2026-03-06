@@ -237,7 +237,7 @@ export function createFollowupRunner(params: {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
-        return;
+        throw err;
       }
 
       const usage = runResult.meta?.agentMeta?.usage;

@@ -436,6 +436,7 @@ export function createOpenAIWebSocketStreamFn(
 ): StreamFn {
   return (model, context, options) => {
     const eventStream = createAssistantMessageEventStream();
+    let partialText = "";
 
     const run = async () => {
       const transport = resolveWsTransport(options);
@@ -689,6 +690,7 @@ export function createOpenAIWebSocketStreamFn(
             reject(new Error(`OpenAI WebSocket error: ${event.message} (code=${event.code})`));
           } else if (event.type === "response.output_text.delta") {
             // Stream partial text updates for responsive UI
+            partialText += event.delta;
             const partialMsg: AssistantMessage = buildAssistantMessageWithZeroUsage({
               model,
               content: [{ type: "text", text: event.delta }],
@@ -709,13 +711,19 @@ export function createOpenAIWebSocketStreamFn(
       run().catch((err) => {
         const errorMessage = err instanceof Error ? err.message : String(err);
         log.warn(`[ws-stream] session=${sessionId} run error: ${errorMessage}`);
+        const streamError = buildStreamErrorAssistantMessage({ model, errorMessage });
         eventStream.push({
           type: "error",
           reason: "error",
-          error: buildStreamErrorAssistantMessage({
-            model,
-            errorMessage,
-          }),
+          error: partialText
+            ? {
+                ...streamError,
+                role: "assistant" as const,
+                stopReason: "error" as StopReason,
+                errorMessage,
+                content: [{ type: "text", text: partialText }] satisfies TextContent[],
+              }
+            : streamError,
         });
         eventStream.end();
       }),

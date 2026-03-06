@@ -441,6 +441,11 @@ describe("isTransientHttpError", () => {
     expect(isTransientHttpError("504 Gateway Timeout")).toBe(true);
     expect(isTransientHttpError("521 <!DOCTYPE html><html></html>")).toBe(true);
     expect(isTransientHttpError("529 Overloaded")).toBe(true);
+    expect(
+      isTransientHttpError(
+        "All models failed (2): anthropic/claude: 502 Bad Gateway | openai/gpt-5: 503 Service Unavailable",
+      ),
+    ).toBe(true);
   });
 
   it("returns false for non-retryable or non-http text", () => {
