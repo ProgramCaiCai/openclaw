@@ -45,6 +45,9 @@ export type GatewayClientOptions = {
   url?: string; // ws://127.0.0.1:18789
   connectDelayMs?: number;
   tickWatchMinIntervalMs?: number;
+  reconnectJitterEnabled?: boolean;
+  reconnectJitterRatio?: number;
+  reconnectJitterRandom?: () => number;
   token?: string;
   deviceToken?: string;
   password?: string;
@@ -83,6 +86,32 @@ export function describeGatewayCloseCode(code: number): string | undefined {
   return GATEWAY_CLOSE_CODE_HINTS[code];
 }
 
+function resolveReconnectJitterEnabled(explicit: boolean | undefined): boolean {
+  if (typeof explicit === "boolean") {
+    return explicit;
+  }
+  const raw = process.env.OPENCLAW_GATEWAY_WS_JITTER_RECONNECT;
+  if (typeof raw !== "string") {
+    return true;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function resolveReconnectJitterRatio(explicit: number | undefined): number {
+  const candidate =
+    typeof explicit === "number" && Number.isFinite(explicit)
+      ? explicit
+      : Number.parseFloat(process.env.OPENCLAW_GATEWAY_WS_JITTER_RATIO ?? "");
+  if (!Number.isFinite(candidate)) {
+    return 0.25;
+  }
+  return Math.max(0, Math.min(0.9, candidate));
+}
+
 export class GatewayClient {
   private ws: WebSocket | null = null;
   private opts: GatewayClientOptions;
@@ -97,12 +126,18 @@ export class GatewayClient {
   private lastTick: number | null = null;
   private tickIntervalMs = 30_000;
   private tickTimer: NodeJS.Timeout | null = null;
+  private readonly reconnectJitterEnabled: boolean;
+  private readonly reconnectJitterRatio: number;
+  private readonly reconnectJitterRandom: () => number;
 
   constructor(opts: GatewayClientOptions) {
     this.opts = {
       ...opts,
       deviceIdentity: opts.deviceIdentity ?? loadOrCreateDeviceIdentity(),
     };
+    this.reconnectJitterEnabled = resolveReconnectJitterEnabled(opts.reconnectJitterEnabled);
+    this.reconnectJitterRatio = resolveReconnectJitterRatio(opts.reconnectJitterRatio);
+    this.reconnectJitterRandom = opts.reconnectJitterRandom ?? Math.random;
   }
 
   start() {
@@ -438,9 +473,22 @@ export class GatewayClient {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
-    const delay = this.backoffMs;
+    const baseDelay = this.backoffMs;
+    const delay = this.computeReconnectDelay(baseDelay);
     this.backoffMs = Math.min(this.backoffMs * 2, 30_000);
     setTimeout(() => this.start(), delay).unref();
+  }
+
+  private computeReconnectDelay(baseDelayMs: number): number {
+    if (!this.reconnectJitterEnabled || this.reconnectJitterRatio <= 0) {
+      return baseDelayMs;
+    }
+    const spread = baseDelayMs * this.reconnectJitterRatio;
+    const minDelay = Math.max(1, Math.floor(baseDelayMs - spread));
+    const maxDelay = Math.max(minDelay, Math.ceil(baseDelayMs + spread));
+    const sample = this.reconnectJitterRandom();
+    const normalizedSample = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0.5;
+    return Math.round(minDelay + (maxDelay - minDelay) * normalizedSample);
   }
 
   private flushPendingErrors(err: Error) {

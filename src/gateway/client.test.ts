@@ -349,6 +349,68 @@ describe("GatewayClient close handling", () => {
   });
 });
 
+describe("GatewayClient reconnect jitter", () => {
+  beforeEach(() => {
+    wsInstances.length = 0;
+  });
+
+  it("adds jitter to reconnect delay when enabled", () => {
+    const onClose = vi.fn();
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+    ) => {
+      void handler;
+      const timer = {
+        unref: vi.fn(),
+      };
+      (timer as unknown as { __timeout?: number }).__timeout = Number(timeout ?? 0);
+      return timer as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout);
+
+    const client = new GatewayClient({
+      url: "ws://127.0.0.1:18789",
+      reconnectJitterEnabled: true,
+      reconnectJitterRatio: 0.5,
+      reconnectJitterRandom: () => 0,
+      onClose,
+    });
+
+    client.start();
+    getLatestWs().emitClose(1006, "drop");
+
+    expect(timeoutSpy).toHaveBeenCalled();
+    expect(Number(timeoutSpy.mock.calls.at(-1)?.[1])).toBe(500);
+    timeoutSpy.mockRestore();
+    client.stop();
+  });
+
+  it("keeps deterministic reconnect delay when jitter is disabled", () => {
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+    ) => {
+      void handler;
+      return {
+        unref: vi.fn(),
+        __timeout: Number(timeout ?? 0),
+      } as unknown as NodeJS.Timeout;
+    }) as unknown as typeof setTimeout);
+
+    const client = new GatewayClient({
+      url: "ws://127.0.0.1:18789",
+      reconnectJitterEnabled: false,
+    });
+
+    client.start();
+    getLatestWs().emitClose(1006, "drop");
+
+    expect(Number(timeoutSpy.mock.calls.at(-1)?.[1])).toBe(1000);
+    timeoutSpy.mockRestore();
+    client.stop();
+  });
+});
+
 describe("GatewayClient connect auth payload", () => {
   beforeEach(() => {
     wsInstances.length = 0;
