@@ -271,7 +271,9 @@ export async function runCronIsolatedAgentTurn(params: {
       catalog: await loadCatalog(),
       raw: subagentModelRaw,
       defaultProvider: resolvedDefault.provider,
-      defaultModel: resolvedDefault.model,
+      // Treat configured subagents.model as the default so cron matches
+      // sessions_spawn/model-selection behavior even when it is not allowlisted.
+      defaultModel: subagentModelRaw,
     });
     if (!("error" in resolvedSubagent)) {
       provider = resolvedSubagent.ref.provider;
