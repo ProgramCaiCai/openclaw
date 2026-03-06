@@ -1,16 +1,25 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { listAgentIds, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { listChannelPlugins } from "../channels/plugins/index.js";
 import type { ChannelId } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
-import { readJsonBodyWithLimit, requestBodyErrorToText } from "../infra/http-body.js";
+import {
+  isRequestBodyLimitError,
+  readRequestBodyWithLimit,
+  requestBodyErrorToText,
+} from "../infra/http-body.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 import { type HookMappingResolved, resolveHookMappings } from "./hooks-mapping.js";
 
 const DEFAULT_HOOKS_PATH = "/hooks";
 const DEFAULT_HOOKS_MAX_BODY_BYTES = 256 * 1024;
+const DEFAULT_HOOKS_IDEMPOTENCY_TTL_MS = 5 * 60_000;
+const DEFAULT_HOOKS_IDEMPOTENCY_MAX_ENTRIES = 2048;
+const DEFAULT_HOOKS_SIGNATURE_HEADER = "x-openclaw-signature";
+const DEFAULT_HOOKS_SIGNATURE_TIMESTAMP_HEADER = "x-openclaw-timestamp";
+const DEFAULT_HOOKS_SIGNATURE_MAX_AGE_SECONDS = 5 * 60;
 
 export type HooksConfigResolved = {
   basePath: string;
@@ -31,6 +40,26 @@ export type HookSessionPolicyResolved = {
   defaultSessionKey?: string;
   allowRequestSessionKey: boolean;
   allowedSessionKeyPrefixes?: string[];
+};
+
+export type HookIdempotencyRuntimeConfig = {
+  enabled: boolean;
+  ttlMs: number;
+  maxEntries: number;
+};
+
+export type HookSignatureRuntimeConfig = {
+  enabled: boolean;
+  secret: string;
+  header: string;
+  timestampHeader: string;
+  maxAgeSeconds: number;
+  shadowMode: boolean;
+};
+
+export type HooksRuntimeSecurityConfig = {
+  idempotency: HookIdempotencyRuntimeConfig;
+  signature: HookSignatureRuntimeConfig;
 };
 
 export function resolveHooksConfig(cfg: OpenClawConfig): HooksConfigResolved | null {
@@ -177,21 +206,30 @@ export function extractHookToken(req: IncomingMessage): string | undefined {
 export async function readJsonBody(
   req: IncomingMessage,
   maxBytes: number,
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
-  const result = await readJsonBodyWithLimit(req, { maxBytes, emptyObjectOnEmpty: true });
-  if (result.ok) {
-    return result;
+): Promise<{ ok: true; value: unknown; rawBody: string } | { ok: false; error: string }> {
+  try {
+    const rawBody = await readRequestBodyWithLimit(req, { maxBytes });
+    const trimmed = rawBody.trim();
+    if (!trimmed) {
+      return { ok: true, value: {}, rawBody };
+    }
+    try {
+      return { ok: true, value: JSON.parse(trimmed) as unknown, rawBody };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  } catch (err) {
+    if (isRequestBodyLimitError(err, "PAYLOAD_TOO_LARGE")) {
+      return { ok: false, error: "payload too large" };
+    }
+    if (isRequestBodyLimitError(err, "REQUEST_BODY_TIMEOUT")) {
+      return { ok: false, error: "request body timeout" };
+    }
+    if (isRequestBodyLimitError(err, "CONNECTION_CLOSED")) {
+      return { ok: false, error: requestBodyErrorToText("CONNECTION_CLOSED") };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  if (result.code === "PAYLOAD_TOO_LARGE") {
-    return { ok: false, error: "payload too large" };
-  }
-  if (result.code === "REQUEST_BODY_TIMEOUT") {
-    return { ok: false, error: "request body timeout" };
-  }
-  if (result.code === "CONNECTION_CLOSED") {
-    return { ok: false, error: requestBodyErrorToText("CONNECTION_CLOSED") };
-  }
-  return { ok: false, error: result.error };
 }
 
 export function normalizeHookHeaders(req: IncomingMessage) {
@@ -406,4 +444,139 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
       timeoutSeconds,
     },
   };
+}
+
+function parseBooleanEnv(raw: string | undefined, defaultValue: boolean): boolean {
+  if (raw === undefined) {
+    return defaultValue;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+export function resolveHooksRuntimeSecurityConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): HooksRuntimeSecurityConfig {
+  const idempotencyEnabled = parseBooleanEnv(env.OPENCLAW_HOOKS_IDEMPOTENCY_ENABLED, false);
+  const signatureEnabled = parseBooleanEnv(env.OPENCLAW_HOOKS_SIGNATURE_ENABLED, false);
+  const signatureHeaderRaw =
+    typeof env.OPENCLAW_HOOKS_SIGNATURE_HEADER === "string"
+      ? env.OPENCLAW_HOOKS_SIGNATURE_HEADER
+      : undefined;
+  const timestampHeaderRaw =
+    typeof env.OPENCLAW_HOOKS_SIGNATURE_TIMESTAMP_HEADER === "string"
+      ? env.OPENCLAW_HOOKS_SIGNATURE_TIMESTAMP_HEADER
+      : undefined;
+
+  return {
+    idempotency: {
+      enabled: idempotencyEnabled,
+      ttlMs: parsePositiveIntEnv(
+        env.OPENCLAW_HOOKS_IDEMPOTENCY_TTL_MS,
+        DEFAULT_HOOKS_IDEMPOTENCY_TTL_MS,
+      ),
+      maxEntries: parsePositiveIntEnv(
+        env.OPENCLAW_HOOKS_IDEMPOTENCY_MAX_ENTRIES,
+        DEFAULT_HOOKS_IDEMPOTENCY_MAX_ENTRIES,
+      ),
+    },
+    signature: {
+      enabled: signatureEnabled,
+      secret: (env.OPENCLAW_HOOKS_SIGNATURE_SECRET ?? "").trim(),
+      header: (signatureHeaderRaw?.trim() || DEFAULT_HOOKS_SIGNATURE_HEADER).toLowerCase(),
+      timestampHeader: (
+        timestampHeaderRaw?.trim() || DEFAULT_HOOKS_SIGNATURE_TIMESTAMP_HEADER
+      ).toLowerCase(),
+      maxAgeSeconds: parsePositiveIntEnv(
+        env.OPENCLAW_HOOKS_SIGNATURE_MAX_AGE_SECONDS,
+        DEFAULT_HOOKS_SIGNATURE_MAX_AGE_SECONDS,
+      ),
+      shadowMode: parseBooleanEnv(env.OPENCLAW_HOOKS_SIGNATURE_SHADOW_MODE, false),
+    },
+  };
+}
+
+export function extractHookIdempotencyKey(req: IncomingMessage): string | undefined {
+  const rawHeader = req.headers["idempotency-key"] ?? req.headers["x-idempotency-key"];
+  const value = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 200) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function normalizeHookSignature(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.toLowerCase().startsWith("sha256=")) {
+    return trimmed.slice(7).trim();
+  }
+  return trimmed;
+}
+
+export function verifyHookSignature(params: {
+  headers: Record<string, string>;
+  rawBody: string;
+  signature: HookSignatureRuntimeConfig;
+  nowMs?: number;
+}): { ok: true } | { ok: false; error: string } {
+  const { signature } = params;
+  if (!signature.enabled) {
+    return { ok: true };
+  }
+  if (!signature.secret) {
+    return { ok: false, error: "hook signature secret is not configured" };
+  }
+
+  const providedSignature = normalizeHookSignature(params.headers[signature.header] ?? "");
+  if (!providedSignature) {
+    return { ok: false, error: "hook signature missing" };
+  }
+
+  const timestamp = (params.headers[signature.timestampHeader] ?? "").trim();
+  if (!timestamp) {
+    return { ok: false, error: "hook signature timestamp missing" };
+  }
+  const timestampSeconds = Number.parseInt(timestamp, 10);
+  if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+    return { ok: false, error: "hook signature timestamp invalid" };
+  }
+
+  const nowSeconds = Math.floor((params.nowMs ?? Date.now()) / 1000);
+  if (Math.abs(nowSeconds - timestampSeconds) > signature.maxAgeSeconds) {
+    return { ok: false, error: "hook signature timestamp expired" };
+  }
+
+  const expected = createHmac("sha256", signature.secret)
+    .update(`${timestamp}.${params.rawBody}`)
+    .digest("hex");
+  const providedBuffer = Buffer.from(providedSignature, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return { ok: false, error: "hook signature mismatch" };
+  }
+  if (!timingSafeEqual(providedBuffer, expectedBuffer)) {
+    return { ok: false, error: "hook signature mismatch" };
+  }
+  return { ok: true };
 }

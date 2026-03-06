@@ -29,6 +29,7 @@ import {
 } from "./control-ui.js";
 import { applyHookMappings } from "./hooks-mapping.js";
 import {
+  extractHookIdempotencyKey,
   extractHookToken,
   getHookAgentPolicyError,
   getHookChannelError,
@@ -40,10 +41,12 @@ import {
   normalizeWakePayload,
   readJsonBody,
   normalizeHookDispatchSessionKey,
+  resolveHooksRuntimeSecurityConfig,
   resolveHookSessionKey,
   resolveHookTargetAgentId,
   resolveHookChannel,
   resolveHookDeliver,
+  verifyHookSignature,
 } from "./hooks.js";
 import { sendGatewayAuthFailure, setDefaultSecurityHeaders } from "./http-common.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
@@ -66,6 +69,43 @@ type HookDispatchers = {
   dispatchWakeHook: (value: { text: string; mode: "now" | "next-heartbeat" }) => void;
   dispatchAgentHook: (value: HookAgentDispatchPayload) => string;
 };
+
+type HookIdempotencyEntry =
+  | {
+      state: "in_flight";
+      expiresAt: number;
+    }
+  | {
+      state: "done";
+      expiresAt: number;
+      response: {
+        status: number;
+        body?: unknown;
+      };
+    };
+
+function pruneHookIdempotencyStore(
+  store: Map<string, HookIdempotencyEntry>,
+  nowMs: number,
+  maxEntries: number,
+) {
+  for (const [key, entry] of store.entries()) {
+    if (entry.expiresAt <= nowMs) {
+      store.delete(key);
+    }
+  }
+  if (store.size <= maxEntries) {
+    return;
+  }
+  const sorted = [...store.entries()].toSorted((a, b) => a[1].expiresAt - b[1].expiresAt);
+  const toDelete = Math.max(0, store.size - maxEntries);
+  for (let index = 0; index < toDelete; index += 1) {
+    const key = sorted[index]?.[0];
+    if (key) {
+      store.delete(key);
+    }
+  }
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -158,6 +198,8 @@ export function createHooksRequestHandler(
     // Handler lifetimes are tied to gateway runtime/tests; skip background timer fanout.
     pruneIntervalMs: 0,
   });
+  const runtimeSecurity = resolveHooksRuntimeSecurityConfig();
+  const hookIdempotencyStore = new Map<string, HookIdempotencyEntry>();
 
   const resolveHookClientKey = (req: IncomingMessage): string => {
     return normalizeRateLimitClientIp(req.socket?.remoteAddress);
@@ -222,8 +264,70 @@ export function createHooksRequestHandler(
       return true;
     }
 
+    const nowMs = Date.now();
+    const idempotencyKey = runtimeSecurity.idempotency.enabled
+      ? extractHookIdempotencyKey(req)
+      : undefined;
+    const scopedIdempotencyKey = idempotencyKey ? `${subPath}:${idempotencyKey}` : undefined;
+
+    const abortIdempotency = () => {
+      if (!scopedIdempotencyKey) {
+        return;
+      }
+      const current = hookIdempotencyStore.get(scopedIdempotencyKey);
+      if (current?.state === "in_flight") {
+        hookIdempotencyStore.delete(scopedIdempotencyKey);
+      }
+    };
+
+    const commitIdempotency = (status: number, body?: unknown) => {
+      if (!scopedIdempotencyKey) {
+        return;
+      }
+      hookIdempotencyStore.set(scopedIdempotencyKey, {
+        state: "done",
+        expiresAt: Date.now() + runtimeSecurity.idempotency.ttlMs,
+        response: {
+          status,
+          ...(body === undefined ? {} : { body }),
+        },
+      });
+    };
+
+    if (scopedIdempotencyKey) {
+      pruneHookIdempotencyStore(
+        hookIdempotencyStore,
+        nowMs,
+        runtimeSecurity.idempotency.maxEntries,
+      );
+      const existing = hookIdempotencyStore.get(scopedIdempotencyKey);
+      if (existing && existing.expiresAt > nowMs) {
+        if (existing.state === "in_flight") {
+          sendJson(res, 409, {
+            ok: false,
+            error: "duplicate request in flight",
+            idempotencyStatus: "in_flight",
+          });
+          return true;
+        }
+        res.setHeader("X-Idempotency-Replayed", "true");
+        if (existing.response.body === undefined) {
+          res.statusCode = existing.response.status;
+          res.end();
+          return true;
+        }
+        sendJson(res, existing.response.status, existing.response.body);
+        return true;
+      }
+      hookIdempotencyStore.set(scopedIdempotencyKey, {
+        state: "in_flight",
+        expiresAt: nowMs + runtimeSecurity.idempotency.ttlMs,
+      });
+    }
+
     const body = await readJsonBody(req, hooksConfig.maxBodyBytes);
     if (!body.ok) {
+      abortIdempotency();
       const status =
         body.error === "payload too large"
           ? 413
@@ -237,24 +341,45 @@ export function createHooksRequestHandler(
     const payload = typeof body.value === "object" && body.value !== null ? body.value : {};
     const headers = normalizeHookHeaders(req);
 
+    const signatureCheck = verifyHookSignature({
+      headers,
+      rawBody: body.rawBody,
+      signature: runtimeSecurity.signature,
+    });
+    if (!signatureCheck.ok) {
+      if (runtimeSecurity.signature.shadowMode) {
+        logHooks.warn(`hook signature check failed in shadow mode: ${signatureCheck.error}`);
+        res.setHeader("X-OpenClaw-Signature-Shadow", "fail");
+      } else {
+        abortIdempotency();
+        sendJson(res, 401, { ok: false, error: signatureCheck.error });
+        return true;
+      }
+    }
+
     if (subPath === "wake") {
       const normalized = normalizeWakePayload(payload as Record<string, unknown>);
       if (!normalized.ok) {
+        abortIdempotency();
         sendJson(res, 400, { ok: false, error: normalized.error });
         return true;
       }
       dispatchWakeHook(normalized.value);
-      sendJson(res, 200, { ok: true, mode: normalized.value.mode });
+      const response = { ok: true, mode: normalized.value.mode };
+      commitIdempotency(200, response);
+      sendJson(res, 200, response);
       return true;
     }
 
     if (subPath === "agent") {
       const normalized = normalizeAgentPayload(payload as Record<string, unknown>);
       if (!normalized.ok) {
+        abortIdempotency();
         sendJson(res, 400, { ok: false, error: normalized.error });
         return true;
       }
       if (!isHookAgentAllowed(hooksConfig, normalized.value.agentId)) {
+        abortIdempotency();
         sendJson(res, 400, { ok: false, error: getHookAgentPolicyError() });
         return true;
       }
@@ -264,6 +389,7 @@ export function createHooksRequestHandler(
         sessionKey: normalized.value.sessionKey,
       });
       if (!sessionKey.ok) {
+        abortIdempotency();
         sendJson(res, 400, { ok: false, error: sessionKey.error });
         return true;
       }
@@ -276,7 +402,9 @@ export function createHooksRequestHandler(
         }),
         agentId: targetAgentId,
       });
-      sendJson(res, 202, { ok: true, runId });
+      const response = { ok: true, runId };
+      commitIdempotency(202, response);
+      sendJson(res, 202, response);
       return true;
     }
 
@@ -290,10 +418,12 @@ export function createHooksRequestHandler(
         });
         if (mapped) {
           if (!mapped.ok) {
+            abortIdempotency();
             sendJson(res, 400, { ok: false, error: mapped.error });
             return true;
           }
           if (mapped.action === null) {
+            commitIdempotency(204);
             res.statusCode = 204;
             res.end();
             return true;
@@ -303,15 +433,19 @@ export function createHooksRequestHandler(
               text: mapped.action.text,
               mode: mapped.action.mode,
             });
-            sendJson(res, 200, { ok: true, mode: mapped.action.mode });
+            const response = { ok: true, mode: mapped.action.mode };
+            commitIdempotency(200, response);
+            sendJson(res, 200, response);
             return true;
           }
           const channel = resolveHookChannel(mapped.action.channel);
           if (!channel) {
+            abortIdempotency();
             sendJson(res, 400, { ok: false, error: getHookChannelError() });
             return true;
           }
           if (!isHookAgentAllowed(hooksConfig, mapped.action.agentId)) {
+            abortIdempotency();
             sendJson(res, 400, { ok: false, error: getHookAgentPolicyError() });
             return true;
           }
@@ -321,6 +455,7 @@ export function createHooksRequestHandler(
             sessionKey: mapped.action.sessionKey,
           });
           if (!sessionKey.ok) {
+            abortIdempotency();
             sendJson(res, 400, { ok: false, error: sessionKey.error });
             return true;
           }
@@ -342,16 +477,20 @@ export function createHooksRequestHandler(
             timeoutSeconds: mapped.action.timeoutSeconds,
             allowUnsafeExternalContent: mapped.action.allowUnsafeExternalContent,
           });
-          sendJson(res, 202, { ok: true, runId });
+          const response = { ok: true, runId };
+          commitIdempotency(202, response);
+          sendJson(res, 202, response);
           return true;
         }
       } catch (err) {
+        abortIdempotency();
         logHooks.warn(`hook mapping failed: ${String(err)}`);
         sendJson(res, 500, { ok: false, error: "hook mapping failed" });
         return true;
       }
     }
 
+    abortIdempotency();
     res.statusCode = 404;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.end("Not Found");

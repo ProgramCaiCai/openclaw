@@ -42,6 +42,7 @@ function createRequest(params?: {
   authorization?: string;
   remoteAddress?: string;
   url?: string;
+  headers?: Record<string, string>;
 }): IncomingMessage {
   return {
     method: "POST",
@@ -49,6 +50,7 @@ function createRequest(params?: {
     headers: {
       host: "127.0.0.1:18789",
       authorization: params?.authorization ?? "Bearer hook-secret",
+      ...(params?.headers ?? {}),
     },
     socket: { remoteAddress: params?.remoteAddress ?? "127.0.0.1" },
   } as IncomingMessage;
@@ -97,6 +99,10 @@ function createHandler(params?: {
 describe("createHooksRequestHandler timeout status mapping", () => {
   beforeEach(() => {
     readJsonBodyMock.mockClear();
+    delete process.env.OPENCLAW_HOOKS_IDEMPOTENCY_ENABLED;
+    delete process.env.OPENCLAW_HOOKS_SIGNATURE_ENABLED;
+    delete process.env.OPENCLAW_HOOKS_SIGNATURE_SECRET;
+    delete process.env.OPENCLAW_HOOKS_SIGNATURE_SHADOW_MODE;
   });
 
   test("returns 408 for request body timeout", async () => {
@@ -155,4 +161,59 @@ describe("createHooksRequestHandler timeout status mapping", () => {
       expect(end).not.toHaveBeenCalled();
     },
   );
+
+  test("replays successful responses for duplicate idempotency keys", async () => {
+    process.env.OPENCLAW_HOOKS_IDEMPOTENCY_ENABLED = "1";
+    const dispatchAgentHook = vi.fn(() => "run-42");
+    readJsonBodyMock.mockResolvedValue({
+      ok: true,
+      value: { message: "test" },
+      rawBody: JSON.stringify({ message: "test" }),
+    });
+    const handler = createHandler({ dispatchAgentHook });
+
+    const requestHeaders = { "idempotency-key": "idem-42" };
+    const req1 = createRequest({ url: "/hooks/agent", headers: requestHeaders });
+    const first = createResponse();
+    const handledFirst = await handler(req1, first.res);
+    expect(handledFirst).toBe(true);
+    expect(first.res.statusCode).toBe(202);
+
+    const req2 = createRequest({ url: "/hooks/agent", headers: requestHeaders });
+    const replay = createResponse();
+    const handledReplay = await handler(req2, replay.res);
+    expect(handledReplay).toBe(true);
+    expect(replay.res.statusCode).toBe(202);
+    expect(replay.setHeader).toHaveBeenCalledWith("X-Idempotency-Replayed", "true");
+    expect(dispatchAgentHook).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects hooks with invalid signatures when verification is enabled", async () => {
+    process.env.OPENCLAW_HOOKS_SIGNATURE_ENABLED = "1";
+    process.env.OPENCLAW_HOOKS_SIGNATURE_SECRET = "test-secret";
+    readJsonBodyMock.mockResolvedValue({
+      ok: true,
+      value: { text: "Ping" },
+      rawBody: JSON.stringify({ text: "Ping" }),
+    });
+    const dispatchWakeHook = vi.fn();
+    const handler = createHandler({ dispatchWakeHook });
+
+    const req = createRequest({
+      headers: {
+        "x-openclaw-timestamp": String(Math.floor(Date.now() / 1000)),
+        "x-openclaw-signature": "sha256=invalid",
+      },
+    });
+    const { res, end } = createResponse();
+
+    const handled = await handler(req, res);
+
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(401);
+    expect(end).toHaveBeenCalledWith(
+      JSON.stringify({ ok: false, error: "hook signature mismatch" }),
+    );
+    expect(dispatchWakeHook).not.toHaveBeenCalled();
+  });
 });
