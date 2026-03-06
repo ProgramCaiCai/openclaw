@@ -110,7 +110,6 @@ describe("runCronIsolatedAgentTurn: subagent model resolution (#11461)", () => {
     await withTempHome(async (home) => {
       const storePath = await writeSessionStore(home);
       mockEmbeddedAgent();
-
       await runCronIsolatedAgentTurn({
         cfg: makeCfg(home, storePath, {
           agents: {
@@ -131,6 +130,37 @@ describe("runCronIsolatedAgentTurn: subagent model resolution (#11461)", () => {
       const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0];
       expect(call?.provider).toBe("ollama");
       expect(call?.model).toBe("llama3.2:3b");
+    });
+  });
+
+  it("treats configured subagents.model as the cron default even when missing from the allowlist", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      mockEmbeddedAgent();
+
+      await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath, {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-sonnet-4-5",
+              workspace: path.join(home, "openclaw"),
+              models: {
+                "anthropic/claude-sonnet-4-5": { alias: "default" },
+              },
+              subagents: { model: "synthetic/hf:moonshotai/Kimi-K2.5" },
+            },
+          },
+        }),
+        deps: makeDeps(),
+        job: makeJob(),
+        message: "do work",
+        sessionKey: "cron:job-sub",
+        lane: "cron",
+      });
+
+      const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0];
+      expect(call?.provider).toBe("synthetic");
+      expect(call?.model).toBe("hf:moonshotai/Kimi-K2.5");
     });
   });
 
