@@ -404,7 +404,7 @@ describe("resolveChunkMode", () => {
       },
     };
     const cases = [
-      { cfg: undefined, provider: "telegram", accountId: undefined, expected: "length" },
+      { cfg: undefined, provider: "telegram", accountId: undefined, expected: "newline" },
       { cfg: {}, provider: "discord", accountId: undefined, expected: "length" },
       { cfg: undefined, provider: "bluebubbles", accountId: undefined, expected: "length" },
       { cfg: providerCfg, provider: "__internal__", accountId: undefined, expected: "length" },
