@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ReplyPayload } from "../../../auto-reply/types.js";
+import { markdownToTelegramHtml } from "../../../telegram/format.js";
 import { telegramOutbound } from "./telegram.js";
 
 describe("telegramOutbound", () => {
@@ -58,15 +59,17 @@ describe("telegramOutbound", () => {
     );
   });
 
-  it("passes media options for sendMedia", async () => {
+  it("renders markdown captions before sendMedia", async () => {
     const sendTelegram = vi.fn().mockResolvedValue({ messageId: "tg-media-1", chatId: "123" });
     const sendMedia = telegramOutbound.sendMedia;
     expect(sendMedia).toBeDefined();
 
+    const caption = "See `README.md`\n- bullet\n> quote";
+
     const result = await sendMedia!({
       cfg: {},
       to: "123",
-      text: "caption",
+      text: caption,
       mediaUrl: "https://example.com/a.jpg",
       mediaLocalRoots: ["/tmp/media"],
       accountId: "default",
@@ -75,7 +78,7 @@ describe("telegramOutbound", () => {
 
     expect(sendTelegram).toHaveBeenCalledWith(
       "123",
-      "caption",
+      markdownToTelegramHtml(caption),
       expect.objectContaining({
         textMode: "html",
         verbose: false,
@@ -86,6 +89,41 @@ describe("telegramOutbound", () => {
     expect(result).toEqual({ channel: "telegram", messageId: "tg-media-1", chatId: "123" });
   });
 
+  it("renders markdown payload text before sendPayload with buttons", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "tg-payload-1", chatId: "123" });
+    const sendPayload = telegramOutbound.sendPayload;
+    expect(sendPayload).toBeDefined();
+
+    const text = "Check `README.md`\n- bullet\n> quote";
+    const payload: ReplyPayload = {
+      text,
+      channelData: {
+        telegram: {
+          buttons: [[{ text: "Approve", callback_data: "ok" }]],
+        },
+      },
+    };
+
+    await sendPayload!({
+      cfg: {},
+      to: "123",
+      text: "",
+      payload,
+      accountId: "default",
+      deps: { sendTelegram },
+    });
+
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "123",
+      markdownToTelegramHtml(text),
+      expect.objectContaining({
+        textMode: "html",
+        accountId: "default",
+        buttons: [[{ text: "Approve", callback_data: "ok" }]],
+      }),
+    );
+  });
+
   it("sends payload media list and applies buttons only to first message", async () => {
     const sendTelegram = vi
       .fn()
@@ -94,8 +132,9 @@ describe("telegramOutbound", () => {
     const sendPayload = telegramOutbound.sendPayload;
     expect(sendPayload).toBeDefined();
 
+    const caption = "caption `README.md`";
     const payload: ReplyPayload = {
-      text: "caption",
+      text: caption,
       mediaUrls: ["https://example.com/1.jpg", "https://example.com/2.jpg"],
       channelData: {
         telegram: {
@@ -119,7 +158,7 @@ describe("telegramOutbound", () => {
     expect(sendTelegram).toHaveBeenNthCalledWith(
       1,
       "123",
-      "caption",
+      markdownToTelegramHtml(caption),
       expect.objectContaining({
         mediaUrl: "https://example.com/1.jpg",
         quoteText: "quoted",
