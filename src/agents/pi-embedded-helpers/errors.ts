@@ -202,6 +202,22 @@ function extractLeadingHttpStatus(raw: string): { code: number; rest: string } |
   return { code, rest: (match[2] ?? "").trim() };
 }
 
+function extractNestedHttpStatus(raw: string): { code: number; rest: string } | null {
+  let candidate = raw.trim();
+  while (candidate) {
+    const leading = extractLeadingHttpStatus(candidate);
+    if (leading) {
+      return leading;
+    }
+    const separator = candidate.indexOf(":");
+    if (separator < 0) {
+      break;
+    }
+    candidate = candidate.slice(separator + 1).trim();
+  }
+  return null;
+}
+
 export function isCloudflareOrHtmlErrorPage(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -227,7 +243,7 @@ export function isTransientHttpError(raw: string): boolean {
   if (!trimmed) {
     return false;
   }
-  const status = extractLeadingHttpStatus(trimmed);
+  const status = extractNestedHttpStatus(trimmed);
   if (!status) {
     return false;
   }

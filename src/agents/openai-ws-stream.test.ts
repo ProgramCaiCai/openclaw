@@ -989,6 +989,51 @@ describe("createOpenAIWebSocketStreamFn", () => {
     });
   });
 
+  it("preserves partial text in the error payload when WebSocket drops mid-request", async () => {
+    const streamFn = createOpenAIWebSocketStreamFn("sk-test", "sess-drop-partial");
+    const stream = streamFn(
+      modelStub as Parameters<typeof streamFn>[0],
+      contextStub as Parameters<typeof streamFn>[1],
+      {} as Parameters<typeof streamFn>[2],
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      queueMicrotask(async () => {
+        try {
+          await new Promise((r) => setImmediate(r));
+          MockManager.lastInstance!.simulateEvent({
+            type: "response.output_text.delta",
+            delta: "Partial answer",
+          });
+          MockManager.lastInstance!.simulateClose(1006, "connection lost");
+
+          const events: unknown[] = [];
+          for await (const ev of await resolveStream(stream)) {
+            events.push(ev);
+          }
+
+          const errorEvent = events.find(
+            (
+              event,
+            ): event is {
+              type: "error";
+              error: { content: Array<{ type: string; text: string }> };
+            } =>
+              typeof event === "object" &&
+              event !== null &&
+              (event as { type?: string }).type === "error",
+          );
+
+          expect(errorEvent).toBeDefined();
+          expect(errorEvent?.error.content).toEqual([{ type: "text", text: "Partial answer" }]);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  });
+
   it("sends warm-up event before first request when openaiWsWarmup=true", async () => {
     const streamFn = createOpenAIWebSocketStreamFn("sk-test", "sess-warmup-enabled");
     const stream = streamFn(

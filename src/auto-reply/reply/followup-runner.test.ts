@@ -469,7 +469,7 @@ describe("createFollowupRunner typing cleanup", () => {
     expect(typing.markDispatchIdle).toHaveBeenCalled();
   });
 
-  it("calls both markRunComplete and markDispatchIdle on agent error", async () => {
+  it("rethrows agent errors after typing cleanup", async () => {
     const typing = createMockTypingController();
     runEmbeddedPiAgentMock.mockRejectedValueOnce(new Error("agent exploded"));
 
@@ -480,7 +480,7 @@ describe("createFollowupRunner typing cleanup", () => {
       defaultModel: "anthropic/claude-opus-4-5",
     });
 
-    await runner(baseQueuedRun());
+    await expect(runner(baseQueuedRun())).rejects.toThrow("agent exploded");
 
     expect(typing.markRunComplete).toHaveBeenCalled();
     expect(typing.markDispatchIdle).toHaveBeenCalled();
