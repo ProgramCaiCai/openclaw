@@ -25,16 +25,22 @@ function createRequest(params?: {
   url?: string;
   headers?: Record<string, string>;
 }): IncomingMessage {
-  return createGatewayRequest({
+  const request = createGatewayRequest({
     method: "POST",
-    url: params?.url ?? "/hooks/wake",
-    headers: {
-      host: "127.0.0.1:18789",
-      authorization: params?.authorization ?? "Bearer hook-secret",
-      ...(params?.headers ?? {}),
-    },
-    socket: { remoteAddress: params?.remoteAddress ?? "127.0.0.1" },
-  } as IncomingMessage;
+    path: params?.url ?? "/hooks/wake",
+    host: "127.0.0.1:18789",
+    authorization: params?.authorization ?? "Bearer hook-secret",
+    remoteAddress: params?.remoteAddress ?? "127.0.0.1",
+  });
+
+  if (params?.headers) {
+    request.headers = {
+      ...request.headers,
+      ...params.headers,
+    };
+  }
+
+  return request;
 }
 
 function createResponse(): {

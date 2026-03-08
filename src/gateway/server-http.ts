@@ -109,7 +109,7 @@ function pruneHookIdempotencyStore(
   if (store.size <= maxEntries) {
     return;
   }
-  const sorted = [...store.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+  const sorted = [...store.entries()].toSorted((a, b) => a[1].expiresAt - b[1].expiresAt);
   const toDelete = Math.max(0, store.size - maxEntries);
   for (let index = 0; index < toDelete; index += 1) {
     const key = sorted[index]?.[0];
