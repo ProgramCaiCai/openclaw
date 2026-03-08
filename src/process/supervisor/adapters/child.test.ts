@@ -66,6 +66,7 @@ describe("createChildAdapter", () => {
   });
 
   it("uses process-tree kill for default SIGKILL", async () => {
+    delete process.env.OPENCLAW_SERVICE_MARKER;
     const { adapter, killMock } = await createAdapterHarness({ pid: 4321 });
 
     const spawnArgs = spawnWithFallbackMock.mock.calls[0]?.[0] as {
