@@ -124,6 +124,25 @@ vi.mock("../agents/openclaw-tools.js", () => {
       },
     },
     {
+      name: "diffs_compat_test",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: { type: "string" },
+          fileFormat: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+      execute: async (_toolCallId: string, args: unknown) => {
+        const input = (args ?? {}) as Record<string, unknown>;
+        return {
+          ok: true,
+          observedFormat: input.format,
+          observedFileFormat: input.fileFormat,
+        };
+      },
+    },
+    {
       name: "tools_invoke_large",
       parameters: { type: "object", properties: {} },
       execute: async () => ({
@@ -228,15 +247,20 @@ const postToolsInvoke = async (params: {
     body: JSON.stringify(params.body),
   });
 
+const withOptionalSessionKey = (body: Record<string, unknown>, sessionKey?: string) => ({
+  ...body,
+  ...(sessionKey ? { sessionKey } : {}),
+});
+
 const invokeAgentsList = async (params: {
   port: number;
   headers?: Record<string, string>;
   sessionKey?: string;
 }) => {
-  const body: Record<string, unknown> = { tool: "agents_list", action: "json", args: {} };
-  if (params.sessionKey) {
-    body.sessionKey = params.sessionKey;
-  }
+  const body = withOptionalSessionKey(
+    { tool: "agents_list", action: "json", args: {} },
+    params.sessionKey,
+  );
   return await postToolsInvoke({ port: params.port, headers: params.headers, body });
 };
 
@@ -248,15 +272,15 @@ const invokeTool = async (params: {
   headers?: Record<string, string>;
   sessionKey?: string;
 }) => {
-  const body: Record<string, unknown> = {
-    tool: params.tool,
-    args: params.args ?? {},
-  };
+  const body: Record<string, unknown> = withOptionalSessionKey(
+    {
+      tool: params.tool,
+      args: params.args ?? {},
+    },
+    params.sessionKey,
+  );
   if (params.action) {
     body.action = params.action;
-  }
-  if (params.sessionKey) {
-    body.sessionKey = params.sessionKey;
   }
   return await postToolsInvoke({ port: params.port, headers: params.headers, body });
 };
@@ -280,6 +304,36 @@ const invokeToolAuthed = async (params: {
     ...params,
   });
 
+const expectOkInvokeResponse = async (res: Response) => {
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.ok).toBe(true);
+  return body as { ok: boolean; result?: Record<string, unknown> };
+};
+
+const setMainAllowedTools = (params: {
+  allow: string[];
+  gatewayAllow?: string[];
+  gatewayDeny?: string[];
+}) => {
+  cfg = {
+    ...cfg,
+    agents: {
+      list: [{ id: "main", default: true, tools: { allow: params.allow } }],
+    },
+    ...(params.gatewayAllow || params.gatewayDeny
+      ? {
+          gateway: {
+            tools: {
+              ...(params.gatewayAllow ? { allow: params.gatewayAllow } : {}),
+              ...(params.gatewayDeny ? { deny: params.gatewayDeny } : {}),
+            },
+          },
+        }
+      : {}),
+  };
+};
+
 describe("POST /tools/invoke", () => {
   it("invokes a tool and returns {ok:true,result}", async () => {
     allowAgentsListForMain();
@@ -289,6 +343,7 @@ describe("POST /tools/invoke", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body).toHaveProperty("result");
+    expect(lastCreateOpenClawToolsContext?.allowMediaInvokeCommands).toBe(true);
   });
 
   it("bounds oversized direct tool output in /tools/invoke responses", async () => {
@@ -418,9 +473,7 @@ describe("POST /tools/invoke", () => {
       sessionKey: "main",
     });
 
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.ok).toBe(true);
+    const body = await expectOkInvokeResponse(res);
     expect(body.result?.route).toEqual({
       agentTo: "channel:24514",
       agentThreadId: "thread-24514",
@@ -428,12 +481,7 @@ describe("POST /tools/invoke", () => {
   });
 
   it("denies sessions_send via HTTP gateway", async () => {
-    cfg = {
-      ...cfg,
-      agents: {
-        list: [{ id: "main", default: true, tools: { allow: ["sessions_send"] } }],
-      },
-    };
+    setMainAllowedTools({ allow: ["sessions_send"] });
 
     const res = await invokeToolAuthed({
       tool: "sessions_send",
@@ -444,12 +492,7 @@ describe("POST /tools/invoke", () => {
   });
 
   it("denies gateway tool via HTTP", async () => {
-    cfg = {
-      ...cfg,
-      agents: {
-        list: [{ id: "main", default: true, tools: { allow: ["gateway"] } }],
-      },
-    };
+    setMainAllowedTools({ allow: ["gateway"] });
 
     const res = await invokeToolAuthed({
       tool: "gateway",
@@ -460,13 +503,7 @@ describe("POST /tools/invoke", () => {
   });
 
   it("allows gateway tool via HTTP when explicitly enabled in gateway.tools.allow", async () => {
-    cfg = {
-      ...cfg,
-      agents: {
-        list: [{ id: "main", default: true, tools: { allow: ["gateway"] } }],
-      },
-      gateway: { tools: { allow: ["gateway"] } },
-    };
+    setMainAllowedTools({ allow: ["gateway"], gatewayAllow: ["gateway"] });
 
     const res = await invokeToolAuthed({
       tool: "gateway",
@@ -481,13 +518,11 @@ describe("POST /tools/invoke", () => {
   });
 
   it("treats gateway.tools.deny as higher priority than gateway.tools.allow", async () => {
-    cfg = {
-      ...cfg,
-      agents: {
-        list: [{ id: "main", default: true, tools: { allow: ["gateway"] } }],
-      },
-      gateway: { tools: { allow: ["gateway"], deny: ["gateway"] } },
-    };
+    setMainAllowedTools({
+      allow: ["gateway"],
+      gatewayAllow: ["gateway"],
+      gatewayDeny: ["gateway"],
+    });
 
     const res = await invokeToolAuthed({
       tool: "gateway",
@@ -567,5 +602,19 @@ describe("POST /tools/invoke", () => {
     expect(crashBody.ok).toBe(false);
     expect(crashBody.error?.type).toBe("tool_error");
     expect(crashBody.error?.message).toBe("tool execution failed");
+  });
+
+  it("passes deprecated format alias through invoke payloads even when schema omits it", async () => {
+    setMainAllowedTools({ allow: ["diffs_compat_test"] });
+
+    const res = await invokeToolAuthed({
+      tool: "diffs_compat_test",
+      args: { mode: "file", format: "pdf" },
+      sessionKey: "main",
+    });
+
+    const body = await expectOkInvokeResponse(res);
+    expect(body.result?.observedFormat).toBe("pdf");
+    expect(body.result?.observedFileFormat).toBeUndefined();
   });
 });

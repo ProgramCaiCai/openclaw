@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { ToolResultMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,10 +10,11 @@ import {
 } from "./context-pruning.js";
 import { getContextPruningRuntime, setContextPruningRuntime } from "./context-pruning/runtime.js";
 
-function toolText(msg: AgentMessage): string {
-  if (msg.role !== "toolResult") {
-    throw new Error("expected toolResult");
-  }
+function isToolResultMessage(msg: AgentMessage): msg is ToolResultMessage {
+  return msg.role === "toolResult";
+}
+
+function toolText(msg: ToolResultMessage): string {
   const first = msg.content.find((b) => b.type === "text");
   if (!first || first.type !== "text") {
     return "";
@@ -20,8 +22,10 @@ function toolText(msg: AgentMessage): string {
   return first.text;
 }
 
-function findToolResult(messages: AgentMessage[], toolCallId: string): AgentMessage {
-  const msg = messages.find((m) => m.role === "toolResult" && m.toolCallId === toolCallId);
+function findToolResult(messages: AgentMessage[], toolCallId: string): ToolResultMessage {
+  const msg = messages.find((m): m is ToolResultMessage => {
+    return isToolResultMessage(m) && m.toolCallId === toolCallId;
+  });
   if (!msg) {
     throw new Error(`missing toolResult: ${toolCallId}`);
   }
@@ -32,7 +36,7 @@ function makeToolResult(params: {
   toolCallId: string;
   toolName: string;
   text: string;
-}): AgentMessage {
+}): ToolResultMessage {
   return {
     role: "toolResult",
     toolCallId: params.toolCallId,
@@ -47,17 +51,11 @@ function makeImageToolResult(params: {
   toolCallId: string;
   toolName: string;
   text: string;
-}): AgentMessage {
+}): ToolResultMessage {
+  const base = makeToolResult(params);
   return {
-    role: "toolResult",
-    toolCallId: params.toolCallId,
-    toolName: params.toolName,
-    content: [
-      { type: "image", data: "AA==", mimeType: "image/png" },
-      { type: "text", text: params.text },
-    ],
-    isError: false,
-    timestamp: Date.now(),
+    ...base,
+    content: [{ type: "image", data: "AA==", mimeType: "image/png" }, ...base.content],
   };
 }
 
@@ -78,6 +76,92 @@ function makeUser(text: string): AgentMessage {
   return { role: "user", content: text, timestamp: Date.now() };
 }
 
+type ContextPruningSettings = NonNullable<ReturnType<typeof computeEffectiveSettings>>;
+type PruneArgs = Parameters<typeof pruneContextMessages>[0];
+type PruneOverrides = Omit<PruneArgs, "messages" | "settings" | "ctx">;
+
+const CONTEXT_WINDOW_1000 = {
+  model: { contextWindow: 1000 },
+} as unknown as ExtensionContext;
+
+function makeAggressiveSettings(
+  overrides: Partial<ContextPruningSettings> = {},
+): ContextPruningSettings {
+  return {
+    ...DEFAULT_CONTEXT_PRUNING_SETTINGS,
+    keepLastAssistants: 0,
+    softTrimRatio: 0,
+    hardClearRatio: 0,
+    minPrunableToolChars: 0,
+    hardClear: { enabled: true, placeholder: "[cleared]" },
+    softTrim: { maxChars: 10, headChars: 3, tailChars: 3 },
+    ...overrides,
+  };
+}
+
+function pruneWithAggressiveDefaults(
+  messages: AgentMessage[],
+  settingsOverrides: Partial<ContextPruningSettings> = {},
+  extra: PruneOverrides = {},
+): AgentMessage[] {
+  return pruneContextMessages({
+    messages,
+    settings: makeAggressiveSettings(settingsOverrides),
+    ctx: CONTEXT_WINDOW_1000,
+    ...extra,
+  });
+}
+
+function makeLargeExecToolResult(toolCallId: string, textChar: string): AgentMessage {
+  return makeToolResult({
+    toolCallId,
+    toolName: "exec",
+    text: textChar.repeat(20_000),
+  });
+}
+
+function makeSimpleToolPruningMessages(includeTrailingAssistant = false): AgentMessage[] {
+  return [
+    makeUser("u1"),
+    makeAssistant("a1"),
+    makeLargeExecToolResult("t1", "x"),
+    ...(includeTrailingAssistant ? [makeAssistant("a2")] : []),
+  ];
+}
+
+type ContextHandler = (
+  event: { messages: AgentMessage[] },
+  ctx: ExtensionContext,
+) => { messages: AgentMessage[] } | undefined;
+
+function createContextHandler(): ContextHandler {
+  let handler: ContextHandler | undefined;
+  const api = {
+    on: (name: string, fn: unknown) => {
+      if (name === "context") {
+        handler = fn as ContextHandler;
+      }
+    },
+    appendEntry: (_type: string, _data?: unknown) => {},
+  } as unknown as ExtensionAPI;
+
+  contextPruningExtension(api);
+  if (!handler) {
+    throw new Error("missing context handler");
+  }
+  return handler;
+}
+
+function runContextHandler(
+  handler: ContextHandler,
+  messages: AgentMessage[],
+  sessionManager: unknown,
+) {
+  return handler({ messages }, {
+    model: undefined,
+    sessionManager,
+  } as unknown as ExtensionContext);
+}
 describe("context-pruning", () => {
   it("mode off disables pruning", () => {
     expect(computeEffectiveSettings({ mode: "off" })).toBeNull();
@@ -186,23 +270,11 @@ describe("context-pruning", () => {
     const messages: AgentMessage[] = [
       makeUser("u1"),
       makeAssistant("a1"),
-      makeToolResult({
-        toolCallId: "t1",
-        toolName: "exec",
-        text: "x".repeat(20_000),
-      }),
-      makeToolResult({
-        toolCallId: "t2",
-        toolName: "exec",
-        text: "y".repeat(20_000),
-      }),
+      makeLargeExecToolResult("t1", "x"),
+      makeLargeExecToolResult("t2", "y"),
       makeUser("u2"),
       makeAssistant("a2"),
-      makeToolResult({
-        toolCallId: "t3",
-        toolName: "exec",
-        text: "z".repeat(20_000),
-      }),
+      makeLargeExecToolResult("t3", "z"),
     ];
 
     const settings = {
@@ -226,16 +298,7 @@ describe("context-pruning", () => {
   });
 
   it("uses contextWindow override when ctx.model is missing", () => {
-    const messages: AgentMessage[] = [
-      makeUser("u1"),
-      makeAssistant("a1"),
-      makeToolResult({
-        toolCallId: "t1",
-        toolName: "exec",
-        text: "x".repeat(20_000),
-      }),
-      makeAssistant("a2"),
-    ];
+    const messages = makeSimpleToolPruningMessages(true);
 
     const settings = {
       ...DEFAULT_CONTEXT_PRUNING_SETTINGS,
@@ -275,16 +338,7 @@ describe("context-pruning", () => {
       lastCacheTouchAt: Date.now() - DEFAULT_CONTEXT_PRUNING_SETTINGS.ttlMs - 1000,
     });
 
-    const messages: AgentMessage[] = [
-      makeUser("u1"),
-      makeAssistant("a1"),
-      makeToolResult({
-        toolCallId: "t1",
-        toolName: "exec",
-        text: "x".repeat(20_000),
-      }),
-      makeAssistant("a2"),
-    ];
+    const messages = makeSimpleToolPruningMessages(true);
 
     let handler:
       | ((
@@ -338,15 +392,7 @@ describe("context-pruning", () => {
       lastCacheTouchAt: lastTouch,
     });
 
-    const messages: AgentMessage[] = [
-      makeUser("u1"),
-      makeAssistant("a1"),
-      makeToolResult({
-        toolCallId: "t1",
-        toolName: "exec",
-        text: "x".repeat(20_000),
-      }),
-    ];
+    const messages = makeSimpleToolPruningMessages();
 
     let handler:
       | ((
@@ -454,9 +500,6 @@ describe("context-pruning", () => {
     const next = pruneContextMessages({ messages, settings, ctx });
 
     const tool = findToolResult(next, "t1");
-    if (!tool || tool.role !== "toolResult") {
-      throw new Error("unexpected pruned message list shape");
-    }
     expect(tool.content.some((b) => b.type === "image")).toBe(true);
     expect(toolText(tool)).toContain("x".repeat(20_000));
   });
@@ -474,7 +517,7 @@ describe("context-pruning", () => {
         ],
         isError: false,
         timestamp: Date.now(),
-      } as unknown as AgentMessage,
+      } as ToolResultMessage,
     ];
 
     const settings = {

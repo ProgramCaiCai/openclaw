@@ -14,6 +14,7 @@ const TELEGRAM_HTML_TAG_RE =
   /<(?:a\s+href=|\/?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|tg-spoiler|blockquote)\b)/i;
 
 function resolveTelegramSendContext(params: {
+  cfg: NonNullable<Parameters<typeof sendMessageTelegram>[2]>["cfg"];
   deps?: OutboundSendDeps;
   accountId?: string | null;
   replyToId?: string | null;
@@ -21,6 +22,7 @@ function resolveTelegramSendContext(params: {
 }): {
   send: typeof sendMessageTelegram;
   baseOpts: {
+    cfg: NonNullable<Parameters<typeof sendMessageTelegram>[2]>["cfg"];
     verbose: false;
     textMode: "html";
     messageThreadId?: number;
@@ -34,6 +36,7 @@ function resolveTelegramSendContext(params: {
     baseOpts: {
       verbose: false,
       textMode: "html",
+      cfg: params.cfg,
       messageThreadId: parseTelegramThreadId(params.threadId),
       replyToMessageId: parseTelegramReplyToMessageId(params.replyToId),
       accountId: params.accountId ?? undefined,
@@ -65,6 +68,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   textChunkLimit: 4000,
   sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId }) => {
     const { send, baseOpts } = resolveTelegramSendContext({
+      cfg,
       deps,
       accountId,
       replyToId,
@@ -88,6 +92,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     threadId,
   }) => {
     const { send, baseOpts } = resolveTelegramSendContext({
+      cfg,
       deps,
       accountId,
       replyToId,
@@ -112,6 +117,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     threadId,
   }) => {
     const { send, baseOpts: contextOpts } = resolveTelegramSendContext({
+      cfg,
       deps,
       accountId,
       replyToId,

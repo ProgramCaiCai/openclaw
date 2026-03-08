@@ -21,6 +21,35 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>) {
   }
 }
 
+function createExecTool(workspaceDir: string) {
+  const tools = createOpenClawCodingTools({
+    workspaceDir,
+    exec: { host: "gateway", ask: "off", security: "full" },
+  });
+  const execTool = tools.find((tool) => tool.name === "exec");
+  expect(execTool).toBeDefined();
+  return execTool;
+}
+
+async function expectExecCwdResolvesTo(
+  execTool: ReturnType<typeof createExecTool>,
+  callId: string,
+  params: { command: string; workdir?: string },
+  expectedDir: string,
+) {
+  const result = await execTool?.execute(callId, params);
+  const cwd =
+    result?.details && typeof result.details === "object" && "cwd" in result.details
+      ? (result.details as { cwd?: string }).cwd
+      : undefined;
+  expect(cwd).toBeTruthy();
+  const [resolvedOutput, resolvedExpected] = await Promise.all([
+    fs.realpath(String(cwd)),
+    fs.realpath(expectedDir),
+  ]);
+  expect(resolvedOutput).toBe(resolvedExpected);
+}
+
 describe("workspace path resolution", () => {
   it("resolves relative read/write/edit paths against workspaceDir even after cwd changes", async () => {
     await withTempDir("openclaw-ws-", async (workspaceDir) => {
@@ -88,6 +117,27 @@ describe("workspace path resolution", () => {
 
   it("defaults exec cwd to workspaceDir when workdir is omitted", async () => {
     await withTempDir("openclaw-ws-", async (workspaceDir) => {
+      const execTool = createExecTool(workspaceDir);
+      await expectExecCwdResolvesTo(execTool, "ws-exec", { command: "echo ok" }, workspaceDir);
+    });
+  });
+
+  it("lets exec workdir override the workspace default", async () => {
+    await withTempDir("openclaw-ws-", async (workspaceDir) => {
+      await withTempDir("openclaw-override-", async (overrideDir) => {
+        const execTool = createExecTool(workspaceDir);
+        await expectExecCwdResolvesTo(
+          execTool,
+          "ws-exec-override",
+          { command: "echo ok", workdir: overrideDir },
+          overrideDir,
+        );
+      });
+    });
+  });
+
+  it("applies tighter hard-truncate limits to exec output", async () => {
+    await withTempDir("openclaw-ws-", async (workspaceDir) => {
       const tools = createOpenClawCodingTools({
         workspaceDir,
         exec: { host: "gateway", ask: "off", security: "full" },
@@ -95,47 +145,13 @@ describe("workspace path resolution", () => {
       const execTool = tools.find((tool) => tool.name === "exec");
       expect(execTool).toBeDefined();
 
-      const result = await execTool?.execute("ws-exec", {
-        command: "echo ok",
+      const result = await execTool?.execute("ws-exec-hardcap", {
+        command: "yes line | head -n 800",
       });
-      const cwd =
-        result?.details && typeof result.details === "object" && "cwd" in result.details
-          ? (result.details as { cwd?: string }).cwd
-          : undefined;
-      expect(cwd).toBeTruthy();
-      const [resolvedOutput, resolvedWorkspace] = await Promise.all([
-        fs.realpath(String(cwd)),
-        fs.realpath(workspaceDir),
-      ]);
-      expect(resolvedOutput).toBe(resolvedWorkspace);
-    });
-  });
-
-  it("lets exec workdir override the workspace default", async () => {
-    await withTempDir("openclaw-ws-", async (workspaceDir) => {
-      await withTempDir("openclaw-override-", async (overrideDir) => {
-        const tools = createOpenClawCodingTools({
-          workspaceDir,
-          exec: { host: "gateway", ask: "off", security: "full" },
-        });
-        const execTool = tools.find((tool) => tool.name === "exec");
-        expect(execTool).toBeDefined();
-
-        const result = await execTool?.execute("ws-exec-override", {
-          command: "echo ok",
-          workdir: overrideDir,
-        });
-        const cwd =
-          result?.details && typeof result.details === "object" && "cwd" in result.details
-            ? (result.details as { cwd?: string }).cwd
-            : undefined;
-        expect(cwd).toBeTruthy();
-        const [resolvedOutput, resolvedOverride] = await Promise.all([
-          fs.realpath(String(cwd)),
-          fs.realpath(overrideDir),
-        ]);
-        expect(resolvedOutput).toBe(resolvedOverride);
-      });
+      const output = getTextContent(result);
+      expect(output).toContain("showing head+tail preview");
+      expect(output).toContain("/tmp/openclaw/artifacts/");
+      expect((output ?? "").split("\n").length).toBeLessThanOrEqual(200);
     });
   });
 
