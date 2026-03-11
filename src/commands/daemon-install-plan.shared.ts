@@ -1,3 +1,4 @@
+import { resolveManagedNodeRuntimePath } from "../daemon/managed-node-runtime.js";
 import { resolvePreferredNodePath } from "../daemon/runtime-paths.js";
 import {
   emitNodeRuntimeWarning,
@@ -18,12 +19,20 @@ export async function resolveDaemonInstallRuntimeInputs(params: {
   nodePath?: string;
 }): Promise<{ devMode: boolean; nodePath?: string }> {
   const devMode = params.devMode ?? resolveGatewayDevMode();
-  const nodePath =
+  const selectedNodePath =
     params.nodePath ??
     (await resolvePreferredNodePath({
       env: params.env,
       runtime: params.runtime,
     }));
+  const nodePath =
+    params.runtime === "node"
+      ? await resolveManagedNodeRuntimePath({
+          env: params.env,
+          runtime: params.runtime,
+          nodePath: selectedNodePath,
+        })
+      : selectedNodePath;
   return { devMode, nodePath };
 }
 
