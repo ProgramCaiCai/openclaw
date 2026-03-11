@@ -812,9 +812,8 @@ async function sendSubagentAnnounceDirectly(params: {
             },
             idempotencyKey: params.directIdempotencyKey,
           },
-          // Top-level completion announces only need the gateway to accept the queued
-          // requester turn; waiting for the requester session to finish recreates the
-          // main-session lane choke point we are trying to avoid.
+          // Top-level completion announces should stop at gateway acceptance to avoid
+          // reintroducing requester-lane blocking while a separate turn is already running.
           expectFinal: waitForFinalDelivery,
           timeoutMs: announceTimeoutMs,
         }),
