@@ -785,6 +785,7 @@ async function sendSubagentAnnounceDirectly(params: {
         path: "none",
       };
     }
+    const waitForFinalDelivery = !params.expectsCompletionMessage || params.requesterIsSubagent;
     await runAnnounceDeliveryWithRetry({
       operation: params.expectsCompletionMessage
         ? "completion direct announce agent call"
@@ -811,7 +812,10 @@ async function sendSubagentAnnounceDirectly(params: {
             },
             idempotencyKey: params.directIdempotencyKey,
           },
-          expectFinal: true,
+          // Top-level completion announces only need the gateway to accept the queued
+          // requester turn; waiting for the requester session to finish recreates the
+          // main-session lane choke point we are trying to avoid.
+          expectFinal: waitForFinalDelivery,
           timeoutMs: announceTimeoutMs,
         }),
     });
