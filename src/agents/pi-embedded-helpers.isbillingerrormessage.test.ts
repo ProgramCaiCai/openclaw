@@ -495,6 +495,14 @@ describe("isTransientHttpError", () => {
     expect(isTransientHttpError("502 Bad Gateway")).toBe(true);
     expect(isTransientHttpError("503 Service Unavailable")).toBe(true);
     expect(isTransientHttpError("504 Gateway Timeout")).toBe(true);
+    expect(isTransientHttpError("Request failed with status code 503: Service Unavailable")).toBe(
+      true,
+    );
+    expect(
+      isTransientHttpError(
+        "OpenAIError: Request failed with status code 500: Internal Server Error",
+      ),
+    ).toBe(true);
     expect(isTransientHttpError("521 <!DOCTYPE html><html></html>")).toBe(true);
     expect(isTransientHttpError("529 Overloaded")).toBe(true);
   });
@@ -848,6 +856,13 @@ describe("classifyFailoverReason", () => {
     expect(
       classifyFailoverReason(
         '{"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+      ),
+    ).toBe("timeout");
+  });
+  it("classifies OpenAI server_error payloads as timeout", () => {
+    expect(
+      classifyFailoverReason(
+        '{"type":"error","error":{"type":"server_error","message":"The server had an error while processing your request. Sorry about that!"}}',
       ),
     ).toBe("timeout");
   });

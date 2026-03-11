@@ -220,6 +220,7 @@ const CONTEXT_OVERFLOW_ERROR_HEAD_RE =
   /^(?:context overflow:|request_too_large\b|request size exceeds\b|request exceeds the maximum size\b|context length exceeded\b|maximum context length\b|prompt is too long\b|exceeds model context window\b)/i;
 const HTTP_STATUS_PREFIX_RE = /^(?:http\s*)?(\d{3})\s+(.+)$/i;
 const HTTP_STATUS_CODE_PREFIX_RE = /^(?:http\s*)?(\d{3})(?:\s+([\s\S]+))?$/i;
+const WRAPPED_HTTP_STATUS_RE = /\bstatus code (\d{3})\b/i;
 const HTML_ERROR_PREFIX_RE = /^\s*(?:<!doctype\s+html\b|<html\b)/i;
 const CLOUDFLARE_HTML_ERROR_CODES = new Set([521, 522, 523, 524, 525, 526, 530]);
 const TRANSIENT_HTTP_ERROR_CODES = new Set([499, 500, 502, 503, 504, 521, 522, 523, 524, 529]);
@@ -384,10 +385,14 @@ export function isTransientHttpError(raw: string): boolean {
     return false;
   }
   const status = extractLeadingHttpStatus(trimmed);
-  if (!status) {
+  if (status) {
+    return TRANSIENT_HTTP_ERROR_CODES.has(status.code);
+  }
+  const wrappedStatus = trimmed.match(WRAPPED_HTTP_STATUS_RE);
+  if (!wrappedStatus) {
     return false;
   }
-  return TRANSIENT_HTTP_ERROR_CODES.has(status.code);
+  return TRANSIENT_HTTP_ERROR_CODES.has(Number(wrappedStatus[1]));
 }
 
 export function classifyFailoverReasonFromHttpStatus(
@@ -853,7 +858,10 @@ function isJsonApiInternalServerError(raw: string): boolean {
   const value = raw.toLowerCase();
   // Anthropic often wraps transient 500s in JSON payloads like:
   // {"type":"error","error":{"type":"api_error","message":"Internal server error"}}
-  return value.includes('"type":"api_error"') && value.includes("internal server error");
+  return (
+    (value.includes('"type":"api_error"') && value.includes("internal server error")) ||
+    value.includes('"type":"server_error"')
+  );
 }
 
 export function parseImageDimensionError(raw: string): {
