@@ -175,6 +175,7 @@ function sanitizePersistedSkillSnapshot(entry: SessionEntry): SessionEntry["skil
     return snapshot;
   }
   return {
+    prompt: "",
     skills: snapshot.skills,
     skillFilter: snapshot.skillFilter,
     version: snapshot.version,

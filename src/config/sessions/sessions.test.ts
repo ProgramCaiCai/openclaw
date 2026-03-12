@@ -253,7 +253,7 @@ describe("session store lock (Promise chain mutex)", () => {
       { name: "brainstorming", primaryEnv: "OPENAI_API_KEY" },
     ]);
     expect(persisted?.skillsSnapshot?.version).toBe(3);
-    expect(persisted?.skillsSnapshot?.prompt).toBeUndefined();
+    expect(persisted?.skillsSnapshot?.prompt).toBe("");
     expect(persisted?.skillsSnapshot?.resolvedSkills).toBeUndefined();
   });
 
