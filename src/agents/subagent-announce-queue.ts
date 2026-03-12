@@ -33,6 +33,9 @@ export type AnnounceQueueItem = {
   sourceSessionKey?: string;
   sourceChannel?: string;
   sourceTool?: string;
+  expectsCompletionMessage?: boolean;
+  pendingRunId?: string;
+  retryAttempt?: number;
 };
 
 export type AnnounceQueueSettings = {

@@ -1762,7 +1762,7 @@ describe("subagent announce formatting", () => {
     );
   });
 
-  it("keeps top-level completion announce on acceptance-only delivery", async () => {
+  it("waits for final delivery when the top-level requester session is idle", async () => {
     embeddedRunMock.isEmbeddedPiRunActive.mockReturnValue(false);
     embeddedRunMock.isEmbeddedPiRunStreaming.mockReturnValue(false);
 
@@ -1778,7 +1778,7 @@ describe("subagent announce formatting", () => {
 
     expect(didAnnounce).toBe(true);
     const call = agentSpy.mock.calls[0]?.[0] as { expectFinal?: boolean } | undefined;
-    expect(call?.expectFinal).toBe(false);
+    expect(call?.expectFinal).toBe(true);
   });
 
   it("retries reading subagent output when early lifecycle completion had no text", async () => {

@@ -6,6 +6,7 @@ export type SubagentAnnounceDeliveryResult = {
   delivered: boolean;
   path: SubagentDeliveryPath;
   error?: string;
+  pendingRunId?: string;
   phases?: SubagentAnnounceDispatchPhaseResult[];
 };
 

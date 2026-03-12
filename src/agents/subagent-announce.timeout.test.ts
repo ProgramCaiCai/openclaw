@@ -24,6 +24,7 @@ let fallbackRequesterResolution: {
   requesterOrigin?: { channel?: string; to?: string; accountId?: string };
 } | null = null;
 let rejectFinalCompletionAnnounce = false;
+let embeddedRunActive = false;
 
 vi.mock("../gateway/call.js", () => ({
   callGateway: vi.fn(async (request: GatewayCall) => {
@@ -39,7 +40,17 @@ vi.mock("../gateway/call.js", () => ({
     if (request.method === "chat.history") {
       return { messages: [] };
     }
-    return {};
+    if (
+      request.method === "agent" &&
+      request.expectFinal === false &&
+      request.params?.sessionKey === "agent:main:main"
+    ) {
+      return { status: "accepted", runId: "announce-run-1" };
+    }
+    if (request.method === "agent.wait") {
+      return { status: "ok", runId: request.params?.runId };
+    }
+    return { status: "ok" };
   }),
 }));
 
@@ -63,7 +74,7 @@ vi.mock("./subagent-depth.js", () => ({
 }));
 
 vi.mock("./pi-embedded.js", () => ({
-  isEmbeddedPiRunActive: () => false,
+  isEmbeddedPiRunActive: () => embeddedRunActive,
   queueEmbeddedPiMessage: () => false,
   waitForEmbeddedPiRunEnd: async () => true,
 }));
@@ -122,6 +133,10 @@ async function runAnnounceFlowForTest(
   });
 }
 
+async function waitForAsyncCallbacks(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function findGatewayCall(predicate: (call: GatewayCall) => boolean): GatewayCall | undefined {
   return gatewayCalls.find(predicate);
 }
@@ -139,6 +154,7 @@ describe("subagent announce timeout config", () => {
     pendingDescendantRuns = 0;
     fallbackRequesterResolution = null;
     rejectFinalCompletionAnnounce = false;
+    embeddedRunActive = false;
   });
 
   it("uses 60s timeout by default for direct announce agent call", async () => {
@@ -160,7 +176,7 @@ describe("subagent announce timeout config", () => {
     expect(directAgentCall?.timeoutMs).toBe(90_000);
   });
 
-  it("does not wait for final completion delivery on top-level requester announces", async () => {
+  it("waits for final completion delivery when the requester session is idle", async () => {
     setConfiguredAnnounceTimeout(90_000);
     await runAnnounceFlowForTest("run-config-timeout-send", {
       requesterOrigin: {
@@ -173,12 +189,19 @@ describe("subagent announce timeout config", () => {
     const completionDirectAgentCall = findGatewayCall(
       (call) => call.method === "agent" && call.params?.sessionKey === "agent:main:main",
     );
-    expect(completionDirectAgentCall?.expectFinal).toBe(false);
+    expect(completionDirectAgentCall?.expectFinal).toBe(true);
     expect(completionDirectAgentCall?.timeoutMs).toBe(90_000);
   });
 
-  it("regression, completion announces succeed without waiting for a busy requester final turn", async () => {
+  it("regression, busy requester completions hand accepted runs to the queue", async () => {
     rejectFinalCompletionAnnounce = true;
+    embeddedRunActive = true;
+    sessionStore = {
+      "agent:main:main": {
+        sessionId: "main-session-1",
+        queueDebounceMs: 0,
+      },
+    };
 
     const didAnnounce = await runAnnounceFlowForTest("run-no-final-wait", {
       requesterOrigin: {
@@ -187,12 +210,16 @@ describe("subagent announce timeout config", () => {
       },
       expectsCompletionMessage: true,
     });
+    await waitForAsyncCallbacks();
 
     expect(didAnnounce).toBe(true);
     const completionDirectAgentCall = findGatewayCall(
       (call) => call.method === "agent" && call.params?.sessionKey === "agent:main:main",
     );
     expect(completionDirectAgentCall?.expectFinal).toBe(false);
+    expect(findGatewayCall((call) => call.method === "agent.wait")?.params?.runId).toBe(
+      "announce-run-1",
+    );
   });
 
   it("regression, skips parent announce while descendants are still pending", async () => {
@@ -223,7 +250,7 @@ describe("subagent announce timeout config", () => {
     );
     const internalEvents =
       (directAgentCall?.params?.internalEvents as Array<{ announceType?: string }>) ?? [];
-    expect(directAgentCall?.expectFinal).toBe(false);
+    expect(directAgentCall?.expectFinal).toBe(true);
     expect(internalEvents[0]?.announceType).toBe("cron job");
   });
 
