@@ -49,7 +49,9 @@ import {
 } from "./acp-spawn-parent-stream.js";
 import { resolveAgentConfig, resolveDefaultAgentId } from "./agent-scope.js";
 import { resolveSandboxRuntimeStatus } from "./sandbox/runtime-status.js";
+import { registerSubagentRun } from "./subagent-registry.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./tools/sessions-helpers.js";
+import { resolveDisplaySessionKey } from "./tools/sessions-resolution.js";
 
 const log = createSubsystemLogger("agents/acp-spawn");
 
@@ -266,19 +268,27 @@ function summarizeError(err: unknown): string {
   return "error";
 }
 
-function resolveRequesterInternalSessionKey(params: {
+function resolveRequesterSessionContext(params: {
   cfg: OpenClawConfig;
   requesterSessionKey?: string;
-}): string {
+}): { internalKey: string; displayKey: string } {
   const { mainKey, alias } = resolveMainSessionAlias(params.cfg);
   const requesterSessionKey = params.requesterSessionKey?.trim();
-  return requesterSessionKey
+  const internalKey = requesterSessionKey
     ? resolveInternalSessionKey({
         key: requesterSessionKey,
         alias,
         mainKey,
       })
     : alias;
+  return {
+    internalKey,
+    displayKey: resolveDisplaySessionKey({
+      key: internalKey,
+      alias,
+      mainKey,
+    }),
+  };
 }
 
 async function persistAcpSpawnSessionFileBestEffort(params: {
@@ -405,10 +415,11 @@ export async function spawnAcpDirect(
   ctx: SpawnAcpContext,
 ): Promise<SpawnAcpResult> {
   const cfg = loadConfig();
-  const requesterInternalKey = resolveRequesterInternalSessionKey({
+  const requesterSession = resolveRequesterSessionContext({
     cfg,
     requesterSessionKey: ctx.agentSessionKey,
   });
+  const requesterInternalKey = requesterSession.internalKey;
   if (!isAcpEnabledByPolicy(cfg)) {
     return {
       status: "forbidden",
@@ -750,6 +761,27 @@ export async function spawnAcpDirect(
       ...(streamLogPath ? { streamLogPath } : {}),
       note: spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
     };
+  }
+
+  if (spawnMode === "run") {
+    try {
+      registerSubagentRun({
+        runId: childRunId,
+        childSessionKey: sessionKey,
+        requesterSessionKey: requesterInternalKey,
+        requesterOrigin,
+        requesterDisplayKey: requesterSession.displayKey,
+        task: params.task,
+        cleanup: "keep",
+        label: params.label,
+        expectsCompletionMessage: true,
+        spawnMode,
+      });
+    } catch (error) {
+      log.warn(
+        `ACP lineage registration failed for ${sessionKey} (run ${childRunId}): ${summarizeError(error)}`,
+      );
+    }
   }
 
   return {
