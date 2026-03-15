@@ -49,7 +49,7 @@ const embeddedRunMock = {
   waitForEmbeddedPiRunEnd: vi.fn(async () => true),
 };
 const subagentRegistryMock = {
-  isSubagentSessionRunActive: vi.fn(() => true),
+  isSubagentSessionRunActive: vi.fn((_sessionKey: string) => true),
   shouldIgnorePostCompletionAnnounceForSession: vi.fn((_sessionKey: string) => false),
   countActiveDescendantRuns: vi.fn((_sessionKey: string) => 0),
   countPendingDescendantRuns: vi.fn((_sessionKey: string) => 0),
