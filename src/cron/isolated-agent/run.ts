@@ -38,6 +38,7 @@ import {
   normalizeVerboseLevel,
   supportsXHighThinking,
 } from "../../auto-reply/thinking.js";
+import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { CliDeps } from "../../cli/outbound-send-deps.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
@@ -197,6 +198,50 @@ function appendCronDeliveryInstruction(params: {
     return params.commandBody;
   }
   return `${params.commandBody}\n\nReturn your summary as plain text; it will be delivered automatically. If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
+}
+
+function hasDeliverableText(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasDeliverablePayload(payloads: ReplyPayload[]): boolean {
+  return payloads.some(
+    (payload) =>
+      hasDeliverableText(payload?.text) ||
+      hasDeliverableText(payload?.mediaUrl) ||
+      (payload?.mediaUrls?.length ?? 0) > 0 ||
+      Object.keys(payload?.channelData ?? {}).length > 0,
+  );
+}
+
+function shouldFailEmptyCronDeliverable(params: {
+  deliveryRequested: boolean;
+  skipHeartbeatDelivery: boolean;
+  skipMessagingToolDelivery: boolean;
+  hasFatalErrorPayload: boolean;
+  summary?: string;
+  outputText?: string;
+  synthesizedText?: string;
+  deliveryPayloads: ReplyPayload[];
+  delivered?: boolean;
+  deliveryAttempted?: boolean;
+}): boolean {
+  if (
+    !params.deliveryRequested ||
+    params.skipHeartbeatDelivery ||
+    params.skipMessagingToolDelivery ||
+    params.hasFatalErrorPayload ||
+    params.delivered === true ||
+    params.deliveryAttempted === true
+  ) {
+    return false;
+  }
+  return (
+    !hasDeliverablePayload(params.deliveryPayloads) &&
+    !hasDeliverableText(params.summary) &&
+    !hasDeliverableText(params.outputText) &&
+    !hasDeliverableText(params.synthesizedText)
+  );
 }
 
 export async function runCronIsolatedAgentTurn(params: {
@@ -821,6 +866,19 @@ export async function runCronIsolatedAgentTurn(params: {
       deliveryAttempted: params?.deliveryAttempted,
       ...telemetry,
     });
+  const resolveEmptyDeliverableError = (params?: {
+    delivered?: boolean;
+    deliveryAttempted?: boolean;
+  }) =>
+    withRunSession({
+      status: "error",
+      error: "cron isolated run produced no deliverable payload",
+      summary,
+      outputText,
+      delivered: params?.delivered,
+      deliveryAttempted: params?.deliveryAttempted,
+      ...telemetry,
+    });
 
   // Skip delivery for heartbeat-only responses (HEARTBEAT_OK with no real content).
   const ackMaxChars = resolveHeartbeatAckMaxChars(agentCfg);
@@ -869,6 +927,26 @@ export async function runCronIsolatedAgentTurn(params: {
       deliveryAttempted:
         deliveryResult.result.deliveryAttempted ?? deliveryResult.deliveryAttempted,
     };
+    if (
+      resultWithDeliveryMeta.status === "ok" &&
+      shouldFailEmptyCronDeliverable({
+        deliveryRequested,
+        skipHeartbeatDelivery,
+        skipMessagingToolDelivery,
+        hasFatalErrorPayload,
+        summary: resultWithDeliveryMeta.summary,
+        outputText: resultWithDeliveryMeta.outputText,
+        synthesizedText: deliveryResult.synthesizedText,
+        deliveryPayloads: deliveryResult.deliveryPayloads,
+        delivered: resultWithDeliveryMeta.delivered,
+        deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
+      })
+    ) {
+      return resolveEmptyDeliverableError({
+        delivered: resultWithDeliveryMeta.delivered,
+        deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
+      });
+    }
     if (!hasFatalErrorPayload || deliveryResult.result.status !== "ok") {
       return resultWithDeliveryMeta;
     }
@@ -881,6 +959,23 @@ export async function runCronIsolatedAgentTurn(params: {
   const deliveryAttempted = deliveryResult.deliveryAttempted;
   summary = deliveryResult.summary;
   outputText = deliveryResult.outputText;
+
+  if (
+    shouldFailEmptyCronDeliverable({
+      deliveryRequested,
+      skipHeartbeatDelivery,
+      skipMessagingToolDelivery,
+      hasFatalErrorPayload,
+      summary,
+      outputText,
+      synthesizedText: deliveryResult.synthesizedText,
+      deliveryPayloads: deliveryResult.deliveryPayloads,
+      delivered,
+      deliveryAttempted,
+    })
+  ) {
+    return resolveEmptyDeliverableError({ delivered, deliveryAttempted });
+  }
 
   return resolveRunOutcome({ delivered, deliveryAttempted });
 }

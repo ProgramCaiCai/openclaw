@@ -7,6 +7,7 @@ import {
   isAuthErrorMessage,
   isAuthPermanentErrorMessage,
   isBillingErrorMessage,
+  isOpenAIRequestProcessingErrorMessage,
   isOverloadedErrorMessage,
   isPeriodicUsageLimitErrorMessage,
   isRateLimitErrorMessage,
@@ -19,6 +20,7 @@ export {
   isAuthErrorMessage,
   isAuthPermanentErrorMessage,
   isBillingErrorMessage,
+  isOpenAIRequestProcessingErrorMessage,
   isOverloadedErrorMessage,
   isRateLimitErrorMessage,
   isTimeoutErrorMessage,
@@ -382,6 +384,9 @@ export function isTransientHttpError(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) {
     return false;
+  }
+  if (isOpenAIRequestProcessingErrorMessage(trimmed)) {
+    return true;
   }
   const status = extractLeadingHttpStatus(trimmed);
   if (!status) {
@@ -791,6 +796,10 @@ export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boo
 
     if (isBillingErrorMessage(trimmed)) {
       return BILLING_ERROR_USER_MESSAGE;
+    }
+
+    if (isOpenAIRequestProcessingErrorMessage(trimmed)) {
+      return "LLM request timed out.";
     }
 
     if (isRawApiErrorPayload(trimmed) || isLikelyHttpErrorText(trimmed)) {

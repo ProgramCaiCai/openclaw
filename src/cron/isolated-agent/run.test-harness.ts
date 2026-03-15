@@ -43,6 +43,8 @@ export const logWarnMock = createMock();
 export const countActiveDescendantRunsMock = createMock();
 export const listDescendantRunsForRequesterMock = createMock();
 export const pickLastNonEmptyTextFromPayloadsMock = createMock();
+export const pickSummaryFromOutputMock = createMock();
+export const pickSummaryFromPayloadsMock = createMock();
 export const resolveCronDeliveryPlanMock = createMock();
 export const resolveDeliveryTargetMock = createMock();
 
@@ -283,8 +285,8 @@ vi.mock("./helpers.js", () => ({
   isHeartbeatOnlyResponse: vi.fn().mockReturnValue(false),
   pickLastDeliverablePayload: vi.fn().mockReturnValue(undefined),
   pickLastNonEmptyTextFromPayloads: pickLastNonEmptyTextFromPayloadsMock,
-  pickSummaryFromOutput: vi.fn().mockReturnValue("summary"),
-  pickSummaryFromPayloads: vi.fn().mockReturnValue("summary"),
+  pickSummaryFromOutput: pickSummaryFromOutputMock,
+  pickSummaryFromPayloads: pickSummaryFromPayloadsMock,
   resolveHeartbeatAckMaxChars: vi.fn().mockReturnValue(100),
 }));
 
@@ -387,6 +389,10 @@ export function resetRunCronIsolatedAgentTurnHarness(): void {
   listDescendantRunsForRequesterMock.mockReturnValue([]);
   pickLastNonEmptyTextFromPayloadsMock.mockReset();
   pickLastNonEmptyTextFromPayloadsMock.mockReturnValue("test output");
+  pickSummaryFromOutputMock.mockReset();
+  pickSummaryFromOutputMock.mockReturnValue("summary");
+  pickSummaryFromPayloadsMock.mockReset();
+  pickSummaryFromPayloadsMock.mockReturnValue("summary");
   resolveCronDeliveryPlanMock.mockReset();
   resolveCronDeliveryPlanMock.mockReturnValue({ requested: false, mode: "none" });
   resolveDeliveryTargetMock.mockReset();

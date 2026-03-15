@@ -14,6 +14,7 @@ import {
   isTransientHttpError,
   sanitizeUserFacingText,
 } from "../../agents/pi-embedded-helpers.js";
+import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import {
   resolveGroupSessionKey,
@@ -102,6 +103,7 @@ export async function runAgentTurnWithFallback(params: {
   resolvedVerboseLevel: VerboseLevel;
 }): Promise<AgentRunLoopResult> {
   const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
+  const OPENAI_RESPONSES_APIS = new Set(["openai-responses", "openai-codex-responses"]);
   let didLogHeartbeatStrip = false;
   let autoCompactionCompleted = false;
   // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
@@ -642,6 +644,38 @@ export async function runAgentTurnWithFallback(params: {
       kind: "final",
       payload: {
         text: "⚠️ Context overflow — this conversation is too large for the model. Use /new to start a fresh session.",
+      },
+    };
+  }
+
+  const actualProvider =
+    runResult?.meta?.agentMeta?.provider ?? fallbackProvider ?? params.followupRun.run.provider;
+  const actualModel =
+    runResult?.meta?.agentMeta?.model ?? fallbackModel ?? params.followupRun.run.model;
+  const actualApi = resolveModel(
+    actualProvider,
+    actualModel,
+    params.followupRun.run.agentDir,
+    params.followupRun.run.config,
+  ).model?.api;
+  const hasDeliverablePayload = runResult?.payloads?.some(
+    (payload) =>
+      Boolean(payload.text?.trim()) ||
+      Boolean(payload.mediaUrl) ||
+      (payload.mediaUrls?.length ?? 0) > 0,
+  );
+  if (
+    !finalEmbeddedError &&
+    !hasDeliverablePayload &&
+    runResult?.didSendViaMessagingTool !== true &&
+    actualApi &&
+    OPENAI_RESPONSES_APIS.has(actualApi)
+  ) {
+    return {
+      kind: "final",
+      payload: {
+        text: "⚠️ Upstream model stream ended before returning a complete reply. Please retry.",
+        isError: true,
       },
     };
   }

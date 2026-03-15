@@ -74,6 +74,15 @@ describe("sanitizeUserFacingText", () => {
     );
   });
 
+  it("rewrites OpenAI request-id boilerplate in error context", () => {
+    expect(
+      sanitizeUserFacingText(
+        "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 61dec274-7a71-4481-b30a-c119e3267c10 in your message.",
+        { errorContext: true },
+      ),
+    ).toBe("LLM request timed out.");
+  });
+
   it("returns a friendly message for rate limit errors in Error: prefixed payloads", () => {
     expect(sanitizeUserFacingText("Error: 429 Rate limit exceeded", { errorContext: true })).toBe(
       "⚠️ API rate limit reached. Please try again later.",

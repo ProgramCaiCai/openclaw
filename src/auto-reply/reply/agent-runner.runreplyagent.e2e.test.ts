@@ -1352,6 +1352,100 @@ describe("runReplyAgent typing (heartbeat)", () => {
     expect(payload.text).toContain("/new");
   });
 
+  it("surfaces an error when an openai-responses run ends with empty payloads", async () => {
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+      payloads: [],
+      meta: {
+        durationMs: 1,
+        agentMeta: {
+          sessionId: "session",
+          provider: "custom-openai",
+          model: "gpt-5.4",
+        },
+      },
+    }));
+
+    const { run } = createMinimalRun({
+      runOverrides: {
+        provider: "custom-openai",
+        model: "gpt-5.4",
+        config: {
+          models: {
+            providers: {
+              "custom-openai": {
+                baseUrl: "https://example.com/v1",
+                api: "openai-responses",
+                models: [
+                  {
+                    id: "gpt-5.4",
+                    name: "gpt-5.4",
+                    reasoning: true,
+                    input: ["text"],
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                    contextWindow: 128_000,
+                    maxTokens: 16_384,
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+    const res = await run();
+    const payload = Array.isArray(res) ? res[0] : res;
+    expect(payload).toMatchObject({
+      isError: true,
+      text: expect.stringContaining("complete reply"),
+    });
+  });
+
+  it("does not surface an error when openai-responses already sent via messaging tool", async () => {
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+      payloads: [],
+      didSendViaMessagingTool: true,
+      meta: {
+        durationMs: 1,
+        agentMeta: {
+          sessionId: "session",
+          provider: "custom-openai",
+          model: "gpt-5.4",
+        },
+      },
+    }));
+
+    const { run } = createMinimalRun({
+      runOverrides: {
+        provider: "custom-openai",
+        model: "gpt-5.4",
+        config: {
+          models: {
+            providers: {
+              "custom-openai": {
+                baseUrl: "https://example.com/v1",
+                api: "openai-responses",
+                models: [
+                  {
+                    id: "gpt-5.4",
+                    name: "gpt-5.4",
+                    reasoning: true,
+                    input: ["text"],
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                    contextWindow: 128_000,
+                    maxTokens: 16_384,
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const res = await run();
+    expect(res).toBeUndefined();
+  });
+
   it("surfaces overflow fallback when embedded payload text is whitespace-only", async () => {
     state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
       payloads: [{ text: "   \n\t  ", isError: true }],

@@ -1696,4 +1696,153 @@ describe("runReplyAgent billing error classification", () => {
     expect(payload?.text).toContain("billing error");
     expect(payload?.text).not.toContain("Context overflow");
   });
+
+  it("retries once after OpenAI request-id boilerplate failure and then succeeds", async () => {
+    vi.useFakeTimers();
+    runEmbeddedPiAgentMock
+      .mockRejectedValueOnce(
+        new Error(
+          "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 61dec274-7a71-4481-b30a-c119e3267c10 in your message.",
+        ),
+      )
+      .mockResolvedValueOnce({
+        payloads: [{ text: "Recovered response" }],
+        meta: {},
+      });
+
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "telegram",
+      MessageSid: "msg",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "interrupt" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "hello",
+      summaryLine: "hello",
+      enqueuedAt: Date.now(),
+      run: {
+        sessionId: "session",
+        sessionKey: "main",
+        messageProvider: "telegram",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "anthropic",
+        model: "claude",
+        thinkLevel: "low",
+        verboseLevel: "off",
+        elevatedLevel: "off",
+        bashElevated: {
+          enabled: false,
+          allowed: false,
+          defaultLevel: "off",
+        },
+        timeoutMs: 1_000,
+        blockReplyBreak: "message_end",
+      },
+    } as unknown as FollowupRun;
+
+    const runPromise = runReplyAgent({
+      commandBody: "hello",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      defaultModel: "anthropic/claude-opus-4-5",
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    const result = await runPromise;
+
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
+    expect(runtimeErrorMock).toHaveBeenCalledWith(
+      expect.stringContaining("Transient HTTP provider error before reply"),
+    );
+
+    const payload = Array.isArray(result) ? result[0] : result;
+    expect(payload?.text).toContain("Recovered response");
+  });
+
+  it("does not surface raw OpenAI request-id boilerplate after retry is exhausted", async () => {
+    vi.useFakeTimers();
+    runEmbeddedPiAgentMock.mockRejectedValue(
+      new Error(
+        "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 61dec274-7a71-4481-b30a-c119e3267c10 in your message.",
+      ),
+    );
+
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "telegram",
+      MessageSid: "msg",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "interrupt" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "hello",
+      summaryLine: "hello",
+      enqueuedAt: Date.now(),
+      run: {
+        sessionId: "session",
+        sessionKey: "main",
+        messageProvider: "telegram",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "anthropic",
+        model: "claude",
+        thinkLevel: "low",
+        verboseLevel: "off",
+        elevatedLevel: "off",
+        bashElevated: {
+          enabled: false,
+          allowed: false,
+          defaultLevel: "off",
+        },
+        timeoutMs: 1_000,
+        blockReplyBreak: "message_end",
+      },
+    } as unknown as FollowupRun;
+
+    const runPromise = runReplyAgent({
+      commandBody: "hello",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      defaultModel: "anthropic/claude-opus-4-5",
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    const result = await runPromise;
+
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
+    const payload = Array.isArray(result) ? result[0] : result;
+    expect(payload?.text).toContain("timed out");
+    expect(payload?.text).not.toContain("help.openai.com");
+    expect(payload?.text).not.toContain("request ID");
+  });
 });

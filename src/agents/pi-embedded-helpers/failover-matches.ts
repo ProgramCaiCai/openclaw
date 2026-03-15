@@ -2,6 +2,8 @@ type ErrorPattern = RegExp | string;
 
 const PERIODIC_USAGE_LIMIT_RE =
   /\b(?:daily|weekly|monthly)(?:\/(?:daily|weekly|monthly))* (?:usage )?limit(?:s)?(?: (?:exhausted|reached|exceeded))?\b/i;
+const OPENAI_REQUEST_PROCESSING_ERROR_RE =
+  /an error occurred while processing your request[\s\S]*please include the request id\b/i;
 
 const ERROR_PATTERNS = {
   rateLimit: [
@@ -47,6 +49,7 @@ const ERROR_PATTERNS = {
     /\benotfound\b/i,
     /\beai_again\b/i,
     /without sending (?:any )?chunks?/i,
+    OPENAI_REQUEST_PROCESSING_ERROR_RE,
     /\bstop reason:\s*(?:abort|error|malformed_response|network_error)\b/i,
     /\breason:\s*(?:abort|error|malformed_response|network_error)\b/i,
     /\bunhandled stop reason:\s*(?:abort|error|malformed_response|network_error)\b/i,
@@ -128,6 +131,10 @@ export function isRateLimitErrorMessage(raw: string): boolean {
 
 export function isTimeoutErrorMessage(raw: string): boolean {
   return matchesErrorPatterns(raw, ERROR_PATTERNS.timeout);
+}
+
+export function isOpenAIRequestProcessingErrorMessage(raw: string): boolean {
+  return OPENAI_REQUEST_PROCESSING_ERROR_RE.test(raw);
 }
 
 export function isPeriodicUsageLimitErrorMessage(raw: string): boolean {

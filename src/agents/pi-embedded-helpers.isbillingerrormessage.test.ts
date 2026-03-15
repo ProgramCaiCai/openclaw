@@ -518,6 +518,11 @@ describe("isTransientHttpError", () => {
     expect(isTransientHttpError("504 Gateway Timeout")).toBe(true);
     expect(isTransientHttpError("521 <!DOCTYPE html><html></html>")).toBe(true);
     expect(isTransientHttpError("529 Overloaded")).toBe(true);
+    expect(
+      isTransientHttpError(
+        "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 61dec274-7a71-4481-b30a-c119e3267c10 in your message.",
+      ),
+    ).toBe(true);
   });
 
   it("returns false for non-retryable or non-http text", () => {
@@ -781,6 +786,11 @@ describe("classifyFailoverReason", () => {
     expect(classifyFailoverReason(INSUFFICIENT_QUOTA_PAYLOAD)).toBe("billing");
     expect(classifyFailoverReason("deadline exceeded")).toBe("timeout");
     expect(classifyFailoverReason("request ended without sending any chunks")).toBe("timeout");
+    expect(
+      classifyFailoverReason(
+        "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 61dec274-7a71-4481-b30a-c119e3267c10 in your message.",
+      ),
+    ).toBe("timeout");
     expect(classifyFailoverReason("Connection error.")).toBe("timeout");
     expect(classifyFailoverReason("fetch failed")).toBe("timeout");
     expect(classifyFailoverReason("network error: ECONNREFUSED")).toBe("timeout");
