@@ -66,13 +66,14 @@ function expectSnapshotNamesAndPrompt(
   snapshot: ReturnType<typeof buildWorkspaceSkillSnapshot>,
   params: { contains?: string[]; omits?: string[] },
 ) {
+  const snapshotPrompt = snapshot.prompt ?? "";
   for (const name of params.contains ?? []) {
     expect(snapshot.skills.map((skill) => skill.name)).toContain(name);
-    expect(snapshot.prompt).toContain(name);
+    expect(snapshotPrompt).toContain(name);
   }
   for (const name of params.omits ?? []) {
     expect(snapshot.skills.map((skill) => skill.name)).not.toContain(name);
-    expect(snapshot.prompt).not.toContain(name);
+    expect(snapshotPrompt).not.toContain(name);
   }
 }
 
@@ -101,9 +102,10 @@ describe("buildWorkspaceSkillSnapshot", () => {
     });
 
     const snapshot = buildSnapshot(workspaceDir);
+    const snapshotPrompt = snapshot.prompt ?? "";
 
-    expect(snapshot.prompt).toContain("visible-skill");
-    expect(snapshot.prompt).not.toContain("hidden-skill");
+    expect(snapshotPrompt).toContain("visible-skill");
+    expect(snapshotPrompt).not.toContain("hidden-skill");
     expect(snapshot.skills.map((skill) => skill.name).toSorted()).toEqual([
       "hidden-skill",
       "visible-skill",
@@ -172,9 +174,10 @@ describe("buildWorkspaceSkillSnapshot", () => {
         bundledSkillsDir: path.join(workspaceDir, ".bundled"),
       }),
     );
+    const snapshotPrompt = snapshot.prompt ?? "";
 
-    expect(snapshot.prompt).toContain("⚠️ Skills truncated");
-    expect(snapshot.prompt.length).toBeLessThan(2000);
+    expect(snapshotPrompt).toContain("⚠️ Skills truncated");
+    expect(snapshotPrompt.length).toBeLessThan(2000);
   });
 
   it("limits discovery for nested repo-style skills roots (dir/skills/*)", async () => {
@@ -198,11 +201,12 @@ describe("buildWorkspaceSkillSnapshot", () => {
         bundledSkillsDir: path.join(workspaceDir, ".bundled"),
       }),
     );
+    const snapshotPrompt = snapshot.prompt ?? "";
 
     // We should only have loaded a small subset.
     expect(snapshot.skills.length).toBeLessThanOrEqual(5);
-    expect(snapshot.prompt).toContain("repo-skill-00");
-    expect(snapshot.prompt).not.toContain("repo-skill-07");
+    expect(snapshotPrompt).toContain("repo-skill-00");
+    expect(snapshotPrompt).not.toContain("repo-skill-07");
   });
 
   it("skips skills whose SKILL.md exceeds maxSkillFileBytes", async () => {

@@ -2,13 +2,24 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
 import * as jsonFiles from "../../infra/json-files.js";
 import {
   clearSessionStoreCacheForTest,
   loadSessionStore,
   mergeSessionEntry,
   resolveAndPersistSessionFile,
+  saveSessionStore,
   updateSessionStore,
 } from "../sessions.js";
 import type { SessionConfig } from "../types.base.js";
@@ -219,6 +230,51 @@ describe("session store lock (Promise chain mutex)", () => {
     writeSpy.mockRestore();
   });
 
+  it("strips runtime-only skill snapshot payloads from persisted session stores", async () => {
+    const key = "agent:main:runtime-snapshot";
+    const { storePath } = await makeTmpStore();
+    const runtimeResolvedSkill = {
+      name: "brainstorming",
+      filePath: "/tmp/skills/brainstorming/SKILL.md",
+      baseDir: "/tmp/skills/brainstorming",
+      source: "workspace",
+      content: "# Brainstorming",
+    };
+    const store: Record<string, SessionEntry> = {
+      [key]: {
+        sessionId: "sess-runtime-snapshot",
+        updatedAt: Date.now(),
+        skillsSnapshot: {
+          prompt: "very large rendered prompt",
+          skills: [{ name: "brainstorming", primaryEnv: "OPENAI_API_KEY" }],
+          resolvedSkills: [runtimeResolvedSkill as never],
+          version: 3,
+        },
+      },
+    };
+
+    await saveSessionStore(storePath, store, { skipMaintenance: true });
+
+    expect(store[key]?.skillsSnapshot?.prompt).toBe("very large rendered prompt");
+    expect(store[key]?.skillsSnapshot?.resolvedSkills).toHaveLength(1);
+
+    const persisted = loadSessionStore(storePath, { skipCache: true })[key];
+    expect(persisted?.skillsSnapshot?.skills).toEqual([
+      { name: "brainstorming", primaryEnv: "OPENAI_API_KEY" },
+    ]);
+    expect(persisted?.skillsSnapshot?.version).toBe(3);
+    expect(persisted?.skillsSnapshot?.prompt).toBeUndefined();
+    expect(persisted?.skillsSnapshot?.resolvedSkills).toBeUndefined();
+  });
+
+  it("accepts persisted skill snapshots without runtime-only fields", () => {
+    const persistedSnapshot = {
+      skills: [{ name: "brainstorming", primaryEnv: "OPENAI_API_KEY" }],
+      version: 3,
+    } satisfies NonNullable<SessionEntry["skillsSnapshot"]>;
+
+    expectTypeOf(persistedSnapshot).toMatchTypeOf<NonNullable<SessionEntry["skillsSnapshot"]>>();
+  });
   it("multiple consecutive errors do not permanently poison the queue", async () => {
     const key = "agent:main:multi-err";
     const { storePath } = await makeTmpStore({

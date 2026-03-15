@@ -80,7 +80,8 @@ export type SkillEligibilityContext = {
 };
 
 export type SkillSnapshot = {
-  prompt: string;
+  /** Persisted session snapshots may omit the rendered prompt and rebuild it lazily at runtime. */
+  prompt?: string;
   skills: Array<{ name: string; primaryEnv?: string; requiredEnv?: string[] }>;
   /** Normalized agent-level filter used to build this snapshot; undefined means unrestricted. */
   skillFilter?: string[];
