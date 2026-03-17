@@ -30,6 +30,7 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   modelRegistry: ModelRegistry;
   thinkLevel: ThinkLevel;
   legacyBeforeAgentStartResult?: PluginHookBeforeAgentStartResult;
+  suppressGlobalLifecycleEvents?: boolean;
 };
 
 export type EmbeddedRunAttemptResult = {

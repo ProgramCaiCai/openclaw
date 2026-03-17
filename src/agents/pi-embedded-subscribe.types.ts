@@ -29,6 +29,12 @@ export type SubscribeEmbeddedPiSessionParams = {
   onPartialReply?: (payload: { text?: string; mediaUrls?: string[] }) => void | Promise<void>;
   onAssistantMessageStart?: () => void | Promise<void>;
   onAgentEvent?: (evt: { stream: string; data: Record<string, unknown> }) => void | Promise<void>;
+  /**
+   * When true, the caller is responsible for emitting lifecycle events on the
+   * global agent event bus. subscribeEmbeddedPiSession still forwards lifecycle
+   * phases to `onAgentEvent` for caller-local bookkeeping.
+   */
+  suppressGlobalLifecycleEvents?: boolean;
   enforceFinalTag?: boolean;
   config?: OpenClawConfig;
   sessionKey?: string;

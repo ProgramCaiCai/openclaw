@@ -34,22 +34,6 @@ type EmbeddedRunParams = {
   onAgentEvent?: (evt: { stream?: string; data?: { phase?: string; willRetry?: boolean } }) => void;
 };
 
-type TranscriptMessage = {
-  role?: string;
-  content?: unknown;
-};
-
-type TranscriptAppendMessage = {
-  role: string;
-  content: unknown;
-  timestamp?: number;
-  stopReason?: string;
-  api?: string;
-  provider?: string;
-  model?: string;
-  usage?: unknown;
-};
-
 const state = vi.hoisted(() => ({
   runEmbeddedPiAgentMock: vi.fn(),
   runCliAgentMock: vi.fn(),
@@ -122,11 +106,6 @@ beforeEach(() => {
   vi.stubEnv("OPENCLAW_TEST_FAST", "1");
 });
 
-const OPENAI_RESPONSES_INCOMPLETE_RUN_SILENT_RETRIES = 3;
-const OPENAI_RESPONSES_INCOMPLETE_RUN_TOTAL_ATTEMPTS =
-  OPENAI_RESPONSES_INCOMPLETE_RUN_SILENT_RETRIES + 1;
-const OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS = 2_500;
-
 function createIncompleteOpenAiResponsesRunResult() {
   return {
     payloads: [],
@@ -139,66 +118,6 @@ function createIncompleteOpenAiResponsesRunResult() {
       },
     },
   };
-}
-
-function createTranscriptUsage() {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      total: 0,
-    },
-  };
-}
-
-function textFromTranscriptContent(content: unknown): string | undefined {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content) && content[0]?.type === "text") {
-    return (content[0] as { text?: string }).text;
-  }
-  return undefined;
-}
-
-async function readTranscriptMessages(sessionFile: string): Promise<TranscriptMessage[]> {
-  const raw = await fs.readFile(sessionFile, "utf-8").catch(() => "");
-  return raw
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as { type?: string; message?: TranscriptMessage })
-    .filter((entry) => entry.type === "message")
-    .map((entry) => entry.message ?? {});
-}
-
-async function readTranscriptSnapshot(sessionFile: string) {
-  const messages = await readTranscriptMessages(sessionFile);
-  return messages.map((message) => ({
-    role: message.role,
-    text: textFromTranscriptContent(message.content),
-  }));
-}
-
-async function appendTranscriptMessage(sessionFile: string, message: TranscriptAppendMessage) {
-  await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-  await fs.appendFile(
-    sessionFile,
-    `${JSON.stringify({
-      type: "message",
-      message: {
-        ...message,
-        timestamp: message.timestamp ?? Date.now(),
-      },
-    })}\n`,
-    "utf-8",
-  );
 }
 
 function createOpenAiResponsesRunOverrides(params?: {
@@ -1494,140 +1413,12 @@ describe("runReplyAgent typing (heartbeat)", () => {
     expect(payload.text).toContain("/new");
   });
 
-  it("keeps retrying incomplete openai-responses runs until the third silent retry succeeds", async () => {
-    await withTempStateDir(async () => {
-      const sessionId = "session-incomplete-retry-third-success";
-      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
-      const prompts: string[] = [];
-      const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-      state.runEmbeddedPiAgentMock
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return {
-            payloads: [{ text: "Recovered reply" }],
-            meta: {
-              durationMs: 1,
-              agentMeta: {
-                sessionId,
-                provider: "custom-openai",
-                model: "gpt-5.4",
-              },
-            },
-          };
-        });
-
-      const { run } = createMinimalRun({
-        runOverrides: {
-          ...createOpenAiResponsesRunOverrides(),
-          sessionId,
-          sessionFile: transcriptPath,
-        },
-      });
-
-      const res = await run();
-      const payload = Array.isArray(res) ? res[0] : res;
-
-      expect(payload).toMatchObject({
-        text: "Recovered reply",
-      });
-      expect(prompts).toEqual(["hello", "hello", "hello", "hello"]);
-      expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(
-        OPENAI_RESPONSES_INCOMPLETE_RUN_TOTAL_ATTEMPTS,
-      );
-      expect(sleepSpy).toHaveBeenCalledTimes(3);
-      expect(sleepSpy).toHaveBeenNthCalledWith(1, OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS);
-      sleepSpy.mockRestore();
-    });
-  });
-
-  it("honors the configured silent retry count for incomplete openai-responses runs", async () => {
-    await withTempStateDir(async () => {
-      const sessionId = "session-incomplete-retry-configured-count";
-      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
-      const prompts: string[] = [];
-      const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-      state.runEmbeddedPiAgentMock
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          return {
-            payloads: [{ text: "Recovered after one configured retry" }],
-            meta: {
-              durationMs: 1,
-              agentMeta: {
-                sessionId,
-                provider: "custom-openai",
-                model: "gpt-5.4",
-              },
-            },
-          };
-        });
-
-      const { run } = createMinimalRun({
-        runOverrides: {
-          ...createOpenAiResponsesRunOverrides({
-            incompleteRunMaxSilentRetries: 1,
-          }),
-          sessionId,
-          sessionFile: transcriptPath,
-        },
-      });
-
-      const res = await run();
-      const payload = Array.isArray(res) ? res[0] : res;
-
-      expect(payload).toMatchObject({
-        text: "Recovered after one configured retry",
-      });
-      expect(prompts).toEqual(["hello", "hello"]);
-      expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
-      expect(sleepSpy).toHaveBeenCalledTimes(1);
-      expect(sleepSpy).toHaveBeenCalledWith(OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS);
-      sleepSpy.mockRestore();
-    });
-  });
-
-  it("replays the original prompt on later incomplete openai-responses retries", async () => {
-    const prompts: string[] = [];
+  it("fails closed when embedded runner still returns an incomplete openai-responses result", async () => {
     const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-    state.runEmbeddedPiAgentMock
-      .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-        prompts.push(params.prompt ?? "");
-        return createIncompleteOpenAiResponsesRunResult();
-      })
-      .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-        prompts.push(params.prompt ?? "");
-        return createIncompleteOpenAiResponsesRunResult();
-      })
-      .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-        prompts.push(params.prompt ?? "");
-        return {
-          payloads: [{ text: "Recovered after second retry" }],
-          meta: {
-            durationMs: 1,
-            agentMeta: {
-              sessionId: "session",
-              provider: "custom-openai",
-              model: "gpt-5.4",
-            },
-          },
-        };
-      });
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async (params: EmbeddedRunParams) => {
+      expect(params.prompt).toBe("hello");
+      return createIncompleteOpenAiResponsesRunResult();
+    });
 
     const { run } = createMinimalRun({
       runOverrides: createOpenAiResponsesRunOverrides(),
@@ -1636,302 +1427,31 @@ describe("runReplyAgent typing (heartbeat)", () => {
     const res = await run();
     const payload = Array.isArray(res) ? res[0] : res;
 
-    expect(payload).toMatchObject({
-      text: "Recovered after second retry",
-    });
-    expect(prompts).toEqual(["hello", "hello", "hello"]);
-    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(3);
-    expect(sleepSpy).toHaveBeenCalledTimes(2);
-    sleepSpy.mockRestore();
-  });
-
-  it("restores the pre-turn transcript before retrying an incomplete openai-responses run", async () => {
-    await withTempStateDir(async (stateDir) => {
-      const sessionId = "session-managed-retry";
-      const storePath = path.join(stateDir, "sessions", "sessions.json");
-      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
-      const sessionEntry: SessionEntry = {
-        sessionId,
-        updatedAt: Date.now(),
-        sessionFile: transcriptPath,
-      };
-      const sessionStore = { main: sessionEntry };
-      const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-
-      await fs.mkdir(path.dirname(storePath), { recursive: true });
-      await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
-      await appendTranscriptMessage(transcriptPath, {
-        role: "user",
-        content: [{ type: "text", text: "seed user" }],
-      });
-      await appendTranscriptMessage(transcriptPath, {
-        role: "assistant",
-        content: [{ type: "text", text: "seed assistant" }],
-        stopReason: "stop",
-        api: "openai-responses",
-        provider: "custom-openai",
-        model: "gpt-5.4",
-        usage: createTranscriptUsage(),
-      });
-
-      const initialSnapshot = await readTranscriptSnapshot(transcriptPath);
-      const attemptBaselines: Array<Awaited<ReturnType<typeof readTranscriptSnapshot>>> = [];
-      const prompts: string[] = [];
-
-      state.runEmbeddedPiAgentMock
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          attemptBaselines.push(await readTranscriptSnapshot(transcriptPath));
-          await appendTranscriptMessage(transcriptPath, {
-            role: "user",
-            content: [{ type: "text", text: params.prompt ?? "" }],
-          });
-          await appendTranscriptMessage(transcriptPath, {
-            role: "assistant",
-            content: [{ type: "text", text: "bad tail from incomplete attempt" }],
-            stopReason: "error",
-            api: "openai-responses",
-            provider: "custom-openai",
-            model: "gpt-5.4",
-            usage: createTranscriptUsage(),
-          });
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          prompts.push(params.prompt ?? "");
-          attemptBaselines.push(await readTranscriptSnapshot(transcriptPath));
-          await appendTranscriptMessage(transcriptPath, {
-            role: "user",
-            content: [{ type: "text", text: params.prompt ?? "" }],
-          });
-          await appendTranscriptMessage(transcriptPath, {
-            role: "assistant",
-            content: [{ type: "text", text: "Recovered after managed retry" }],
-            stopReason: "stop",
-            api: "openai-responses",
-            provider: "custom-openai",
-            model: "gpt-5.4",
-            usage: createTranscriptUsage(),
-          });
-          return {
-            payloads: [{ text: "Recovered after managed retry" }],
-            meta: {
-              durationMs: 1,
-              agentMeta: {
-                sessionId,
-                provider: "custom-openai",
-                model: "gpt-5.4",
-              },
-            },
-          };
-        });
-
-      const { run } = createMinimalRun({
-        sessionEntry,
-        sessionStore,
-        sessionKey: "main",
-        storePath,
-        runOverrides: {
-          ...createOpenAiResponsesRunOverrides({
-            incompleteRunMaxSilentRetries: 1,
-          }),
-          sessionId,
-          sessionFile: transcriptPath,
-        },
-      });
-
-      const res = await run();
-      const payload = Array.isArray(res) ? res[0] : res;
-
-      expect(payload).toMatchObject({ text: "Recovered after managed retry" });
-      expect(prompts).toEqual(["hello", "hello"]);
-      expect(attemptBaselines).toEqual([initialSnapshot, initialSnapshot]);
-      await expect(readTranscriptSnapshot(transcriptPath)).resolves.toEqual([
-        ...initialSnapshot,
-        { role: "user", text: "hello" },
-        { role: "assistant", text: "Recovered after managed retry" },
-      ]);
-      expect(sleepSpy).toHaveBeenCalledTimes(1);
-      sleepSpy.mockRestore();
-    });
-  });
-
-  it("drops transient incomplete attempts from ordinary transcript history after retries are exhausted", async () => {
-    await withTempStateDir(async (stateDir) => {
-      const sessionId = "session-managed-final-failure";
-      const storePath = path.join(stateDir, "sessions", "sessions.json");
-      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
-      const sessionEntry: SessionEntry = {
-        sessionId,
-        updatedAt: Date.now(),
-        sessionFile: transcriptPath,
-      };
-      const sessionStore = { main: sessionEntry };
-      const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-
-      await fs.mkdir(path.dirname(storePath), { recursive: true });
-      await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
-      await appendTranscriptMessage(transcriptPath, {
-        role: "user",
-        content: [{ type: "text", text: "seed user" }],
-      });
-      await appendTranscriptMessage(transcriptPath, {
-        role: "assistant",
-        content: [{ type: "text", text: "seed assistant" }],
-        stopReason: "stop",
-        api: "openai-responses",
-        provider: "custom-openai",
-        model: "gpt-5.4",
-        usage: createTranscriptUsage(),
-      });
-
-      const initialSnapshot = await readTranscriptSnapshot(transcriptPath);
-      const attemptBaselines: Array<Awaited<ReturnType<typeof readTranscriptSnapshot>>> = [];
-
-      state.runEmbeddedPiAgentMock
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          attemptBaselines.push(await readTranscriptSnapshot(transcriptPath));
-          await appendTranscriptMessage(transcriptPath, {
-            role: "user",
-            content: [{ type: "text", text: params.prompt ?? "" }],
-          });
-          await appendTranscriptMessage(transcriptPath, {
-            role: "assistant",
-            content: [{ type: "text", text: "failed attempt one" }],
-            stopReason: "error",
-            api: "openai-responses",
-            provider: "custom-openai",
-            model: "gpt-5.4",
-            usage: createTranscriptUsage(),
-          });
-          return createIncompleteOpenAiResponsesRunResult();
-        })
-        .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-          attemptBaselines.push(await readTranscriptSnapshot(transcriptPath));
-          await appendTranscriptMessage(transcriptPath, {
-            role: "user",
-            content: [{ type: "text", text: params.prompt ?? "" }],
-          });
-          await appendTranscriptMessage(transcriptPath, {
-            role: "assistant",
-            content: [{ type: "text", text: "failed attempt two" }],
-            stopReason: "error",
-            api: "openai-responses",
-            provider: "custom-openai",
-            model: "gpt-5.4",
-            usage: createTranscriptUsage(),
-          });
-          return createIncompleteOpenAiResponsesRunResult();
-        });
-
-      const { run } = createMinimalRun({
-        sessionEntry,
-        sessionStore,
-        sessionKey: "main",
-        storePath,
-        runOverrides: {
-          ...createOpenAiResponsesRunOverrides({
-            incompleteRunMaxSilentRetries: 1,
-          }),
-          sessionId,
-          sessionFile: transcriptPath,
-        },
-      });
-
-      const res = await run();
-      const payload = Array.isArray(res) ? res[0] : res;
-
-      expect(payload).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("Automatic retry failed 1 times"),
-      });
-      expect(attemptBaselines).toEqual([initialSnapshot, initialSnapshot]);
-      await expect(readTranscriptSnapshot(transcriptPath)).resolves.toEqual(initialSnapshot);
-      expect(sleepSpy).toHaveBeenCalledTimes(1);
-      sleepSpy.mockRestore();
-    });
-  });
-
-  it("falls back to continue when the retry baseline cannot be reconstructed", async () => {
-    const prompts: string[] = [];
-    const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-    state.runEmbeddedPiAgentMock
-      .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-        prompts.push(params.prompt ?? "");
-        return {
-          payloads: [],
-          meta: {
-            durationMs: 1,
-            agentMeta: {
-              provider: "custom-openai",
-              model: "gpt-5.4",
-            },
-          },
-        };
-      })
-      .mockImplementationOnce(async (params: EmbeddedRunParams) => {
-        prompts.push(params.prompt ?? "");
-        return {
-          payloads: [{ text: "Recovered via fallback" }],
-          meta: {
-            durationMs: 1,
-            agentMeta: {
-              sessionId: "session",
-              provider: "custom-openai",
-              model: "gpt-5.4",
-            },
-          },
-        };
-      });
-
-    const { run } = createMinimalRun({
-      runOverrides: {
-        ...createOpenAiResponsesRunOverrides({
-          incompleteRunMaxSilentRetries: 1,
-        }),
-        sessionId: "   ",
-      },
-    });
-
-    const res = await run();
-    const payload = Array.isArray(res) ? res[0] : res;
-
-    expect(payload).toMatchObject({ text: "Recovered via fallback" });
-    expect(prompts).toEqual(["hello", "continue"]);
-    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
-    expect(sleepSpy).toHaveBeenCalledTimes(1);
-    sleepSpy.mockRestore();
-  });
-
-  it("surfaces an error only after all three silent retries still end with empty payloads", async () => {
-    const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-    state.runEmbeddedPiAgentMock.mockImplementation(async () =>
-      createIncompleteOpenAiResponsesRunResult(),
-    );
-
-    const { run } = createMinimalRun({
-      runOverrides: createOpenAiResponsesRunOverrides(),
-    });
-
-    const res = await run();
-    const payload = Array.isArray(res) ? res[0] : res;
-
-    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(
-      OPENAI_RESPONSES_INCOMPLETE_RUN_TOTAL_ATTEMPTS,
-    );
+    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
     expect(payload).toMatchObject({
       isError: true,
-      text: expect.stringContaining("Automatic retry failed 3 times"),
+      text: expect.stringContaining("automatic retry sequence finished"),
     });
-    expect(sleepSpy).toHaveBeenCalledTimes(3);
+    expect(sleepSpy).not.toHaveBeenCalled();
     sleepSpy.mockRestore();
   });
 
-  it("uses the configured silent retry count in the final incomplete-run error", async () => {
+  it("passes through a recovered reply when embedded runner already handled incomplete retries", async () => {
     const sleepSpy = vi.spyOn(utilsModule, "sleep").mockResolvedValue(undefined);
-    state.runEmbeddedPiAgentMock.mockImplementation(async () =>
-      createIncompleteOpenAiResponsesRunResult(),
-    );
+    state.runEmbeddedPiAgentMock.mockImplementationOnce(async (params: EmbeddedRunParams) => {
+      expect(params.prompt).toBe("hello");
+      return {
+        payloads: [{ text: "Recovered after embedded retry" }],
+        meta: {
+          durationMs: 1,
+          agentMeta: {
+            sessionId: "session",
+            provider: "custom-openai",
+            model: "gpt-5.4",
+          },
+        },
+      };
+    });
 
     const { run } = createMinimalRun({
       runOverrides: createOpenAiResponsesRunOverrides({
@@ -1942,12 +1462,11 @@ describe("runReplyAgent typing (heartbeat)", () => {
     const res = await run();
     const payload = Array.isArray(res) ? res[0] : res;
 
-    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
+    expect(state.runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
     expect(payload).toMatchObject({
-      isError: true,
-      text: expect.stringContaining("Automatic retry failed 1 times"),
+      text: "Recovered after embedded retry",
     });
-    expect(sleepSpy).toHaveBeenCalledTimes(1);
+    expect(sleepSpy).not.toHaveBeenCalled();
     sleepSpy.mockRestore();
   });
 

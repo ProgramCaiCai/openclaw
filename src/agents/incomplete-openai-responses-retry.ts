@@ -1,14 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
-import { acquireSessionWriteLock } from "../../agents/session-write-lock.js";
 import {
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
   type SessionEntry,
-} from "../../config/sessions.js";
-import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
+} from "../config/sessions.js";
+import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES } from "./pi-project-settings.js";
+import { acquireSessionWriteLock } from "./session-write-lock.js";
 
 const INCOMPLETE_OPENAI_RESPONSES_FALLBACK_PROMPT = "continue";
+const OPENAI_RESPONSES_APIS = new Set(["openai-responses", "openai-codex-responses"]);
+
+export const OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS = 2_500;
 
 type ManagedRetryBaselineSnapshot =
   | {
@@ -146,4 +150,71 @@ export async function restoreIncompleteOpenAiResponsesRetryBaseline(
 
 export function buildIncompleteOpenAiResponsesFallbackPrompt(): string {
   return INCOMPLETE_OPENAI_RESPONSES_FALLBACK_PROMPT;
+}
+
+export function hasDeliverablePayload(
+  payloads:
+    | Array<{
+        text?: string;
+        mediaUrl?: string;
+        mediaUrls?: string[];
+        channelData?: Record<string, unknown>;
+      }>
+    | undefined,
+): boolean {
+  return (
+    payloads?.some(
+      (payload) =>
+        Boolean(payload.text?.trim()) ||
+        Boolean(payload.mediaUrl?.trim()) ||
+        (payload.mediaUrls?.length ?? 0) > 0 ||
+        Object.keys(payload.channelData ?? {}).length > 0,
+    ) ?? false
+  );
+}
+
+export function isIncompleteOpenAiResponsesRun(params: {
+  api?: string;
+  payloads:
+    | Array<{
+        text?: string;
+        mediaUrl?: string;
+        mediaUrls?: string[];
+        channelData?: Record<string, unknown>;
+      }>
+    | undefined;
+  didSendViaMessagingTool?: boolean;
+  hasEmbeddedError?: boolean;
+}): boolean {
+  if (
+    params.hasEmbeddedError ||
+    params.didSendViaMessagingTool === true ||
+    hasDeliverablePayload(params.payloads)
+  ) {
+    return false;
+  }
+  return Boolean(params.api && OPENAI_RESPONSES_APIS.has(params.api));
+}
+
+export function formatIncompleteOpenAiResponsesRetryLog(params: {
+  retryAttempt: number;
+  maxSilentRetries: number;
+  restoredBaseline: boolean;
+  reason?: string;
+}): string {
+  const strategy = params.restoredBaseline
+    ? "replaying the original prompt from the restored pre-turn baseline"
+    : `falling back to literal continue${params.reason ? ` (${params.reason})` : ""}`;
+  return `OpenAI Responses run ended without a deliverable payload. Retrying ${params.retryAttempt}/${params.maxSilentRetries} in ${OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS}ms, ${strategy}.`;
+}
+
+export function formatIncompleteOpenAiResponsesUserMessage(
+  retryCount: number,
+  maxSilentRetries = DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES,
+): string {
+  if (retryCount >= maxSilentRetries) {
+    return `⚠️ Automatic retry failed ${maxSilentRetries} times because the upstream model stream kept ending early. Please try again later or switch to another model/provider.`;
+  }
+
+  return "⚠️ Upstream model stream ended before the automatic retry sequence finished. Please retry.";
 }
