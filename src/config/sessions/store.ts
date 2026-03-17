@@ -165,6 +165,33 @@ function normalizeSessionStore(store: Record<string, SessionEntry>): void {
   }
 }
 
+function getPersistedSessionEntry(entry: SessionEntry): SessionEntry {
+  const snapshot = entry.skillsSnapshot;
+  if (!snapshot || (snapshot.prompt === undefined && snapshot.resolvedSkills === undefined)) {
+    return entry;
+  }
+  const { prompt: _prompt, resolvedSkills: _resolvedSkills, ...persistedSnapshot } = snapshot;
+  return {
+    ...entry,
+    skillsSnapshot: persistedSnapshot,
+  };
+}
+
+function getPersistedSessionStore(
+  store: Record<string, SessionEntry>,
+): Record<string, SessionEntry> {
+  let persistedStore: Record<string, SessionEntry> | undefined;
+  for (const [key, entry] of Object.entries(store)) {
+    const persistedEntry = getPersistedSessionEntry(entry);
+    if (persistedEntry === entry) {
+      continue;
+    }
+    persistedStore ??= { ...store };
+    persistedStore[key] = persistedEntry;
+  }
+  return persistedStore ?? store;
+}
+
 export function clearSessionStoreCacheForTest(): void {
   clearSessionStoreCaches();
   for (const queue of LOCK_QUEUES.values()) {
@@ -455,7 +482,7 @@ async function saveSessionStoreUnlocked(
   }
 
   await fs.promises.mkdir(path.dirname(storePath), { recursive: true });
-  const json = JSON.stringify(store, null, 2);
+  const json = JSON.stringify(getPersistedSessionStore(store), null, 2);
   if (getSerializedSessionStore(storePath) === json) {
     updateSessionStoreWriteCaches({ storePath, store, serialized: json });
     return;
