@@ -4,6 +4,7 @@ import { applyMergePatch } from "../config/merge-patch.js";
 import { applyPiCompactionSettingsFromConfig } from "./pi-settings.js";
 
 export const DEFAULT_EMBEDDED_PI_PROJECT_SETTINGS_POLICY = "sanitize";
+export const DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES = 3;
 export const SANITIZED_PROJECT_PI_KEYS = ["shellPath", "shellCommandPrefix"] as const;
 
 export type EmbeddedPiProjectSettingsPolicy = "trusted" | "sanitize" | "ignore";
@@ -27,6 +28,14 @@ export function resolveEmbeddedPiProjectSettingsPolicy(
     return raw;
   }
   return DEFAULT_EMBEDDED_PI_PROJECT_SETTINGS_POLICY;
+}
+
+export function resolveEmbeddedPiIncompleteRunMaxSilentRetries(cfg?: OpenClawConfig): number {
+  const raw = cfg?.agents?.defaults?.embeddedPi?.incompleteRunMaxSilentRetries;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  return DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES;
 }
 
 export function buildEmbeddedPiSettingsSnapshot(params: {

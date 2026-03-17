@@ -122,6 +122,10 @@ function resolveAnnounceRetryDelayMs(retryCount: number) {
   return Math.min(baseDelay, MAX_ANNOUNCE_RETRY_DELAY_MS);
 }
 
+function hasFrozenDeliverableText(value: string | null | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function logAnnounceGiveUp(entry: SubagentRunRecord, reason: "retry-limit" | "expiry") {
   const retryCount = entry.announceRetryCount ?? 0;
   const endedAgoMs =
@@ -492,6 +496,20 @@ async function completeSubagentRun(params: {
   }
 
   if (await freezeRunResultAtCompletion(entry)) {
+    mutated = true;
+  }
+
+  if (
+    params.reason === SUBAGENT_ENDED_REASON_COMPLETE &&
+    entry.expectsCompletionMessage === true &&
+    entry.outcome?.status === "ok" &&
+    !hasFrozenDeliverableText(entry.frozenResultText) &&
+    !hasFrozenDeliverableText(entry.fallbackFrozenResultText)
+  ) {
+    entry.outcome = {
+      status: "error",
+      error: "subagent completed without a deliverable reply",
+    };
     mutated = true;
   }
 

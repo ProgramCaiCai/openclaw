@@ -180,6 +180,8 @@ export type AgentDefaultsConfig = {
      * - trusted: trust project settings as-is
      */
     projectSettingsPolicy?: "trusted" | "sanitize" | "ignore";
+    /** Silent retries for incomplete OpenAI Responses runs before surfacing an error. Default: 3. */
+    incompleteRunMaxSilentRetries?: number;
   };
   /** Vector memory search configuration (per-agent overrides supported). */
   memorySearch?: MemorySearchConfig;

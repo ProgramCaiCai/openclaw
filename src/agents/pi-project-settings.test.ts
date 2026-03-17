@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildEmbeddedPiSettingsSnapshot,
+  DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES,
   DEFAULT_EMBEDDED_PI_PROJECT_SETTINGS_POLICY,
+  resolveEmbeddedPiIncompleteRunMaxSilentRetries,
   resolveEmbeddedPiProjectSettingsPolicy,
 } from "./pi-project-settings.js";
 
@@ -23,6 +25,27 @@ describe("resolveEmbeddedPiProjectSettingsPolicy", () => {
         agents: { defaults: { embeddedPi: { projectSettingsPolicy: "ignore" } } },
       }),
     ).toBe("ignore");
+  });
+});
+
+describe("resolveEmbeddedPiIncompleteRunMaxSilentRetries", () => {
+  it("defaults to 3 silent retries", () => {
+    expect(resolveEmbeddedPiIncompleteRunMaxSilentRetries()).toBe(
+      DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES,
+    );
+  });
+
+  it("accepts configured non-negative integers", () => {
+    expect(
+      resolveEmbeddedPiIncompleteRunMaxSilentRetries({
+        agents: { defaults: { embeddedPi: { incompleteRunMaxSilentRetries: 5 } } },
+      }),
+    ).toBe(5);
+    expect(
+      resolveEmbeddedPiIncompleteRunMaxSilentRetries({
+        agents: { defaults: { embeddedPi: { incompleteRunMaxSilentRetries: 0 } } },
+      }),
+    ).toBe(0);
   });
 });
 

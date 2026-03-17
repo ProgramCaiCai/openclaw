@@ -158,6 +158,7 @@ describe("subagent registry lifecycle error grace", () => {
 
   it("ignores transient lifecycle errors when run retries and then ends successfully", async () => {
     registerCompletionRun("run-transient-error", "transient-error", "transient error test");
+    captureCompletionReplySpy.mockResolvedValueOnce("Recovered final deliverable");
 
     emitLifecycleEvent("run-transient-error", {
       phase: "error",
@@ -200,6 +201,26 @@ describe("subagent registry lifecycle error grace", () => {
     expect(announceSpy).toHaveBeenCalledTimes(1);
     expect(readFirstAnnounceOutcome()?.status).toBe("error");
     expect(readFirstAnnounceOutcome()?.error).toBe("fatal failure");
+  });
+
+  it("treats completion-message runs with no deliverable reply as an error", async () => {
+    registerCompletionRun("run-empty-deliverable", "empty-deliverable", "empty deliverable test");
+
+    emitLifecycleEvent("run-empty-deliverable", {
+      phase: "end",
+      endedAt: 3_000,
+    });
+    await flushAsync();
+
+    expect(announceSpy).toHaveBeenCalledTimes(1);
+    expect(readFirstAnnounceOutcome()?.status).toBe("error");
+    expect(readFirstAnnounceOutcome()?.error).toContain("deliverable reply");
+
+    const run = mod
+      .listSubagentRunsForRequester(MAIN_REQUESTER_SESSION_KEY)
+      .find((candidate) => candidate.runId === "run-empty-deliverable");
+    expect(run?.outcome?.status).toBe("error");
+    expect(run?.outcome?.error).toContain("deliverable reply");
   });
 
   it("freezes completion result at run termination across deferred announce retries", async () => {

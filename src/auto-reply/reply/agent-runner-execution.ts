@@ -14,7 +14,12 @@ import {
   isTransientHttpError,
   sanitizeUserFacingText,
 } from "../../agents/pi-embedded-helpers.js";
+import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import {
+  DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES,
+  resolveEmbeddedPiIncompleteRunMaxSilentRetries,
+} from "../../agents/pi-project-settings.js";
 import {
   resolveGroupSessionKey,
   resolveSessionTranscriptPath,
@@ -24,6 +29,7 @@ import {
 import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
+import { sleep } from "../../utils.js";
 import {
   isMarkdownCapableMessageChannel,
   resolveMessageChannel,
@@ -40,6 +46,11 @@ import {
 } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
+  buildIncompleteOpenAiResponsesFallbackPrompt,
+  captureIncompleteOpenAiResponsesRetryBaseline,
+  restoreIncompleteOpenAiResponsesRetryBaseline,
+} from "./agent-runner-incomplete-openai-retry.js";
+import {
   buildEmbeddedRunExecutionParams,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
@@ -48,6 +59,81 @@ import type { FollowupRun } from "./queue.js";
 import { createBlockReplyDeliveryHandler } from "./reply-delivery.js";
 import { createReplyMediaPathNormalizer } from "./reply-media-paths.js";
 import type { TypingSignaler } from "./typing-mode.js";
+
+const OPENAI_RESPONSES_APIS = new Set(["openai-responses", "openai-codex-responses"]);
+const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
+
+function hasDeliverablePayload(payloads: ReplyPayload[] | undefined): boolean {
+  return (
+    payloads?.some(
+      (payload) =>
+        Boolean(payload.text?.trim()) ||
+        Boolean(payload.mediaUrl?.trim()) ||
+        (payload.mediaUrls?.length ?? 0) > 0 ||
+        Object.keys(payload.channelData ?? {}).length > 0,
+    ) ?? false
+  );
+}
+
+function isIncompleteOpenAiResponsesRun(params: {
+  runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
+  fallbackProvider?: string;
+  fallbackModel?: string;
+  followupRun: FollowupRun;
+}): boolean {
+  if (
+    params.runResult.meta?.error ||
+    params.runResult.didSendViaMessagingTool === true ||
+    hasDeliverablePayload(params.runResult.payloads)
+  ) {
+    return false;
+  }
+
+  const actualProvider =
+    params.runResult.meta?.agentMeta?.provider ??
+    params.fallbackProvider ??
+    params.followupRun.run.provider;
+  const actualModel =
+    params.runResult.meta?.agentMeta?.model ?? params.fallbackModel ?? params.followupRun.run.model;
+  const actualApi = resolveModel(
+    actualProvider,
+    actualModel,
+    params.followupRun.run.agentDir,
+    params.followupRun.run.config,
+  ).model?.api;
+
+  return Boolean(actualApi && OPENAI_RESPONSES_APIS.has(actualApi));
+}
+
+function hasIncompleteOpenAiResponsesRunRetriesRemaining(
+  retryCount: number,
+  maxSilentRetries: number,
+): boolean {
+  return retryCount < maxSilentRetries;
+}
+
+function formatIncompleteOpenAiResponsesRetryLog(params: {
+  retryAttempt: number;
+  maxSilentRetries: number;
+  restoredBaseline: boolean;
+  reason?: string;
+}): string {
+  const strategy = params.restoredBaseline
+    ? "replaying the original prompt from the restored pre-turn baseline"
+    : `falling back to literal continue${params.reason ? ` (${params.reason})` : ""}`;
+  return `OpenAI Responses run ended without a deliverable payload. Retrying ${params.retryAttempt}/${params.maxSilentRetries} in ${TRANSIENT_HTTP_RETRY_DELAY_MS}ms, ${strategy}.`;
+}
+
+export function formatIncompleteOpenAiResponsesUserMessage(
+  retryCount: number,
+  maxSilentRetries = DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES,
+): string {
+  if (retryCount >= maxSilentRetries) {
+    return `⚠️ Automatic retry failed ${maxSilentRetries} times because the upstream model stream kept ending early. Please try again later or switch to another model/provider.`;
+  }
+
+  return "⚠️ Upstream model stream ended before the automatic retry sequence finished. Please retry.";
+}
 
 export type RuntimeFallbackAttempt = {
   provider: string;
@@ -101,7 +187,6 @@ export async function runAgentTurnWithFallback(params: {
   storePath?: string;
   resolvedVerboseLevel: VerboseLevel;
 }): Promise<AgentRunLoopResult> {
-  const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
   let didLogHeartbeatStrip = false;
   let autoCompactionCompleted = false;
   // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
@@ -140,9 +225,22 @@ export async function runAgentTurnWithFallback(params: {
   let fallbackAttempts: RuntimeFallbackAttempt[] = [];
   let didResetAfterCompactionFailure = false;
   let didRetryTransientHttpError = false;
+  let incompleteOpenAiResponsesRetryCount = 0;
+  const incompleteOpenAiResponsesMaxSilentRetries = resolveEmbeddedPiIncompleteRunMaxSilentRetries(
+    params.followupRun.run.config,
+  );
+  let currentCommandBody = params.commandBody;
   let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
     params.getActiveSessionEntry()?.systemPromptReport,
   );
+  const incompleteOpenAiResponsesRetryBaseline =
+    await captureIncompleteOpenAiResponsesRetryBaseline({
+      agentId: params.followupRun.run.agentId,
+      sessionId: params.followupRun.run.sessionId,
+      sessionEntry: params.getActiveSessionEntry(),
+      sessionFile: params.followupRun.run.sessionFile,
+      storePath: params.storePath,
+    });
 
   while (true) {
     try {
@@ -232,7 +330,7 @@ export async function runAgentTurnWithFallback(params: {
                   sessionFile: params.followupRun.run.sessionFile,
                   workspaceDir: params.followupRun.run.workspaceDir,
                   config: params.followupRun.run.config,
-                  prompt: params.commandBody,
+                  prompt: currentCommandBody,
                   provider,
                   model,
                   thinkLevel: params.followupRun.run.thinkLevel,
@@ -328,7 +426,7 @@ export async function runAgentTurnWithFallback(params: {
               groupSpace: params.sessionCtx.GroupSpace?.trim() ?? undefined,
               ...senderContext,
               ...runBaseParams,
-              prompt: params.commandBody,
+              prompt: currentCommandBody,
               extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
               toolResultFormat: (() => {
                 const channel = resolveMessageChannel(
@@ -513,6 +611,47 @@ export async function runAgentTurnWithFallback(params: {
         }
       }
 
+      if (
+        isIncompleteOpenAiResponsesRun({
+          runResult,
+          fallbackProvider,
+          fallbackModel,
+          followupRun: params.followupRun,
+        })
+      ) {
+        const retryBaselineRestore = await restoreIncompleteOpenAiResponsesRetryBaseline(
+          incompleteOpenAiResponsesRetryBaseline,
+        );
+
+        if (
+          hasIncompleteOpenAiResponsesRunRetriesRemaining(
+            incompleteOpenAiResponsesRetryCount,
+            incompleteOpenAiResponsesMaxSilentRetries,
+          )
+        ) {
+          incompleteOpenAiResponsesRetryCount += 1;
+          currentCommandBody = retryBaselineRestore.restored
+            ? params.commandBody
+            : buildIncompleteOpenAiResponsesFallbackPrompt();
+          defaultRuntime.error(
+            formatIncompleteOpenAiResponsesRetryLog({
+              retryAttempt: incompleteOpenAiResponsesRetryCount,
+              maxSilentRetries: incompleteOpenAiResponsesMaxSilentRetries,
+              restoredBaseline: retryBaselineRestore.restored,
+              reason: retryBaselineRestore.reason,
+            }),
+          );
+          await sleep(TRANSIENT_HTTP_RETRY_DELAY_MS);
+          continue;
+        }
+
+        if (!retryBaselineRestore.restored && retryBaselineRestore.reason) {
+          defaultRuntime.error(
+            `OpenAI Responses run ended without a deliverable payload and the retry baseline could not be restored: ${retryBaselineRestore.reason}`,
+          );
+        }
+      }
+
       break;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -602,9 +741,7 @@ export async function runAgentTurnWithFallback(params: {
         defaultRuntime.error(
           `Transient HTTP provider error before reply (${message}). Retrying once in ${TRANSIENT_HTTP_RETRY_DELAY_MS}ms.`,
         );
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, TRANSIENT_HTTP_RETRY_DELAY_MS);
-        });
+        await sleep(TRANSIENT_HTTP_RETRY_DELAY_MS);
         continue;
       }
 
@@ -642,6 +779,26 @@ export async function runAgentTurnWithFallback(params: {
       kind: "final",
       payload: {
         text: "⚠️ Context overflow — this conversation is too large for the model. Use /new to start a fresh session.",
+      },
+    };
+  }
+
+  if (
+    isIncompleteOpenAiResponsesRun({
+      runResult,
+      fallbackProvider,
+      fallbackModel,
+      followupRun: params.followupRun,
+    })
+  ) {
+    return {
+      kind: "final",
+      payload: {
+        text: formatIncompleteOpenAiResponsesUserMessage(
+          incompleteOpenAiResponsesRetryCount,
+          incompleteOpenAiResponsesMaxSilentRetries,
+        ),
+        isError: true,
       },
     };
   }
