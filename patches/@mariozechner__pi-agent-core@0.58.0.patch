@@ -1,0 +1,66 @@
+diff --git a/dist/agent.js b/dist/agent.js
+index 3063598083eca8ab17773344eb6c51fa9c4ef08a..c1b7633d55917d57ff44faef9128cd844586c91c 100644
+--- a/dist/agent.js
++++ b/dist/agent.js
+@@ -376,6 +376,11 @@ export class Agent {
+             }
+         }
+         catch (err) {
++            const errorMessage = err?.message || String(err);
++            this._state.error = errorMessage;
++            if (!this.abortController?.signal.aborted) {
++                throw err;
++            }
+             const errorMsg = {
+                 role: "assistant",
+                 content: [{ type: "text", text: "" }],
+@@ -390,12 +395,11 @@ export class Agent {
+                     totalTokens: 0,
+                     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                 },
+-                stopReason: this.abortController?.signal.aborted ? "aborted" : "error",
+-                errorMessage: err?.message || String(err),
++                stopReason: "aborted",
++                errorMessage,
+                 timestamp: Date.now(),
+             };
+             this.appendMessage(errorMsg);
+-            this._state.error = err?.message || String(err);
+             this.emit({ type: "agent_end", messages: [errorMsg] });
+         }
+         finally {
+diff --git a/dist/agent-loop.js b/dist/agent-loop.js
+--- a/dist/agent-loop.js
++++ b/dist/agent-loop.js
+@@ -198,8 +198,7 @@ async function streamAssistantResponse(context, config, signal, emit, streamFn) {
+                     });
+                 }
+                 break;
+-            case "done":
+-            case "error": {
++            case "done": {
+                 const finalMessage = await response.result();
+                 if (addedPartial) {
+                     context.messages[context.messages.length - 1] = finalMessage;
+@@ -212,6 +211,21 @@ async function streamAssistantResponse(context, config, signal, emit, streamFn) {
+                 }
+                 await emit({ type: "message_end", message: finalMessage });
+                 return finalMessage;
++            }
++            case "error": {
++                const finalMessage = await response.result();
++                if (addedPartial) {
++                    context.messages.pop();
++                }
++                const errorText = finalMessage.errorMessage || finalMessage.content.find((c) => c.type === "text")?.text || "LLM request failed.";
++                const error = Object.assign(new Error(errorText), {
++                    assistantMessage: finalMessage,
++                    provider: finalMessage.provider,
++                    model: finalMessage.model,
++                    api: finalMessage.api,
++                    stopReason: finalMessage.stopReason,
++                });
++                throw error;
+             }
+         }
+     }

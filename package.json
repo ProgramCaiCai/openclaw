@@ -470,6 +470,9 @@
           "strip-ansi": "^7.2.0"
         }
       }
+    },
+    "patchedDependencies": {
+      "@mariozechner/pi-agent-core@0.58.0": "patches/@mariozechner__pi-agent-core@0.58.0.patch"
     }
   }
 }
