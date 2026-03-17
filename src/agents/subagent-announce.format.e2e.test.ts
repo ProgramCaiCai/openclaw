@@ -49,7 +49,7 @@ const embeddedRunMock = {
   waitForEmbeddedPiRunEnd: vi.fn(async () => true),
 };
 const subagentRegistryMock = {
-  isSubagentSessionRunActive: vi.fn(() => true),
+  isSubagentSessionRunActive: vi.fn((_sessionKey: string) => true),
   shouldIgnorePostCompletionAnnounceForSession: vi.fn((_sessionKey: string) => false),
   countActiveDescendantRuns: vi.fn((_sessionKey: string) => 0),
   countPendingDescendantRuns: vi.fn((_sessionKey: string) => 0),
@@ -1762,6 +1762,24 @@ describe("subagent announce formatting", () => {
     );
   });
 
+  it("waits for final delivery when the top-level requester session is idle", async () => {
+    embeddedRunMock.isEmbeddedPiRunActive.mockReturnValue(false);
+    embeddedRunMock.isEmbeddedPiRunStreaming.mockReturnValue(false);
+
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:test",
+      childRunId: "run-direct-completion",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      requesterOrigin: { channel: "discord", to: "channel:12345", accountId: "acct-1" },
+      expectsCompletionMessage: true,
+      ...defaultOutcomeAnnounce,
+    });
+
+    expect(didAnnounce).toBe(true);
+    const call = agentSpy.mock.calls[0]?.[0] as { expectFinal?: boolean } | undefined;
+    expect(call?.expectFinal).toBe(true);
+  });
   it("retries reading subagent output when early lifecycle completion had no text", async () => {
     embeddedRunMock.isEmbeddedPiRunActive.mockReturnValueOnce(true).mockReturnValue(false);
     embeddedRunMock.waitForEmbeddedPiRunEnd.mockResolvedValue(true);
@@ -2884,6 +2902,77 @@ describe("subagent announce formatting", () => {
         "agent:main:subagent:parent-gated",
       );
       expect(agentSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("regression nested ACP completion, outer run-mode waits and late ACP delivery is not ignored", async () => {
+      const outerSessionKey = "agent:main:subagent:outer-acp";
+      const acpChildSessionKey = "agent:codex:acp:child-1";
+      let outerPending = 1;
+
+      readLatestAssistantReplyMock.mockResolvedValueOnce("ACP final output");
+      subagentRegistryMock.countPendingDescendantRuns.mockImplementation((sessionKey: string) =>
+        sessionKey === outerSessionKey ? outerPending : 0,
+      );
+      subagentRegistryMock.listSubagentRunsForRequester.mockImplementation((sessionKey: string) =>
+        sessionKey === outerSessionKey && outerPending === 0
+          ? [
+              makeChildCompletion({
+                runId: "run-acp-child",
+                childSessionKey: acpChildSessionKey,
+                requesterSessionKey: outerSessionKey,
+                task: "acp child task",
+                createdAt: 10,
+                frozenResultText: "ACP final output",
+              }),
+            ]
+          : [],
+      );
+      subagentRegistryMock.isSubagentSessionRunActive.mockImplementation(
+        (sessionKey: string) => sessionKey !== outerSessionKey,
+      );
+
+      const parentDeferred = await runSubagentAnnounceFlow({
+        childSessionKey: outerSessionKey,
+        childRunId: "run-outer-acp",
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        ...defaultOutcomeAnnounce,
+        expectsCompletionMessage: true,
+      });
+      expect(parentDeferred).toBe(false);
+      expect(agentSpy).not.toHaveBeenCalled();
+
+      const childAnnounced = await runSubagentAnnounceFlow({
+        childSessionKey: acpChildSessionKey,
+        childRunId: "run-acp-child",
+        requesterSessionKey: outerSessionKey,
+        requesterDisplayKey: outerSessionKey,
+        ...defaultOutcomeAnnounce,
+        task: "acp child task",
+        expectsCompletionMessage: true,
+      });
+      expect(childAnnounced).toBe(true);
+      expect(
+        subagentRegistryMock.shouldIgnorePostCompletionAnnounceForSession,
+      ).toHaveBeenCalledWith(outerSessionKey);
+
+      const childCall = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
+      expect(childCall?.params?.message ?? "").toContain("ACP final output");
+
+      outerPending = 0;
+      const parentAnnounced = await runSubagentAnnounceFlow({
+        childSessionKey: outerSessionKey,
+        childRunId: "run-outer-acp",
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        ...defaultOutcomeAnnounce,
+        expectsCompletionMessage: true,
+      });
+      expect(parentAnnounced).toBe(true);
+      expect(agentSpy).toHaveBeenCalledTimes(2);
+
+      const parentCall = agentSpy.mock.calls[1]?.[0] as { params?: { message?: string } };
+      expect(parentCall?.params?.message ?? "").toContain("ACP final output");
     });
 
     it("regression deep 3-level re-check chain, child announce then parent re-check emits synthesized parent output", async () => {
