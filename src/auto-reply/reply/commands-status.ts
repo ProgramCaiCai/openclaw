@@ -115,8 +115,11 @@ export async function buildStatusReply(params: {
   });
   const queueKey = sessionKey ?? sessionEntry?.sessionId;
   const queueDepth = queueKey ? getFollowupQueueDepth(queueKey) : 0;
-  const queueOverrides = Boolean(
-    sessionEntry?.queueDebounceMs ?? sessionEntry?.queueCap ?? sessionEntry?.queueDrop,
+  const queueOverrideConfigured = Boolean(
+    sessionEntry?.queueMode ??
+    sessionEntry?.queueDebounceMs ??
+    sessionEntry?.queueCap ??
+    sessionEntry?.queueDrop,
   );
 
   let subagentsLine: string | undefined;
@@ -205,7 +208,9 @@ export async function buildStatusReply(params: {
       debounceMs: queueSettings.debounceMs,
       cap: queueSettings.cap,
       dropPolicy: queueSettings.dropPolicy,
-      showDetails: queueOverrides,
+      showDetails: queueOverrideConfigured,
+      overrideConfigured: queueOverrideConfigured,
+      overrideVerified: queueOverrideConfigured ? false : undefined,
     },
     subagentsLine,
     mediaDecisions: params.mediaDecisions,

@@ -473,6 +473,46 @@ describe("buildStatusMessage", () => {
     expect(text).toContain("Queue: collect (depth 3 · debounce 2s · cap 5 · drop old)");
   });
 
+  it("shows queue override as unverified instead of implying live confirmation", () => {
+    const text = buildStatusMessage({
+      agent: {},
+      sessionEntry: { sessionId: "q2", updatedAt: 0 },
+      sessionKey: "agent:main:main",
+      sessionScope: "per-sender",
+      queue: {
+        mode: "steer-backlog",
+        depth: 2,
+        overrideConfigured: true,
+        overrideVerified: false,
+      },
+      modelAuth: "api-key",
+    });
+
+    const normalized = normalizeTestText(text);
+    expect(normalized).toContain("Queue: steer-backlog (depth 2)");
+    expect(normalized).toContain("override unverified");
+  });
+
+  it("surfaces delivery and completion uncertainty when provided", () => {
+    const text = buildStatusMessage({
+      agent: {},
+      sessionEntry: { sessionId: "q3", updatedAt: 0 },
+      sessionKey: "agent:main:main",
+      sessionScope: "per-sender",
+      queue: {
+        mode: "collect",
+        depth: 1,
+        deliveryAttribution: "uncertain",
+        completionEvidence: "unmatched",
+      },
+      modelAuth: "api-key",
+    });
+
+    const normalized = normalizeTestText(text);
+    expect(normalized).toContain("delivery uncertain");
+    expect(normalized).toContain("completion unmatched");
+  });
+
   it("inserts usage summary beneath context line", () => {
     const text = buildStatusMessage({
       agent: { model: "anthropic/claude-opus-4-5", contextTokens: 32_000 },

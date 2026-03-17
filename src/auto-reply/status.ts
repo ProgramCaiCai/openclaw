@@ -64,6 +64,10 @@ type QueueStatus = {
   cap?: number;
   dropPolicy?: string;
   showDetails?: boolean;
+  overrideConfigured?: boolean;
+  overrideVerified?: boolean;
+  deliveryAttribution?: "verified" | "uncertain";
+  completionEvidence?: "strong" | "weak" | "unmatched";
 };
 
 type StatusArgs = {
@@ -206,6 +210,26 @@ const formatQueueDetails = (queue?: QueueStatus) => {
     detailParts.push(`drop ${queue.dropPolicy}`);
   }
   return detailParts.length ? ` (${detailParts.join(" · ")})` : "";
+};
+
+const formatQueueSignals = (queue?: QueueStatus): string[] => {
+  if (!queue) {
+    return [];
+  }
+  const signals: string[] = [];
+  if (queue.overrideConfigured && queue.overrideVerified === false) {
+    signals.push("override unverified");
+  }
+  if (queue.deliveryAttribution === "uncertain") {
+    signals.push("delivery uncertain");
+  }
+  if (queue.completionEvidence === "weak") {
+    signals.push("completion weak");
+  }
+  if (queue.completionEvidence === "unmatched") {
+    signals.push("completion unmatched");
+  }
+  return signals;
 };
 
 const readUsageFromSessionLog = (
@@ -547,6 +571,7 @@ export function buildStatusMessage(args: StatusArgs): string {
 
   const queueMode = args.queue?.mode ?? "unknown";
   const queueDetails = formatQueueDetails(args.queue);
+  const queueSignals = formatQueueSignals(args.queue);
   const verboseLabel =
     verboseLevel === "full" ? "verbose:full" : verboseLevel === "on" ? "verbose" : null;
   const elevatedLabel =
@@ -567,6 +592,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   const activationParts = [
     groupActivationValue ? `👥 Activation: ${groupActivationValue}` : null,
     `🪢 Queue: ${queueMode}${queueDetails}`,
+    ...queueSignals.map((signal) => `⚠️ ${signal}`),
   ];
   const activationLine = activationParts.filter(Boolean).join(" · ");
 
