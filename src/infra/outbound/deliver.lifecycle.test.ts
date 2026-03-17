@@ -11,6 +11,7 @@ import {
   queueMocks,
   resetDeliverTestState,
   resetDeliverTestMocks,
+  subagentMocks,
   runChunkedWhatsAppDelivery as runChunkedWhatsAppDeliveryHelper,
   whatsappChunkConfig,
 } from "./deliver.test-helpers.js";
@@ -63,6 +64,8 @@ function expectSuccessfulWhatsAppInternalHookPayload(
     messageId: string;
     isGroup: boolean;
     groupId: string;
+    requesterSessionKey: string;
+    rootRequesterSessionKey: string;
   }>,
 ) {
   return expect.objectContaining({
@@ -206,6 +209,61 @@ describe("deliverOutboundPayloads lifecycle", () => {
     expect(logMocks.warn).toHaveBeenCalledWith(
       "deliverOutboundPayloads: session.agentId present without session key; internal message:sent hook will be skipped",
       expect.objectContaining({ channel: "whatsapp", to: "+1555", agentId: "agent-main" }),
+    );
+  });
+
+  it("fails closed for stale ended subagent session keys", async () => {
+    const childSessionKey = "agent:main:subagent:ended-child";
+    subagentMocks.isSubagentSessionRunActive.mockReturnValue(false);
+    subagentMocks.resolveRequesterForChildSession.mockReturnValue({
+      requesterSessionKey: "agent:main:main",
+    });
+
+    await deliverSingleWhatsAppForHookTest({ sessionKey: childSessionKey });
+
+    expect(internalHookMocks.createInternalHookEvent).not.toHaveBeenCalled();
+    expect(internalHookMocks.triggerInternalHook).not.toHaveBeenCalled();
+    expect(logMocks.warn).toHaveBeenCalledWith(
+      "deliverOutboundPayloads: refusing stale ended subagent session key for outbound attribution",
+      expect.objectContaining({
+        channel: "whatsapp",
+        to: "+1555",
+        sessionKey: childSessionKey,
+        requesterSessionKey: "agent:main:main",
+      }),
+    );
+  });
+
+  it("includes requester and root requester provenance for active subagent sessions", async () => {
+    const childSessionKey = "agent:main:subagent:child";
+    const parentSessionKey = "agent:main:subagent:parent";
+    const rootSessionKey = "agent:main:main";
+    subagentMocks.isSubagentSessionRunActive.mockImplementation(
+      (sessionKey) => sessionKey === childSessionKey || sessionKey === parentSessionKey,
+    );
+    subagentMocks.resolveRequesterForChildSession.mockImplementation((sessionKey) => {
+      if (sessionKey === childSessionKey) {
+        return { requesterSessionKey: parentSessionKey };
+      }
+      if (sessionKey === parentSessionKey) {
+        return { requesterSessionKey: rootSessionKey };
+      }
+      return null;
+    });
+
+    await deliverSingleWhatsAppForHookTest({ sessionKey: childSessionKey });
+
+    expect(internalHookMocks.createInternalHookEvent).toHaveBeenCalledTimes(1);
+    expect(internalHookMocks.createInternalHookEvent).toHaveBeenCalledWith(
+      "message",
+      "sent",
+      childSessionKey,
+      expectSuccessfulWhatsAppInternalHookPayload({
+        content: "hello",
+        messageId: "w1",
+        requesterSessionKey: parentSessionKey,
+        rootRequesterSessionKey: rootSessionKey,
+      }),
     );
   });
 

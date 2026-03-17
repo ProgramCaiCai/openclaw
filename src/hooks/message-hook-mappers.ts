@@ -52,6 +52,8 @@ export type CanonicalSentMessageHookContext = {
   messageId?: string;
   isGroup?: boolean;
   groupId?: string;
+  requesterSessionKey?: string;
+  rootRequesterSessionKey?: string;
 };
 
 export function deriveInboundMessageHookContext(
@@ -122,6 +124,8 @@ export function buildCanonicalSentMessageHookContext(params: {
   messageId?: string;
   isGroup?: boolean;
   groupId?: string;
+  requesterSessionKey?: string;
+  rootRequesterSessionKey?: string;
 }): CanonicalSentMessageHookContext {
   return {
     to: params.to,
@@ -134,6 +138,8 @@ export function buildCanonicalSentMessageHookContext(params: {
     messageId: params.messageId,
     isGroup: params.isGroup,
     groupId: params.groupId,
+    requesterSessionKey: params.requesterSessionKey,
+    rootRequesterSessionKey: params.rootRequesterSessionKey,
   };
 }
 
@@ -269,5 +275,11 @@ export function toInternalMessageSentContext(
     messageId: canonical.messageId,
     ...(canonical.isGroup != null ? { isGroup: canonical.isGroup } : {}),
     ...(canonical.groupId ? { groupId: canonical.groupId } : {}),
+    ...(canonical.requesterSessionKey
+      ? { requesterSessionKey: canonical.requesterSessionKey }
+      : {}),
+    ...(canonical.rootRequesterSessionKey
+      ? { rootRequesterSessionKey: canonical.rootRequesterSessionKey }
+      : {}),
   };
 }

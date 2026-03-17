@@ -1,4 +1,8 @@
 import {
+  isSubagentSessionRunActive,
+  resolveRequesterForChildSession,
+} from "../../agents/subagent-registry.js";
+import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,
   resolveChunkMode,
@@ -30,6 +34,7 @@ import type { sendMessageIMessage } from "../../imessage/send.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+import { isSubagentSessionKey } from "../../sessions/session-key-utils.js";
 import { markdownToSignalTextChunks, type SignalTextStyleRange } from "../../signal/format.js";
 import { sendMessageSignal } from "../../signal/send.js";
 import type { sendMessageSlack } from "../../slack/send.js";
@@ -327,6 +332,88 @@ function buildPayloadSummary(payload: ReplyPayload): NormalizedOutboundPayload {
   };
 }
 
+type DeliveryAttribution = {
+  sessionKey?: string;
+  requesterSessionKey?: string;
+  rootRequesterSessionKey?: string;
+  staleEndedSubagentSessionKey?: string;
+};
+
+function normalizeOptionalString(value?: string | null): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function resolveRootRequesterSessionKey(sessionKey?: string): string | undefined {
+  let current = normalizeOptionalString(sessionKey);
+  if (!current) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  let root = current;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const requester = normalizeOptionalString(
+      resolveRequesterForChildSession(current)?.requesterSessionKey,
+    );
+    if (!requester || requester === current) {
+      break;
+    }
+    root = requester;
+    current = requester;
+  }
+  return root;
+}
+
+function resolveDeliveryAttributionCandidate(rawSessionKey?: string): DeliveryAttribution {
+  const sessionKey = normalizeOptionalString(rawSessionKey);
+  if (!sessionKey) {
+    return {};
+  }
+  if (!isSubagentSessionKey(sessionKey)) {
+    return { sessionKey };
+  }
+  const requesterSessionKey = normalizeOptionalString(
+    resolveRequesterForChildSession(sessionKey)?.requesterSessionKey,
+  );
+  const rootRequesterSessionKey = resolveRootRequesterSessionKey(requesterSessionKey);
+  if (!isSubagentSessionRunActive(sessionKey)) {
+    return {
+      requesterSessionKey,
+      rootRequesterSessionKey,
+      staleEndedSubagentSessionKey: sessionKey,
+    };
+  }
+  return {
+    sessionKey,
+    requesterSessionKey,
+    rootRequesterSessionKey,
+  };
+}
+
+function pickDeliveryAttribution(params: { mirrorSessionKey?: string; sessionKey?: string }): {
+  chosen: DeliveryAttribution;
+  staleEndedSubagentSessionKeys: string[];
+} {
+  const mirror = resolveDeliveryAttributionCandidate(params.mirrorSessionKey);
+  const session = resolveDeliveryAttributionCandidate(params.sessionKey);
+  return {
+    chosen:
+      mirror.sessionKey || mirror.requesterSessionKey || mirror.rootRequesterSessionKey
+        ? mirror
+        : session.sessionKey || session.requesterSessionKey || session.rootRequesterSessionKey
+          ? session
+          : {},
+    staleEndedSubagentSessionKeys: [
+      mirror.staleEndedSubagentSessionKey,
+      session.staleEndedSubagentSessionKey,
+    ].filter((value): value is string => Boolean(value)),
+  };
+}
+
 function createMessageSentEmitter(params: {
   hookRunner: ReturnType<typeof getGlobalHookRunner>;
   channel: Exclude<OutboundChannel, "none">;
@@ -335,6 +422,8 @@ function createMessageSentEmitter(params: {
   sessionKeyForInternalHooks?: string;
   mirrorIsGroup?: boolean;
   mirrorGroupId?: string;
+  requesterSessionKey?: string;
+  rootRequesterSessionKey?: string;
 }): { emitMessageSent: (event: MessageSentEvent) => void; hasMessageSentHooks: boolean } {
   const hasMessageSentHooks = params.hookRunner?.hasHooks("message_sent") ?? false;
   const canEmitInternalHook = Boolean(params.sessionKeyForInternalHooks);
@@ -353,6 +442,8 @@ function createMessageSentEmitter(params: {
       messageId: event.messageId,
       isGroup: params.mirrorIsGroup,
       groupId: params.mirrorGroupId,
+      requesterSessionKey: params.requesterSessionKey,
+      rootRequesterSessionKey: params.rootRequesterSessionKey,
     });
     if (hasMessageSentHooks) {
       fireAndForgetHook(
@@ -668,9 +759,26 @@ async function deliverOutboundPayloadsCore(
     accountId,
   );
   const hookRunner = getGlobalHookRunner();
-  const sessionKeyForInternalHooks = params.mirror?.sessionKey ?? params.session?.key;
+  const { chosen: attribution, staleEndedSubagentSessionKeys } = pickDeliveryAttribution({
+    mirrorSessionKey: params.mirror?.sessionKey,
+    sessionKey: params.session?.key,
+  });
+  const sessionKeyForInternalHooks = attribution.sessionKey;
   const mirrorIsGroup = params.mirror?.isGroup;
   const mirrorGroupId = params.mirror?.groupId;
+  if (!sessionKeyForInternalHooks && staleEndedSubagentSessionKeys.length > 0) {
+    log.warn(
+      "deliverOutboundPayloads: refusing stale ended subagent session key for outbound attribution",
+      {
+        channel,
+        to,
+        sessionKey: staleEndedSubagentSessionKeys[0],
+        staleEndedSubagentSessionKeys,
+        requesterSessionKey: attribution.requesterSessionKey,
+        rootRequesterSessionKey: attribution.rootRequesterSessionKey,
+      },
+    );
+  }
   const { emitMessageSent, hasMessageSentHooks } = createMessageSentEmitter({
     hookRunner,
     channel,
@@ -679,6 +787,8 @@ async function deliverOutboundPayloadsCore(
     sessionKeyForInternalHooks,
     mirrorIsGroup,
     mirrorGroupId,
+    requesterSessionKey: attribution.requesterSessionKey,
+    rootRequesterSessionKey: attribution.rootRequesterSessionKey,
   });
   const hasMessageSendingHooks = hookRunner?.hasHooks("message_sending") ?? false;
   if (hasMessageSentHooks && params.session?.agentId && !sessionKeyForInternalHooks) {
@@ -802,7 +912,8 @@ async function deliverOutboundPayloadsCore(
       params.onError?.(err, payloadSummary);
     }
   }
-  if (params.mirror && results.length > 0) {
+  const mirrorSessionKey = params.mirror ? sessionKeyForInternalHooks : undefined;
+  if (params.mirror && mirrorSessionKey && results.length > 0) {
     const mirrorText = resolveMirroredTranscriptText({
       text: params.mirror.text,
       mediaUrls: params.mirror.mediaUrls,
@@ -810,7 +921,7 @@ async function deliverOutboundPayloadsCore(
     if (mirrorText) {
       await appendAssistantMessageToSessionTranscript({
         agentId: params.mirror.agentId,
-        sessionKey: params.mirror.sessionKey,
+        sessionKey: mirrorSessionKey,
         text: mirrorText,
         idempotencyKey: params.mirror.idempotencyKey,
       });
