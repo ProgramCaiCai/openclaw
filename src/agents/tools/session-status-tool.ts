@@ -407,8 +407,11 @@ export function createSessionStatusTool(opts?: {
       });
       const queueKey = resolved.key ?? resolved.entry.sessionId;
       const queueDepth = queueKey ? getFollowupQueueDepth(queueKey) : 0;
-      const queueOverrides = Boolean(
-        resolved.entry.queueDebounceMs ?? resolved.entry.queueCap ?? resolved.entry.queueDrop,
+      const queueOverrideConfigured = Boolean(
+        resolved.entry.queueMode ??
+        resolved.entry.queueDebounceMs ??
+        resolved.entry.queueCap ??
+        resolved.entry.queueDrop,
       );
 
       const userTimezone = resolveUserTimezone(cfg.agents?.defaults?.userTimezone);
@@ -449,7 +452,9 @@ export function createSessionStatusTool(opts?: {
           debounceMs: queueSettings.debounceMs,
           cap: queueSettings.cap,
           dropPolicy: queueSettings.dropPolicy,
-          showDetails: queueOverrides,
+          showDetails: queueOverrideConfigured,
+          overrideConfigured: queueOverrideConfigured,
+          overrideVerified: queueOverrideConfigured ? false : undefined,
         },
         includeTranscriptUsage: true,
       });
