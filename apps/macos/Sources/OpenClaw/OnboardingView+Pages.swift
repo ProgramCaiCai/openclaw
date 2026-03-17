@@ -678,8 +678,8 @@ extension OnboardingView {
                 } else if !self.cliInstalled, self.cliInstallLocation == nil {
                     Text(
                         """
-                        Installs a user-space Node 22+ runtime and the CLI (no Homebrew).
-                        Rerun anytime to reinstall or update.
+                        From a source checkout, this runs `pnpm build`, `npm pack`, and `npm install -g` into `~/.openclaw`.
+                        Without a checkout, it falls back to the managed prefix installer. Rerun anytime to reinstall or update.
                         """)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

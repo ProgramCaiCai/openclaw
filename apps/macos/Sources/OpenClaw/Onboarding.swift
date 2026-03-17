@@ -150,8 +150,7 @@ struct OnboardingView: View {
     }
 
     var devLinkCommand: String {
-        let version = GatewayEnvironment.expectedGatewayVersionString() ?? "latest"
-        return "npm install -g openclaw@\(version)"
+        CLIInstaller.manualInstallCommand(versionString: GatewayEnvironment.expectedGatewayVersionString())
     }
 
     struct LocalGatewayProbe: Equatable {

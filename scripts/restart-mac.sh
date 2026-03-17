@@ -20,6 +20,8 @@ SIGN=0
 AUTO_DETECT_SIGNING=1
 GATEWAY_WAIT_SECONDS="${OPENCLAW_GATEWAY_WAIT_SECONDS:-0}"
 LAUNCHAGENT_DISABLE_MARKER="${HOME}/.openclaw/disable-launchagent"
+LOCAL_CLI_PREFIX="${OPENCLAW_LOCAL_CLI_PREFIX:-${HOME}/.openclaw}"
+LOCAL_CLI_BIN="${LOCAL_CLI_PREFIX}/bin/openclaw"
 ATTACH_ONLY=1
 
 log()  { printf '%s\n' "$*"; }
@@ -96,8 +98,9 @@ for arg in "$@"; do
       log "  OPENCLAW_GATEWAY_WAIT_SECONDS=0  Wait time before gateway port check (unsigned only)"
       log ""
       log "Unsigned recovery:"
-      log "  node openclaw.mjs daemon install --force --runtime node"
-      log "  node openclaw.mjs daemon restart"
+      log "  node scripts/install-local-cli.js --prefix ${HOME}/.openclaw --expected-version ${PKG_VERSION}"
+      log "  ${HOME}/.openclaw/bin/openclaw daemon install --force --runtime node"
+      log "  ${HOME}/.openclaw/bin/openclaw daemon restart"
       log ""
       log "Reset unsigned overrides:"
       log "  rm ~/.openclaw/disable-launchagent"
@@ -214,11 +217,12 @@ if [[ "$NO_SIGN" -ne 1 && "$ATTACH_ONLY" -ne 1 && -f "${LAUNCHAGENT_DISABLE_MARK
   run_step "clear launchagent disable marker" /bin/rm -f "${LAUNCHAGENT_DISABLE_MARKER}"
 fi
 
-# When unsigned, ensure the gateway LaunchAgent targets the repo CLI (before the app launches).
-# This reduces noisy "could not connect" errors during app startup.
+# When unsigned, install the current checkout as an npm package first, then let the
+# LaunchAgent target the installed CLI instead of the repo entrypoint directly.
 if [ "$NO_SIGN" -eq 1 ] && [ "$ATTACH_ONLY" -ne 1 ]; then
-  run_step "install gateway launch agent (unsigned)" bash -lc "cd '${ROOT_DIR}' && node openclaw.mjs daemon install --force --runtime node"
-  run_step "restart gateway daemon (unsigned)" bash -lc "cd '${ROOT_DIR}' && node openclaw.mjs daemon restart"
+  run_step "install local openclaw cli (unsigned)" bash -lc "cd '${ROOT_DIR}' && node scripts/install-local-cli.js --prefix '${LOCAL_CLI_PREFIX}' --expected-version '${PKG_VERSION}'"
+  run_step "install gateway launch agent (unsigned)" bash -lc "export PATH='${LOCAL_CLI_PREFIX}/bin:${ROOT_DIR}/node_modules/.bin:${PATH}' && '${LOCAL_CLI_BIN}' daemon install --force --runtime node"
+  run_step "restart gateway daemon (unsigned)" bash -lc "export PATH='${LOCAL_CLI_PREFIX}/bin:${ROOT_DIR}/node_modules/.bin:${PATH}' && '${LOCAL_CLI_BIN}' daemon restart"
   if [[ "${GATEWAY_WAIT_SECONDS}" -gt 0 ]]; then
     run_step "wait for gateway (unsigned)" sleep "${GATEWAY_WAIT_SECONDS}"
   fi

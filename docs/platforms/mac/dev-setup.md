@@ -41,15 +41,23 @@ For dev run modes, signing flags, and Team ID troubleshooting, see the macOS app
 
 ## 3. Install the CLI
 
-The macOS app expects a global `openclaw` CLI install to manage background tasks.
+The macOS app expects an installed `openclaw` CLI to manage background tasks.
 
-**To install it (recommended):**
+**To install it from this checkout (recommended for source/dev builds):**
 
 1. Open the OpenClaw app.
 2. Go to the **General** settings tab.
 3. Click **"Install CLI"**.
 
-Alternatively, install it manually:
+That flow now runs the local npm distribution path: `pnpm build` → `npm pack` → `npm install -g --prefix ~/.openclaw <tgz>`.
+
+Alternatively, install it manually from this checkout:
+
+```bash
+node scripts/install-local-cli.js --prefix ~/.openclaw --expected-version <version>
+```
+
+If you are testing a published release instead of a source checkout, the regular global install still works:
 
 ```bash
 npm install -g openclaw@<version>
