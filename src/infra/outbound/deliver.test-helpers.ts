@@ -30,6 +30,13 @@ type DeliverMockState = {
     createInternalHookEvent: typeof createInternalHookEventPayload;
     triggerInternalHook: (...args: unknown[]) => Promise<void>;
   };
+  subagents: {
+    isSubagentSessionRunActive: (childSessionKey: string) => boolean;
+    resolveRequesterForChildSession: (childSessionKey: string) => {
+      requesterSessionKey: string;
+      requesterOrigin?: unknown;
+    } | null;
+  };
   queue: {
     enqueueDelivery: (...args: unknown[]) => Promise<string>;
     ackDelivery: (...args: unknown[]) => Promise<void>;
@@ -53,6 +60,10 @@ export const deliverMocks: DeliverMockState = {
   internalHooks: {
     createInternalHookEvent: createInternalHookEventPayload,
     triggerInternalHook: async () => {},
+  },
+  subagents: {
+    isSubagentSessionRunActive: () => false,
+    resolveRequesterForChildSession: () => null,
   },
   queue: {
     enqueueDelivery: async () => "mock-queue-id",
@@ -85,6 +96,14 @@ const _internalHookMocks = vi.hoisted(() => ({
     async (...args: unknown[]) => await deliverMocks.internalHooks.triggerInternalHook(...args),
   ),
 }));
+const _subagentMocks = vi.hoisted(() => ({
+  isSubagentSessionRunActive: vi.fn((...args: [string]) =>
+    deliverMocks.subagents.isSubagentSessionRunActive(...args),
+  ),
+  resolveRequesterForChildSession: vi.fn((...args: [string]) =>
+    deliverMocks.subagents.resolveRequesterForChildSession(...args),
+  ),
+}));
 const _queueMocks = vi.hoisted(() => ({
   enqueueDelivery: vi.fn(
     async (...args: unknown[]) => await deliverMocks.queue.enqueueDelivery(...args),
@@ -99,6 +118,7 @@ const _logMocks = vi.hoisted(() => ({
 export const mocks = _mocks;
 export const hookMocks = _hookMocks;
 export const internalHookMocks = _internalHookMocks;
+export const subagentMocks = _subagentMocks;
 export const queueMocks = _queueMocks;
 export const logMocks = _logMocks;
 
@@ -117,6 +137,10 @@ vi.mock("../../plugins/hook-runner-global.js", () => ({
 vi.mock("../../hooks/internal-hooks.js", () => ({
   createInternalHookEvent: _internalHookMocks.createInternalHookEvent,
   triggerInternalHook: _internalHookMocks.triggerInternalHook,
+}));
+vi.mock("../../agents/subagent-registry.js", () => ({
+  isSubagentSessionRunActive: _subagentMocks.isSubagentSessionRunActive,
+  resolveRequesterForChildSession: _subagentMocks.resolveRequesterForChildSession,
 }));
 vi.mock("./delivery-queue.js", () => ({
   enqueueDelivery: _queueMocks.enqueueDelivery,
@@ -180,6 +204,8 @@ export function resetDeliverTestState() {
   deliverMocks.hooks.runner.runMessageSent = async () => {};
   deliverMocks.internalHooks.createInternalHookEvent = createInternalHookEventPayload;
   deliverMocks.internalHooks.triggerInternalHook = async () => {};
+  deliverMocks.subagents.isSubagentSessionRunActive = () => false;
+  deliverMocks.subagents.resolveRequesterForChildSession = () => null;
   deliverMocks.queue.enqueueDelivery = async () => "mock-queue-id";
   deliverMocks.queue.ackDelivery = async () => {};
   deliverMocks.queue.failDelivery = async () => {};
@@ -199,6 +225,8 @@ export function resetDeliverTestMocks(params?: { includeSessionMocks?: boolean }
   hookMocks.runner.runMessageSent.mockClear();
   internalHookMocks.createInternalHookEvent.mockClear();
   internalHookMocks.triggerInternalHook.mockClear();
+  subagentMocks.isSubagentSessionRunActive.mockClear();
+  subagentMocks.resolveRequesterForChildSession.mockClear();
   queueMocks.enqueueDelivery.mockClear();
   queueMocks.ackDelivery.mockClear();
   queueMocks.failDelivery.mockClear();

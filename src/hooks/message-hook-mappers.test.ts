@@ -125,6 +125,8 @@ describe("message hook mappers", () => {
       messageId: "out-1",
       isGroup: true,
       groupId: "telegram:chat:456",
+      requesterSessionKey: "agent:main:subagent:parent",
+      rootRequesterSessionKey: "agent:main:main",
     });
 
     expect(toPluginMessageContext(canonical)).toEqual({
@@ -149,6 +151,8 @@ describe("message hook mappers", () => {
       messageId: "out-1",
       isGroup: true,
       groupId: "telegram:chat:456",
+      requesterSessionKey: "agent:main:subagent:parent",
+      rootRequesterSessionKey: "agent:main:main",
     });
   });
 });

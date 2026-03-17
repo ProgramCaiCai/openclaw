@@ -89,6 +89,10 @@ export type MessageSentHookContext = {
   isGroup?: boolean;
   /** Group or channel identifier, if applicable */
   groupId?: string;
+  /** Immediate requester session when the sender is an active child session. */
+  requesterSessionKey?: string;
+  /** Root requester session for nested child-session attribution chains. */
+  rootRequesterSessionKey?: string;
 };
 
 export type MessageSentHookEvent = InternalHookEvent & {
