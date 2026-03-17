@@ -511,6 +511,33 @@ describe("createFollowupRunner typing cleanup", () => {
     expect(onBlockReply).toHaveBeenCalled();
     expectTypingCleanup(typing);
   });
+
+  it("fails closed when a followup run finishes without a deliverable payload", async () => {
+    const typing = createMockTypingController();
+    const onBlockReply = vi.fn(async () => {});
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: {},
+      didSendViaMessagingTool: false,
+    });
+
+    const runner = createFollowupRunner({
+      opts: { onBlockReply },
+      typing,
+      typingMode: "instant",
+      defaultModel: "anthropic/claude-opus-4-5",
+    });
+
+    await runner(baseQueuedRun());
+
+    expect(onBlockReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        text: expect.stringContaining("no deliverable payload"),
+      }),
+    );
+    expectTypingCleanup(typing);
+  });
 });
 
 describe("createFollowupRunner agentDir forwarding", () => {

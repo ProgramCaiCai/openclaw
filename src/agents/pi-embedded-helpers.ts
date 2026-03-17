@@ -50,10 +50,8 @@ export {
   downgradeOpenAIFunctionCallReasoningPairs,
   downgradeOpenAIReasoningBlocks,
 } from "./pi-embedded-helpers/openai.js";
-export {
-  isEmptyAssistantMessageContent,
-  sanitizeSessionMessagesImages,
-} from "./pi-embedded-helpers/images.js";
+export { sanitizeSessionMessagesImages } from "./pi-embedded-helpers/images.js";
+export { isEmptyAssistantMessageContent } from "./empty-assistant-contract.js";
 export {
   isMessagingToolDuplicate,
   isMessagingToolDuplicateNormalized,

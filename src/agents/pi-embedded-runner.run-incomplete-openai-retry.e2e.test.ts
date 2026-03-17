@@ -108,7 +108,22 @@ function makeAttempt(overrides?: Partial<EmbeddedRunAttemptResult>): EmbeddedRun
   };
 }
 
-function makeConfig(incompleteRunMaxSilentRetries = 3): OpenClawConfig {
+function makeConfig(
+  paramsOrRetries?:
+    | number
+    | {
+        incompleteRunMaxSilentRetries?: number;
+        provider?: string;
+        api?: string;
+      },
+): OpenClawConfig {
+  const params =
+    typeof paramsOrRetries === "number"
+      ? { incompleteRunMaxSilentRetries: paramsOrRetries }
+      : paramsOrRetries;
+  const incompleteRunMaxSilentRetries = params?.incompleteRunMaxSilentRetries ?? 3;
+  const provider = params?.provider ?? "openai";
+  const api = params?.api ?? "openai-responses";
   return {
     agents: {
       defaults: {
@@ -119,8 +134,8 @@ function makeConfig(incompleteRunMaxSilentRetries = 3): OpenClawConfig {
     },
     models: {
       providers: {
-        openai: {
-          api: "openai-responses",
+        [provider]: {
+          api,
           apiKey: "sk-test",
           baseUrl: "https://example.com",
           models: [
@@ -208,6 +223,8 @@ async function runTurn(params?: {
   sessionFile?: string;
   sessionId?: string;
   prompt?: string;
+  provider?: string;
+  model?: string;
 }) {
   return await runEmbeddedPiAgent({
     sessionId: params?.sessionId ?? "session-test",
@@ -216,8 +233,8 @@ async function runTurn(params?: {
     workspaceDir,
     config: params?.config ?? makeConfig(),
     prompt: params?.prompt ?? "hello",
-    provider: "openai",
-    model: "mock-1",
+    provider: params?.provider ?? "openai",
+    model: params?.model ?? "mock-1",
     timeoutMs: 5_000,
     agentDir,
     runId: params?.runId ?? nextRunId(),
@@ -386,5 +403,137 @@ describe("runEmbeddedPiAgent incomplete openai-responses retries", () => {
       { role: "user", text: "hello" },
       { role: "assistant", text: "Recovered after managed retry" },
     ]);
+  });
+});
+
+describe("runEmbeddedPiAgent empty assistant contract", () => {
+  it("retries invalid empty assistant shells for non-openai providers and restores the pre-turn transcript", async () => {
+    const sessionId = "session-empty-shell-retry";
+    const sessionFile = resolveSessionTranscriptPath(sessionId);
+    await appendTranscriptMessage(sessionFile, {
+      role: "user",
+      content: [{ type: "text", text: "seed user" }],
+    });
+    await appendTranscriptMessage(sessionFile, {
+      role: "assistant",
+      content: [{ type: "text", text: "seed assistant" }],
+      stopReason: "stop",
+      api: "anthropic",
+      provider: "anthropic",
+      model: "mock-1",
+      usage: baseUsage,
+    });
+
+    const initialSnapshot = await readTranscriptSnapshot(sessionFile);
+    const attemptBaselines: Array<Awaited<ReturnType<typeof readTranscriptSnapshot>>> = [];
+    const prompts: string[] = [];
+
+    runEmbeddedAttemptMock
+      .mockImplementationOnce(async (params) => {
+        const attempt = params as { prompt?: string };
+        prompts.push(attempt.prompt ?? "");
+        attemptBaselines.push(await readTranscriptSnapshot(sessionFile));
+        await appendTranscriptMessage(sessionFile, {
+          role: "user",
+          content: [{ type: "text", text: attempt.prompt ?? "" }],
+        });
+        await fs.appendFile(
+          sessionFile,
+          JSON.stringify({
+            type: "message",
+            message: buildAssistant({
+              api: "anthropic",
+              provider: "anthropic",
+              content: [],
+              timestamp: Date.now(),
+            }),
+          }) + "\n",
+          "utf-8",
+        );
+        return makeAttempt({
+          lastAssistant: buildAssistant({
+            api: "anthropic",
+            provider: "anthropic",
+            content: [],
+          }),
+        });
+      })
+      .mockImplementationOnce(async (params) => {
+        const attempt = params as { prompt?: string };
+        prompts.push(attempt.prompt ?? "");
+        attemptBaselines.push(await readTranscriptSnapshot(sessionFile));
+        await appendTranscriptMessage(sessionFile, {
+          role: "user",
+          content: [{ type: "text", text: attempt.prompt ?? "" }],
+        });
+        await appendTranscriptMessage(sessionFile, {
+          role: "assistant",
+          content: [{ type: "text", text: "Recovered after empty-shell retry" }],
+          stopReason: "stop",
+          api: "anthropic",
+          provider: "anthropic",
+          model: "mock-1",
+          usage: baseUsage,
+        });
+        return makeAttempt({
+          assistantTexts: ["Recovered after empty-shell retry"],
+          lastAssistant: buildAssistant({
+            api: "anthropic",
+            provider: "anthropic",
+            content: [{ type: "text", text: "Recovered after empty-shell retry" }],
+          }),
+        });
+      });
+
+    const result = await runTurn({
+      config: makeConfig({
+        provider: "anthropic",
+        api: "anthropic",
+        incompleteRunMaxSilentRetries: 1,
+      }),
+      provider: "anthropic",
+      runId: nextRunId("empty-shell-retry"),
+      sessionId,
+      sessionFile,
+    });
+
+    expect(result.payloads?.[0]).toMatchObject({
+      text: "Recovered after empty-shell retry",
+    });
+    expect(prompts).toEqual(["hello", "hello"]);
+    expect(attemptBaselines).toEqual([initialSnapshot, initialSnapshot]);
+    await expect(readTranscriptSnapshot(sessionFile)).resolves.toEqual([
+      ...initialSnapshot,
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "Recovered after empty-shell retry" },
+    ]);
+  });
+
+  it("fails closed after invalid empty assistant retries are exhausted for non-openai providers", async () => {
+    runEmbeddedAttemptMock.mockResolvedValue(
+      makeAttempt({
+        lastAssistant: buildAssistant({
+          api: "anthropic",
+          provider: "anthropic",
+          content: [],
+        }),
+      }),
+    );
+
+    const result = await runTurn({
+      config: makeConfig({
+        provider: "anthropic",
+        api: "anthropic",
+        incompleteRunMaxSilentRetries: 1,
+      }),
+      provider: "anthropic",
+      runId: nextRunId("empty-shell-exhausted"),
+    });
+
+    expect(runEmbeddedAttemptMock).toHaveBeenCalledTimes(2);
+    expect(result.payloads?.[0]).toMatchObject({
+      isError: true,
+      text: expect.stringContaining("no deliverable payload"),
+    });
   });
 });

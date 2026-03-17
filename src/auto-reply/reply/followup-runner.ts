@@ -3,6 +3,10 @@ import { resolveRunModelFallbacksOverride } from "../../agents/agent-scope.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
+import {
+  buildNoDeliverablePayloadErrorMessage,
+  hasMessagingToolDeliveryEvidence,
+} from "../../agents/empty-assistant-contract.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import type { SessionEntry } from "../../config/sessions.js";
@@ -127,6 +131,20 @@ export function createFollowupRunner(params: {
         await opts.onBlockReply(payload);
       }
     }
+  };
+
+  const emitNoDeliverableFailure = async (queued: FollowupRun) => {
+    const message = buildNoDeliverablePayloadErrorMessage("followup agent run");
+    defaultRuntime.error?.(message);
+    await sendFollowupPayloads(
+      [
+        {
+          text: message,
+          isError: true,
+        },
+      ],
+      queued,
+    );
   };
 
   return async (queued: FollowupRun) => {
@@ -265,8 +283,18 @@ export function createFollowupRunner(params: {
         });
       }
 
+      const hadMessagingToolDelivery = hasMessagingToolDeliveryEvidence({
+        didSendViaMessagingTool: runResult.didSendViaMessagingTool,
+        messagingToolSentTexts: runResult.messagingToolSentTexts,
+        messagingToolSentMediaUrls: runResult.messagingToolSentMediaUrls,
+        messagingToolSentTargets: runResult.messagingToolSentTargets,
+      });
       const payloadArray = runResult.payloads ?? [];
       if (payloadArray.length === 0) {
+        if (hadMessagingToolDelivery) {
+          return;
+        }
+        await emitNoDeliverableFailure(queued);
         return;
       }
       const sanitizedPayloads = payloadArray.flatMap((payload) => {
@@ -323,6 +351,10 @@ export function createFollowupRunner(params: {
       const finalPayloads = suppressMessagingToolReplies ? [] : mediaFilteredPayloads;
 
       if (finalPayloads.length === 0) {
+        if (hadMessagingToolDelivery) {
+          return;
+        }
+        await emitNoDeliverableFailure(queued);
         return;
       }
 

@@ -29,6 +29,11 @@ import {
   resolveContextWindowInfo,
 } from "../context-window-guard.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
+import {
+  formatEmptyAssistantRetryLimitUserMessage,
+  formatEmptyAssistantRetryLog,
+  shouldRetryEmptyAssistantShell,
+} from "../empty-assistant-contract.js";
 import { FailoverError, resolveFailoverStatus } from "../failover-error.js";
 import {
   buildIncompleteOpenAiResponsesFallbackPrompt,
@@ -1607,14 +1612,23 @@ export async function runEmbeddedPiAgent(
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
             });
 
-            if (
-              isIncompleteOpenAiResponsesRun({
-                api: model.api,
-                payloads,
-                didSendViaMessagingTool: attempt.didSendViaMessagingTool,
-                hasEmbeddedError: false,
-              })
-            ) {
+            const incompleteOpenAiResponsesRun = isIncompleteOpenAiResponsesRun({
+              api: model.api,
+              payloads,
+              didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              hasEmbeddedError: false,
+            });
+            const emptyAssistantShellRun = shouldRetryEmptyAssistantShell({
+              lastAssistant: attempt.lastAssistant,
+              payloads,
+              didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              messagingToolSentTexts: attempt.messagingToolSentTexts,
+              messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+              messagingToolSentTargets: attempt.messagingToolSentTargets,
+              hasEmbeddedError: false,
+            });
+
+            if (incompleteOpenAiResponsesRun || emptyAssistantShellRun) {
               const retryBaselineRestore = await restoreIncompleteOpenAiResponsesRetryBaseline(
                 incompleteOpenAiResponsesRetryBaseline,
               );
@@ -1624,12 +1638,19 @@ export async function runEmbeddedPiAgent(
                   ? params.prompt
                   : buildIncompleteOpenAiResponsesFallbackPrompt();
                 log.warn(
-                  formatIncompleteOpenAiResponsesRetryLog({
-                    retryAttempt: incompleteOpenAiResponsesRetryCount,
-                    maxSilentRetries: incompleteOpenAiResponsesMaxSilentRetries,
-                    restoredBaseline: retryBaselineRestore.restored,
-                    reason: retryBaselineRestore.reason,
-                  }),
+                  incompleteOpenAiResponsesRun
+                    ? formatIncompleteOpenAiResponsesRetryLog({
+                        retryAttempt: incompleteOpenAiResponsesRetryCount,
+                        maxSilentRetries: incompleteOpenAiResponsesMaxSilentRetries,
+                        restoredBaseline: retryBaselineRestore.restored,
+                        reason: retryBaselineRestore.reason,
+                      })
+                    : formatEmptyAssistantRetryLog({
+                        retryAttempt: incompleteOpenAiResponsesRetryCount,
+                        maxSilentRetries: incompleteOpenAiResponsesMaxSilentRetries,
+                        restoredBaseline: retryBaselineRestore.restored,
+                        reason: retryBaselineRestore.reason,
+                      }),
                 );
                 await sleepWithAbort(
                   OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS,
@@ -1640,14 +1661,20 @@ export async function runEmbeddedPiAgent(
 
               if (!retryBaselineRestore.restored && retryBaselineRestore.reason) {
                 log.warn(
-                  `OpenAI Responses run ended without a deliverable payload and the retry baseline could not be restored: ${retryBaselineRestore.reason}`,
+                  incompleteOpenAiResponsesRun
+                    ? `OpenAI Responses run ended without a deliverable payload and the retry baseline could not be restored: ${retryBaselineRestore.reason}`
+                    : `Assistant run ended with no deliverable payload and the retry baseline could not be restored: ${retryBaselineRestore.reason}`,
                 );
               }
 
-              const finalText = formatIncompleteOpenAiResponsesUserMessage(
-                incompleteOpenAiResponsesRetryCount,
-                incompleteOpenAiResponsesMaxSilentRetries,
-              );
+              const finalText = incompleteOpenAiResponsesRun
+                ? formatIncompleteOpenAiResponsesUserMessage(
+                    incompleteOpenAiResponsesRetryCount,
+                    incompleteOpenAiResponsesMaxSilentRetries,
+                  )
+                : formatEmptyAssistantRetryLimitUserMessage(
+                    incompleteOpenAiResponsesMaxSilentRetries,
+                  );
               return returnManagedResult({
                 payloads: [
                   {
@@ -1662,8 +1689,9 @@ export async function runEmbeddedPiAgent(
                   systemPromptReport: attempt.systemPromptReport,
                   error: {
                     kind: "retry_limit",
-                    message:
-                      "OpenAI Responses run exhausted incomplete-response retries without a deliverable payload.",
+                    message: incompleteOpenAiResponsesRun
+                      ? "OpenAI Responses run exhausted incomplete-response retries without a deliverable payload."
+                      : "Assistant run exhausted empty-assistant retries without a deliverable payload.",
                   },
                 },
                 didSendViaMessagingTool: attempt.didSendViaMessagingTool,

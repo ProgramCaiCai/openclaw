@@ -6,11 +6,14 @@ import {
   type SessionEntry,
 } from "../config/sessions.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
+import { hasDeliverablePayload } from "./empty-assistant-contract.js";
 import { DEFAULT_EMBEDDED_PI_INCOMPLETE_RUN_MAX_SILENT_RETRIES } from "./pi-project-settings.js";
 import { acquireSessionWriteLock } from "./session-write-lock.js";
 
 const INCOMPLETE_OPENAI_RESPONSES_FALLBACK_PROMPT = "continue";
 const OPENAI_RESPONSES_APIS = new Set(["openai-responses", "openai-codex-responses"]);
+
+export { hasDeliverablePayload } from "./empty-assistant-contract.js";
 
 export const OPENAI_RESPONSES_INCOMPLETE_RUN_RETRY_DELAY_MS = 2_500;
 
@@ -150,27 +153,6 @@ export async function restoreIncompleteOpenAiResponsesRetryBaseline(
 
 export function buildIncompleteOpenAiResponsesFallbackPrompt(): string {
   return INCOMPLETE_OPENAI_RESPONSES_FALLBACK_PROMPT;
-}
-
-export function hasDeliverablePayload(
-  payloads:
-    | Array<{
-        text?: string;
-        mediaUrl?: string;
-        mediaUrls?: string[];
-        channelData?: Record<string, unknown>;
-      }>
-    | undefined,
-): boolean {
-  return (
-    payloads?.some(
-      (payload) =>
-        Boolean(payload.text?.trim()) ||
-        Boolean(payload.mediaUrl?.trim()) ||
-        (payload.mediaUrls?.length ?? 0) > 0 ||
-        Object.keys(payload.channelData ?? {}).length > 0,
-    ) ?? false
-  );
 }
 
 export function isIncompleteOpenAiResponsesRun(params: {
