@@ -224,10 +224,13 @@ describe("sessions_spawn tool", () => {
     expect(hoisted.spawnSubagentDirectMock).not.toHaveBeenCalled();
   });
 
-  it('rejects streamTo when runtime is not "acp"', async () => {
+  it('still rejects manually provided streamTo when runtime is not "acp"', async () => {
     const tool = createSessionsSpawnTool({
-      agentSessionKey: "agent:main:main",
+      agentSessionKey: "agent:main:subagent:child",
     });
+
+    const schema = tool.parameters as { properties?: Record<string, unknown> };
+    expect(schema.properties?.streamTo).toBeUndefined();
 
     const result = await tool.execute("call-3b", {
       runtime: "subagent",

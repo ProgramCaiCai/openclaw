@@ -99,6 +99,25 @@ describe("sessions tools", () => {
     expect(schemaProp("subagents", "recentMinutes").type).toBe("number");
   });
 
+  it("hides ACP-only streamTo from sessions_spawn schema in subagent sessions", () => {
+    const mainTool = createOpenClawTools({ agentSessionKey: "agent:main:main" }).find(
+      (candidate) => candidate.name === "sessions_spawn",
+    );
+    const subagentTool = createOpenClawTools({
+      agentSessionKey: "agent:main:subagent:child",
+    }).find((candidate) => candidate.name === "sessions_spawn");
+
+    expect(mainTool).toBeDefined();
+    expect(subagentTool).toBeDefined();
+
+    const mainSchema = mainTool?.parameters as { properties?: Record<string, unknown> };
+    const subagentSchema = subagentTool?.parameters as { properties?: Record<string, unknown> };
+
+    expect(mainSchema.properties?.streamTo).toMatchObject({ type: "string" });
+    expect(subagentSchema.properties?.streamTo).toBeUndefined();
+    expect(subagentSchema.properties?.runtime).toMatchObject({ type: "string" });
+  });
+
   it("sessions_list filters kinds and includes messages", async () => {
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string };

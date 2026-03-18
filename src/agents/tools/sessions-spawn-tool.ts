@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { isSubagentSessionKey } from "../../sessions/session-key-utils.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { ACP_SPAWN_MODES, ACP_SPAWN_STREAM_TARGETS, spawnAcpDirect } from "../acp-spawn.js";
 import { optionalStringEnum } from "../schema/typebox.js";
@@ -20,50 +21,55 @@ const UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS = [
   "reply_to",
 ] as const;
 
-const SessionsSpawnToolSchema = Type.Object({
-  task: Type.String(),
-  label: Type.Optional(Type.String()),
-  runtime: optionalStringEnum(SESSIONS_SPAWN_RUNTIMES),
-  agentId: Type.Optional(Type.String()),
-  resumeSessionId: Type.Optional(
-    Type.String({
-      description:
-        'Resume an existing agent session by its ID (e.g. a Codex session UUID from ~/.codex/sessions/). Requires runtime="acp". The agent replays conversation history via session/load instead of starting fresh.',
-    }),
-  ),
-  model: Type.Optional(Type.String()),
-  thinking: Type.Optional(Type.String()),
-  cwd: Type.Optional(Type.String()),
-  runTimeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
-  // Back-compat: older callers used timeoutSeconds for this tool.
-  timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
-  thread: Type.Optional(Type.Boolean()),
-  mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
-  cleanup: optionalStringEnum(["delete", "keep"] as const),
-  sandbox: optionalStringEnum(SESSIONS_SPAWN_SANDBOX_MODES),
-  streamTo: optionalStringEnum(ACP_SPAWN_STREAM_TARGETS),
-
-  // Inline attachments (snapshot-by-value).
-  // NOTE: Attachment contents are redacted from transcript persistence by sanitizeToolCallInputs.
-  attachments: Type.Optional(
-    Type.Array(
-      Type.Object({
-        name: Type.String(),
-        content: Type.String(),
-        encoding: Type.Optional(optionalStringEnum(["utf8", "base64"] as const)),
-        mimeType: Type.Optional(Type.String()),
+function createSessionsSpawnToolSchema(exposeStreamTo: boolean) {
+  return Type.Object({
+    task: Type.String(),
+    label: Type.Optional(Type.String()),
+    runtime: optionalStringEnum(SESSIONS_SPAWN_RUNTIMES),
+    agentId: Type.Optional(Type.String()),
+    resumeSessionId: Type.Optional(
+      Type.String({
+        description:
+          'Resume an existing agent session by its ID (e.g. a Codex session UUID from ~/.codex/sessions/). Requires runtime="acp". The agent replays conversation history via session/load instead of starting fresh.',
       }),
-      { maxItems: 50 },
     ),
-  ),
-  attachAs: Type.Optional(
-    Type.Object({
-      // Where the spawned agent should look for attachments.
-      // Kept as a hint; implementation materializes into the child workspace.
-      mountPath: Type.Optional(Type.String()),
-    }),
-  ),
-});
+    model: Type.Optional(Type.String()),
+    thinking: Type.Optional(Type.String()),
+    cwd: Type.Optional(Type.String()),
+    runTimeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
+    // Back-compat: older callers used timeoutSeconds for this tool.
+    timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
+    thread: Type.Optional(Type.Boolean()),
+    mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
+    cleanup: optionalStringEnum(["delete", "keep"] as const),
+    sandbox: optionalStringEnum(SESSIONS_SPAWN_SANDBOX_MODES),
+    ...(exposeStreamTo ? { streamTo: optionalStringEnum(ACP_SPAWN_STREAM_TARGETS) } : {}),
+
+    // Inline attachments (snapshot-by-value).
+    // NOTE: Attachment contents are redacted from transcript persistence by sanitizeToolCallInputs.
+    attachments: Type.Optional(
+      Type.Array(
+        Type.Object({
+          name: Type.String(),
+          content: Type.String(),
+          encoding: Type.Optional(optionalStringEnum(["utf8", "base64"] as const)),
+          mimeType: Type.Optional(Type.String()),
+        }),
+        { maxItems: 50 },
+      ),
+    ),
+    attachAs: Type.Optional(
+      Type.Object({
+        // Where the spawned agent should look for attachments.
+        // Kept as a hint; implementation materializes into the child workspace.
+        mountPath: Type.Optional(Type.String()),
+      }),
+    ),
+  });
+}
+
+const SessionsSpawnToolSchema = createSessionsSpawnToolSchema(true);
+const SubagentSessionsSpawnToolSchema = createSessionsSpawnToolSchema(false);
 
 export function createSessionsSpawnTool(
   opts?: {
@@ -82,7 +88,9 @@ export function createSessionsSpawnTool(
     name: "sessions_spawn",
     description:
       'Spawn an isolated session (runtime="subagent" or runtime="acp"). mode="run" is one-shot and mode="session" is persistent/thread-bound. Subagents inherit the parent workspace directory automatically.',
-    parameters: SessionsSpawnToolSchema,
+    parameters: isSubagentSessionKey(opts?.agentSessionKey)
+      ? SubagentSessionsSpawnToolSchema
+      : SessionsSpawnToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const unsupportedParam = UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS.find((key) =>
