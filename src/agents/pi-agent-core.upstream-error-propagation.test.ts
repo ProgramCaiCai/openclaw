@@ -1,4 +1,5 @@
 import { Agent } from "@mariozechner/pi-agent-core";
+import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 
 function buildAssistantMessage(params?: {
@@ -53,20 +54,22 @@ describe("pi-agent-core upstream error propagation", () => {
     });
 
     const agent = new Agent({
-      streamFn: async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield {
+      streamFn: async () => {
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          stream.push({
             type: "start" as const,
             partial: buildAssistantMessage(),
-          };
-          yield {
+          });
+          stream.push({
             type: "error" as const,
             reason: "error" as const,
             error: providerError,
-          };
-        },
-        result: async () => providerError,
-      }),
+          });
+          stream.end(providerError);
+        });
+        return stream;
+      },
     });
 
     await expect(agent.prompt("hi")).rejects.toThrow("503 service_unavailable");

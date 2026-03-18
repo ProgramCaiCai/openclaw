@@ -28,6 +28,8 @@ const hoisted = vi.hoisted(() => {
   const resolveSandboxContextMock = vi.fn();
   const subscribeEmbeddedPiSessionMock = vi.fn();
   const acquireSessionWriteLockMock = vi.fn();
+  const createOpenAIResponsesStreamFnMock = vi.fn();
+  const responsesStreamFn = vi.fn();
   const sessionManager = {
     getLeafEntry: vi.fn(() => null),
     branch: vi.fn(),
@@ -42,6 +44,8 @@ const hoisted = vi.hoisted(() => {
     resolveSandboxContextMock,
     subscribeEmbeddedPiSessionMock,
     acquireSessionWriteLockMock,
+    createOpenAIResponsesStreamFnMock,
+    responsesStreamFn,
     sessionManager,
   };
 });
@@ -195,6 +199,11 @@ vi.mock("../../openai-ws-stream.js", () => ({
   releaseWsSession: () => {},
 }));
 
+vi.mock("../../openai-responses-stream.js", () => ({
+  createOpenAIResponsesStreamFn: (...args: unknown[]) =>
+    hoisted.createOpenAIResponsesStreamFnMock(...args),
+}));
+
 vi.mock("../../anthropic-payload-log.js", () => ({
   createAnthropicPayloadLogger: () => undefined,
 }));
@@ -269,6 +278,8 @@ function resetEmbeddedAttemptHarness(
   hoisted.acquireSessionWriteLockMock.mockReset().mockResolvedValue({
     release: async () => {},
   });
+  hoisted.responsesStreamFn.mockReset();
+  hoisted.createOpenAIResponsesStreamFnMock.mockReset().mockReturnValue(hoisted.responsesStreamFn);
   hoisted.sessionManager.getLeafEntry.mockReset().mockReturnValue(null);
   hoisted.sessionManager.branch.mockReset();
   hoisted.sessionManager.resetLeaf.mockReset();
@@ -354,6 +365,80 @@ const cacheTtlEligibleModel = {
   contextWindow: 8192,
   input: ["text"],
 } as unknown as Model<Api>;
+
+const customOpenAIResponsesModel = {
+  api: "openai-responses",
+  provider: "custom-openai",
+  baseUrl: "https://example.com/v1",
+  compat: {},
+  contextWindow: 128000,
+  maxTokens: 16_384,
+  reasoning: true,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  id: "gpt-5.4",
+  name: "gpt-5.4",
+} as unknown as Model<Api>;
+
+describe("runEmbeddedAttempt responses transport routing", () => {
+  const tempPaths: string[] = [];
+
+  beforeEach(() => {
+    resetEmbeddedAttemptHarness({
+      subscribeImpl: createSubscriptionMock,
+    });
+  });
+
+  afterEach(async () => {
+    await cleanupTempPaths(tempPaths);
+  });
+
+  it("routes custom openai-responses models through the canonical responses transport", async () => {
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-responses-routing-"));
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-responses-agent-"));
+    const sessionFile = path.join(workspaceDir, "session.jsonl");
+    tempPaths.push(workspaceDir, agentDir);
+    await fs.writeFile(sessionFile, "", "utf8");
+
+    let createdSession: MutableSession | undefined;
+    hoisted.createAgentSessionMock.mockImplementation(async () => {
+      createdSession = createDefaultEmbeddedSession();
+      return { session: createdSession };
+    });
+
+    const result = await runEmbeddedAttempt({
+      sessionId: "embedded-session",
+      sessionKey: "agent:main:responses-routing",
+      sessionFile,
+      workspaceDir,
+      agentDir,
+      config: {},
+      prompt: "hello",
+      timeoutMs: 10_000,
+      runId: "run-responses-routing",
+      provider: "custom-openai",
+      modelId: "gpt-5.4",
+      model: customOpenAIResponsesModel,
+      authStorage: {
+        getApiKey: async () => undefined,
+      } as unknown as AuthStorage,
+      modelRegistry: {} as ModelRegistry,
+      thinkLevel: "off",
+      senderIsOwner: true,
+      disableMessageTool: true,
+    });
+
+    expect(result.promptError).toBeNull();
+    expect(hoisted.createOpenAIResponsesStreamFnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "embedded-session",
+        signal: expect.any(AbortSignal),
+        wsApiKey: undefined,
+      }),
+    );
+    expect(typeof createdSession?.agent.streamFn).toBe("function");
+  });
+});
 
 describe("runEmbeddedAttempt sessions_spawn workspace inheritance", () => {
   const tempPaths: string[] = [];

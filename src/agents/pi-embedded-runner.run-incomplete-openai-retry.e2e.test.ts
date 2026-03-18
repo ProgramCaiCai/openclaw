@@ -5,6 +5,7 @@ import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveSessionTranscriptPath } from "../config/sessions.js";
+import type { ModelApi } from "../config/types.models.js";
 import { onAgentEvent } from "../infra/agent-events.js";
 import type { EmbeddedRunAttemptResult } from "./pi-embedded-runner/run/types.js";
 
@@ -114,7 +115,7 @@ function makeConfig(
     | {
         incompleteRunMaxSilentRetries?: number;
         provider?: string;
-        api?: string;
+        api?: ModelApi;
       },
 ): OpenClawConfig {
   const params =
@@ -488,7 +489,7 @@ describe("runEmbeddedPiAgent empty assistant contract", () => {
     const result = await runTurn({
       config: makeConfig({
         provider: "anthropic",
-        api: "anthropic",
+        api: "anthropic-messages",
         incompleteRunMaxSilentRetries: 1,
       }),
       provider: "anthropic",
@@ -523,7 +524,7 @@ describe("runEmbeddedPiAgent empty assistant contract", () => {
     const result = await runTurn({
       config: makeConfig({
         provider: "anthropic",
-        api: "anthropic",
+        api: "anthropic-messages",
         incompleteRunMaxSilentRetries: 1,
       }),
       provider: "anthropic",

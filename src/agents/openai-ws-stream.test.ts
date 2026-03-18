@@ -180,27 +180,30 @@ vi.mock("./openai-ws-connection.js", async (importOriginal) => {
 // Mock pi-ai
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Track if streamSimple (HTTP fallback) was called
-const streamSimpleCalls: Array<{ model: unknown; context: unknown }> = [];
+// Track if strict HTTP fallback was called
+const httpFallbackCalls: Array<{ model: unknown; context: unknown }> = [];
 
 vi.mock("@mariozechner/pi-ai", async (importOriginal) => {
   const original = await importOriginal<typeof import("@mariozechner/pi-ai")>();
 
-  const mockStreamSimple = vi.fn((model: unknown, context: unknown) => {
-    streamSimpleCalls.push({ model, context });
-    // Return a minimal AssistantMessageEventStream-like async iterable
-    const stream = original.createAssistantMessageEventStream();
-    queueMicrotask(() => {
-      const msg = makeFakeAssistantMessage("http fallback response");
-      stream.push({ type: "done", reason: "stop", message: msg });
-      stream.end();
-    });
-    return stream;
-  });
-
   return {
     ...original,
-    streamSimple: mockStreamSimple,
+  };
+});
+
+vi.mock("./openai-responses-http-stream.runtime.js", async () => {
+  const piAi = await import("@mariozechner/pi-ai");
+  return {
+    createOpenAIResponsesHttpStreamFn: vi.fn(() => (model: unknown, context: unknown) => {
+      httpFallbackCalls.push({ model, context });
+      const stream = piAi.createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const msg = makeFakeAssistantMessage("http fallback response");
+        stream.push({ type: "done", reason: "stop", message: msg });
+        stream.end();
+      });
+      return stream;
+    }),
   };
 });
 
@@ -721,7 +724,7 @@ describe("createOpenAIWebSocketStreamFn", () => {
 
   beforeEach(() => {
     MockManager.reset();
-    streamSimpleCalls.length = 0;
+    httpFallbackCalls.length = 0;
   });
 
   afterEach(() => {
@@ -739,6 +742,7 @@ describe("createOpenAIWebSocketStreamFn", () => {
     releaseWsSession("sess-tools");
     releaseWsSession("sess-store-default");
     releaseWsSession("sess-store-compat");
+    releaseWsSession("sess-incomplete");
     releaseWsSession("sess-max-tokens-zero");
   });
 
@@ -944,14 +948,14 @@ describe("createOpenAIWebSocketStreamFn", () => {
         contextStub as Parameters<typeof streamFn>[1],
       );
 
-      // Consume — should fall back to HTTP (streamSimple mock).
+      // Consume — should fall back to strict HTTP.
       const messages: unknown[] = [];
       for await (const ev of await resolveStream(stream)) {
         messages.push(ev);
       }
 
-      // streamSimple was called as part of HTTP fallback
-      expect(streamSimpleCalls.length).toBeGreaterThanOrEqual(1);
+      // strict HTTP was called as part of the fallback
+      expect(httpFallbackCalls.length).toBeGreaterThanOrEqual(1);
 
       // manager.close() must be called to cancel background reconnect attempts
       expect(MockManager.lastInstance!.closeCallCount).toBeGreaterThanOrEqual(1);
@@ -1096,9 +1100,9 @@ describe("createOpenAIWebSocketStreamFn", () => {
     });
     expect(hasWsSession(sessionId)).toBe(true);
 
-    // 2. Arm send failure and record pre-call streamSimpleCalls count
+    // 2. Arm send failure and record pre-call fallback count
     MockManager.lastInstance!.sendShouldFail = true;
-    const callsBefore = streamSimpleCalls.length;
+    const callsBefore = httpFallbackCalls.length;
 
     // 3. Second call: send throws → must fall back to HTTP and clear registry
     const stream2 = streamFn(
@@ -1112,7 +1116,7 @@ describe("createOpenAIWebSocketStreamFn", () => {
     // Registry cleared after send failure
     expect(hasWsSession(sessionId)).toBe(false);
     // HTTP fallback invoked
-    expect(streamSimpleCalls.length).toBeGreaterThan(callsBefore);
+    expect(httpFallbackCalls.length).toBeGreaterThan(callsBefore);
   });
 
   it("forwards temperature and maxTokens to response.create", async () => {
@@ -1237,15 +1241,14 @@ describe("createOpenAIWebSocketStreamFn", () => {
     expect(sent.tool_choice).toBe("auto");
   });
 
-  it("rejects promise when WebSocket drops mid-request", async () => {
+  it("falls back to strict HTTP when WebSocket drops mid-request in auto mode", async () => {
     const streamFn = createOpenAIWebSocketStreamFn("sk-test", "sess-drop");
     const stream = streamFn(
       modelStub as Parameters<typeof streamFn>[0],
       contextStub as Parameters<typeof streamFn>[1],
       {} as Parameters<typeof streamFn>[2],
     );
-    // Let the send go through, then simulate connection drop before response.completed
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       queueMicrotask(async () => {
         try {
           await new Promise((r) => setImmediate(r));
@@ -1255,15 +1258,56 @@ describe("createOpenAIWebSocketStreamFn", () => {
           for await (const ev of await resolveStream(stream)) {
             events.push(ev);
           }
-          // Should have gotten an error event, not hung forever
-          const hasError = events.some(
-            (e) => typeof e === "object" && e !== null && (e as { type: string }).type === "error",
-          );
-          expect(hasError).toBe(true);
+          expect(httpFallbackCalls.length).toBeGreaterThanOrEqual(1);
+          const doneEvent = events.find((event) => (event as { type?: string }).type === "done") as
+            | {
+                type: string;
+                message: { content: Array<{ text: string }> };
+              }
+            | undefined;
+          expect(doneEvent?.message.content[0]?.text).toBe("http fallback response");
           resolve();
-        } catch {
-          // The error propagation is also acceptable — promise rejected
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  });
+
+  it("fails closed on response.completed with status=incomplete", async () => {
+    const streamFn = createOpenAIWebSocketStreamFn("sk-test", "sess-incomplete");
+    const stream = streamFn(
+      modelStub as Parameters<typeof streamFn>[0],
+      contextStub as Parameters<typeof streamFn>[1],
+      { transport: "websocket" } as Parameters<typeof streamFn>[2],
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      queueMicrotask(async () => {
+        try {
+          await new Promise((r) => setImmediate(r));
+          const incompleteResponse = makeResponseObject("resp_incomplete", "partial");
+          incompleteResponse.status = "incomplete";
+          MockManager.lastInstance!.simulateEvent({
+            type: "response.completed",
+            response: incompleteResponse,
+          });
+          const events: unknown[] = [];
+          for await (const event of await resolveStream(stream)) {
+            events.push(event);
+          }
+          const errorEvent = events.at(-1) as
+            | {
+                type: string;
+                error?: { errorMessage?: string };
+              }
+            | undefined;
+          expect(errorEvent?.type).toBe("error");
+          expect(errorEvent?.error?.errorMessage).toContain("response.completed:incomplete");
+          expect(httpFallbackCalls.length).toBe(0);
           resolve();
+        } catch (error) {
+          reject(error);
         }
       });
     });
